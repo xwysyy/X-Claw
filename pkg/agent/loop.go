@@ -45,6 +45,7 @@ type processOptions struct {
 	SessionKey      string // Session identifier for history/context
 	Channel         string // Target channel for tool execution
 	ChatID          string // Target chat ID for tool execution
+	SenderID        string // Message sender identifier for tool execution
 	UserMessage     string // User message content (may include prefix)
 	DefaultResponse string // Response when LLM returns empty
 	EnableSummary   bool   // Whether to trigger summarization
@@ -132,6 +133,12 @@ func registerSharedTools(
 			return nil
 		})
 		agent.Tools.Register(messageTool)
+
+		// Feishu calendar tool
+		if strings.TrimSpace(cfg.Channels.Feishu.AppID) != "" &&
+			strings.TrimSpace(cfg.Channels.Feishu.AppSecret) != "" {
+			agent.Tools.Register(tools.NewFeishuCalendarTool(cfg.Channels.Feishu))
+		}
 
 		// Skill discovery and installation tools
 		registryMgr := skills.NewRegistryManagerFromConfig(skills.RegistryConfig{
@@ -384,6 +391,7 @@ func (al *AgentLoop) processMessage(ctx context.Context, msg bus.InboundMessage)
 		SessionKey:      sessionKey,
 		Channel:         msg.Channel,
 		ChatID:          msg.ChatID,
+		SenderID:        msg.SenderID,
 		UserMessage:     msg.Content,
 		DefaultResponse: defaultResponse,
 		EnableSummary:   true,
@@ -749,6 +757,7 @@ func (al *AgentLoop) runLLMIteration(
 				tc.Arguments,
 				opts.Channel,
 				opts.ChatID,
+				opts.SenderID,
 				asyncCallback,
 			)
 
