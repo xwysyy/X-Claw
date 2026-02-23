@@ -61,9 +61,6 @@ const defaultResponse = "I've completed processing but have no response to give.
 func NewAgentLoop(cfg *config.Config, msgBus *bus.MessageBus, provider providers.LLMProvider) *AgentLoop {
 	registry := NewAgentRegistry(cfg, provider)
 
-	// Register shared tools to all agents
-	registerSharedTools(cfg, msgBus, registry, provider)
-
 	// Set up shared fallback chain
 	cooldown := providers.NewCooldownTracker()
 	fallbackChain := providers.NewFallbackChain(cooldown)
@@ -75,7 +72,7 @@ func NewAgentLoop(cfg *config.Config, msgBus *bus.MessageBus, provider providers
 		stateManager = state.NewManager(defaultAgent.Workspace)
 	}
 
-	return &AgentLoop{
+	al := &AgentLoop{
 		bus:         msgBus,
 		cfg:         cfg,
 		registry:    registry,
@@ -83,6 +80,11 @@ func NewAgentLoop(cfg *config.Config, msgBus *bus.MessageBus, provider providers
 		summarizing: sync.Map{},
 		fallback:    fallbackChain,
 	}
+
+	// Register shared tools to all agents.
+	registerSharedTools(cfg, msgBus, registry, provider, al)
+
+	return al
 }
 
 // registerSharedTools registers tools that are shared across all agents (web, message, spawn).
@@ -91,6 +93,7 @@ func registerSharedTools(
 	msgBus *bus.MessageBus,
 	registry *AgentRegistry,
 	provider providers.LLMProvider,
+	sessionsExecutor tools.SessionsSendExecutor,
 ) {
 	for _, agentID := range registry.ListAgentIDs() {
 		agent, ok := registry.GetAgent(agentID)
@@ -147,15 +150,30 @@ func registerSharedTools(
 		agent.Tools.Register(tools.NewFindSkillsTool(registryMgr, searchCache))
 		agent.Tools.Register(tools.NewInstallSkillTool(registryMgr, agent.Workspace))
 
-		// Spawn tool with allowlist checker
+		// Spawn/session tools with allowlist checker.
 		subagentManager := tools.NewSubagentManager(provider, agent.Model, agent.Workspace, msgBus)
 		subagentManager.SetLLMOptions(agent.MaxTokens, agent.Temperature)
 		spawnTool := tools.NewSpawnTool(subagentManager)
+		sessionsSpawnTool := tools.NewSessionsSpawnTool(subagentManager)
 		currentAgentID := agentID
-		spawnTool.SetAllowlistChecker(func(targetAgentID string) bool {
+		allowlist := func(targetAgentID string) bool {
 			return registry.CanSpawnSubagent(currentAgentID, targetAgentID)
-		})
+		}
+		spawnTool.SetAllowlistChecker(allowlist)
+		sessionsSpawnTool.SetAllowlistChecker(allowlist)
 		agent.Tools.Register(spawnTool)
+		agent.Tools.Register(sessionsSpawnTool)
+
+		if sessionsExecutor != nil {
+			agent.Tools.Register(tools.NewSessionsSendTool(sessionsExecutor))
+		} else {
+			logger.WarnCF("agent", "sessions_send tool disabled: executor unavailable", map[string]any{
+				"agent_id": currentAgentID,
+			})
+		}
+
+		// Update context builder with the complete tools registry
+		agent.ContextBuilder.SetToolsRegistry(agent.Tools)
 	}
 }
 
@@ -319,6 +337,45 @@ func (al *AgentLoop) ProcessDirectWithChannel(
 	}
 
 	return al.processMessage(ctx, msg)
+}
+
+// ProcessSessionMessage injects a message into a specific session key directly.
+// Unlike ProcessDirectWithChannel, this bypasses route-derived session rewriting.
+func (al *AgentLoop) ProcessSessionMessage(
+	ctx context.Context,
+	content, sessionKey, channel, chatID string,
+) (string, error) {
+	key := strings.TrimSpace(sessionKey)
+	if key == "" {
+		return "", fmt.Errorf("sessionKey is required")
+	}
+
+	targetAgent := al.registry.GetDefaultAgent()
+	if parsed := routing.ParseAgentSessionKey(strings.ToLower(key)); parsed != nil {
+		if agent, ok := al.registry.GetAgent(parsed.AgentID); ok {
+			targetAgent = agent
+		}
+	}
+	if targetAgent == nil {
+		return "", fmt.Errorf("no agent available for session %q", key)
+	}
+
+	if strings.TrimSpace(channel) == "" {
+		channel = "system"
+	}
+	if strings.TrimSpace(chatID) == "" {
+		chatID = "sessions-send"
+	}
+
+	return al.runAgentLoop(ctx, targetAgent, processOptions{
+		SessionKey:      key,
+		Channel:         channel,
+		ChatID:          chatID,
+		UserMessage:     content,
+		DefaultResponse: "I've completed processing but have no response to give.",
+		EnableSummary:   true,
+		SendResponse:    false,
+	})
 }
 
 // ProcessHeartbeat processes a heartbeat request without session history.
@@ -940,6 +997,16 @@ func (al *AgentLoop) updateToolContexts(agent *AgentInstance, channel, chatID st
 		}
 	}
 	if tool, ok := agent.Tools.Get("subagent"); ok {
+		if st, ok := tool.(tools.ContextualTool); ok {
+			st.SetContext(channel, chatID)
+		}
+	}
+	if tool, ok := agent.Tools.Get("sessions_send"); ok {
+		if st, ok := tool.(tools.ContextualTool); ok {
+			st.SetContext(channel, chatID)
+		}
+	}
+	if tool, ok := agent.Tools.Get("sessions_spawn"); ok {
 		if st, ok := tool.(tools.ContextualTool); ok {
 			st.SetContext(channel, chatID)
 		}
