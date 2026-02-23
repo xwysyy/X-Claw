@@ -126,7 +126,19 @@ func (c *FeishuChannel) Send(ctx context.Context, msg bus.OutboundMessage) error
 	}
 
 	if !resp.Success() {
-		return fmt.Errorf("feishu api error (code=%d msg=%s): %w", resp.Code, resp.Msg, channels.ErrTemporary)
+		fields := map[string]any{
+			"chat_id": msg.ChatID,
+			"code":    resp.Code,
+			"msg":     resp.Msg,
+		}
+		if resp.Code == 99991672 {
+			fields["hint"] = "missing app scopes, enable im:message:send_as_bot (or equivalent) and publish the app"
+		}
+		logger.ErrorCF("feishu", "Feishu message send rejected", fields)
+		if resp.Code == 99991672 {
+			return fmt.Errorf("feishu api error: code=%d msg=%s: %w", resp.Code, resp.Msg, channels.ErrSendFailed)
+		}
+		return fmt.Errorf("feishu api error: code=%d msg=%s: %w", resp.Code, resp.Msg, channels.ErrTemporary)
 	}
 
 	logger.DebugCF("feishu", "Feishu message sent", map[string]any{

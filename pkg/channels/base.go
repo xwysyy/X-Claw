@@ -240,10 +240,25 @@ func (c *BaseChannel) HandleMessage(
 	}
 	if sender.CanonicalID != "" || sender.PlatformID != "" {
 		if !c.IsAllowedSender(sender) {
+			logger.WarnCF("channels", "Inbound message blocked by allow_from", map[string]any{
+				"channel":          c.name,
+				"sender_id":        senderID,
+				"sender_canonical": sender.CanonicalID,
+				"chat_id":          chatID,
+				"message_id":       messageID,
+				"allow_from_count": len(c.allowList),
+			})
 			return
 		}
 	} else {
 		if !c.IsAllowed(senderID) {
+			logger.WarnCF("channels", "Inbound message blocked by allow_from", map[string]any{
+				"channel":          c.name,
+				"sender_id":        senderID,
+				"chat_id":          chatID,
+				"message_id":       messageID,
+				"allow_from_count": len(c.allowList),
+			})
 			return
 		}
 	}
