@@ -100,42 +100,64 @@ func (c *FeishuChannel) Send(ctx context.Context, msg bus.OutboundMessage) error
 		return fmt.Errorf("chat ID is empty")
 	}
 
-	payload, err := json.Marshal(map[string]string{"text": msg.Content})
-	if err != nil {
-		return fmt.Errorf("failed to marshal feishu content: %w", err)
+	content := strings.TrimSpace(msg.Content)
+	if content == "" {
+		return nil
 	}
 
-	req := larkim.NewCreateMessageReqBuilder().
-		ReceiveIdType(larkim.ReceiveIdTypeChatId).
-		Body(larkim.NewCreateMessageReqBodyBuilder().
-			ReceiveId(msg.ChatID).
-			MsgType(larkim.MsgTypeText).
-			Content(string(payload)).
-			Uuid(fmt.Sprintf("picoclaw-%d", time.Now().UnixNano())).
-			Build()).
-		Build()
-
-	resp, err := c.client.Im.V1.Message.Create(ctx, req)
-	if err != nil {
-		return fmt.Errorf("failed to send feishu message: %w", err)
+	// Send as "post" with markdown to match Feishu's rich rendering behavior.
+	// Inspired by: ref/clawdbot-feishu/src/send.ts (tag: "md")
+	content = normalizeFeishuMarkdownLinks(content)
+	chunks := utils.SplitMessage(content, feishuPostChunkLimit)
+	if len(chunks) == 0 {
+		return nil
 	}
 
-	if !resp.Success() {
-		fields := map[string]any{
+	sendID := time.Now().UnixNano()
+	for idx, chunk := range chunks {
+		chunk = strings.TrimSpace(chunk)
+		if chunk == "" {
+			continue
+		}
+
+		postJSON, err := buildFeishuPostMarkdownContent(chunk)
+		if err != nil {
+			return err
+		}
+
+		req := larkim.NewCreateMessageReqBuilder().
+			ReceiveIdType(larkim.ReceiveIdTypeChatId).
+			Body(larkim.NewCreateMessageReqBodyBuilder().
+				ReceiveId(msg.ChatID).
+				MsgType("post").
+				Content(postJSON).
+				Uuid(fmt.Sprintf("picoclaw-%d-%d", sendID, idx)).
+				Build()).
+			Build()
+
+		resp, err := c.client.Im.V1.Message.Create(ctx, req)
+		if err != nil {
+			return fmt.Errorf("failed to send feishu message: %w", err)
+		}
+
+		if !resp.Success() {
+			fields := map[string]any{
+				"chat_id": msg.ChatID,
+				"code":    resp.Code,
+				"msg":     resp.Msg,
+			}
+			if resp.Code == 99991672 {
+				fields["hint"] = "missing app scopes, enable im:message:send_as_bot (or equivalent) and publish the app"
+			}
+			logger.ErrorCF("feishu", "Feishu message send rejected", fields)
+			return fmt.Errorf("feishu api error: code=%d msg=%s", resp.Code, resp.Msg)
+		}
+
+		logger.DebugCF("feishu", "Feishu message sent", map[string]any{
 			"chat_id": msg.ChatID,
-			"code":    resp.Code,
-			"msg":     resp.Msg,
-		}
-		if resp.Code == 99991672 {
-			fields["hint"] = "missing app scopes, enable im:message:send_as_bot (or equivalent) and publish the app"
-		}
-		logger.ErrorCF("feishu", "Feishu message send rejected", fields)
-		return fmt.Errorf("feishu api error: code=%d msg=%s", resp.Code, resp.Msg)
+			"chunk":   idx,
+		})
 	}
-
-	logger.DebugCF("feishu", "Feishu message sent", map[string]any{
-		"chat_id": msg.ChatID,
-	})
 
 	return nil
 }
@@ -286,16 +308,134 @@ func extractFeishuMessageContent(message *larkim.EventMessage) string {
 		return ""
 	}
 
-	if message.MessageType != nil && *message.MessageType == larkim.MsgTypeText {
+	raw := *message.Content
+	messageType := ""
+	if message.MessageType != nil {
+		messageType = strings.TrimSpace(*message.MessageType)
+	}
+
+	switch messageType {
+	case larkim.MsgTypeText:
 		var textPayload struct {
 			Text string `json:"text"`
 		}
-		if err := json.Unmarshal([]byte(*message.Content), &textPayload); err == nil {
+		if err := json.Unmarshal([]byte(raw), &textPayload); err == nil {
 			return textPayload.Text
 		}
+	case "post":
+		if extracted := extractFeishuPostContent(raw); extracted != "" {
+			return extracted
+		}
+		// Fall through: return raw JSON if we failed to parse
+	case "image":
+		return "<media:image>"
+	case "file":
+		return "<media:file>"
+	case "audio":
+		return "<media:audio>"
+	case "video", "media":
+		return "<media:video>"
+	case "sticker":
+		return "<media:sticker>"
 	}
 
-	return *message.Content
+	return raw
+}
+
+func extractFeishuPostContent(rawJSON string) string {
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(rawJSON), &payload); err != nil {
+		return ""
+	}
+
+	title, _ := payload["title"].(string)
+
+	var content any
+	if zh, ok := payload["zh_cn"].(map[string]any); ok {
+		content = zh["content"]
+	} else {
+		content = payload["content"]
+	}
+
+	lines := extractFeishuPostLines(content)
+	if len(lines) == 0 {
+		return strings.TrimSpace(title)
+	}
+
+	if strings.TrimSpace(title) != "" {
+		lines = append([]string{title}, lines...)
+	}
+	return strings.TrimSpace(strings.Join(lines, "\n"))
+}
+
+func extractFeishuPostLines(content any) []string {
+	paras, ok := content.([]any)
+	if !ok || len(paras) == 0 {
+		return nil
+	}
+
+	lines := make([]string, 0, len(paras))
+	for _, para := range paras {
+		nodes, ok := para.([]any)
+		if !ok {
+			continue
+		}
+		var sb strings.Builder
+		for _, node := range nodes {
+			obj, ok := node.(map[string]any)
+			if !ok {
+				continue
+			}
+			appendFeishuPostNodeText(&sb, obj)
+		}
+		line := strings.TrimSpace(sb.String())
+		if line != "" {
+			lines = append(lines, line)
+		}
+	}
+	return lines
+}
+
+func appendFeishuPostNodeText(sb *strings.Builder, node map[string]any) {
+	tag, _ := node["tag"].(string)
+	tag = strings.ToLower(strings.TrimSpace(tag))
+	switch tag {
+	case "text", "md":
+		if text, _ := node["text"].(string); text != "" {
+			sb.WriteString(text)
+		}
+	case "a":
+		if text, _ := node["text"].(string); text != "" {
+			sb.WriteString(text)
+			return
+		}
+		if href, _ := node["href"].(string); href != "" {
+			sb.WriteString(href)
+		}
+	case "at":
+		// Best-effort: keep something readable, actual mention expansion is not available here.
+		if name, _ := node["user_name"].(string); name != "" {
+			sb.WriteString("@")
+			sb.WriteString(name)
+			return
+		}
+		if name, _ := node["name"].(string); name != "" {
+			sb.WriteString("@")
+			sb.WriteString(name)
+			return
+		}
+		if openID, _ := node["open_id"].(string); openID != "" {
+			sb.WriteString("@")
+			sb.WriteString(openID)
+			return
+		}
+	case "img":
+		sb.WriteString("[image]")
+	default:
+		if text, _ := node["text"].(string); text != "" {
+			sb.WriteString(text)
+		}
+	}
 }
 
 func stringValue(v *string) string {

@@ -2,6 +2,7 @@ package utils
 
 import (
 	"strings"
+	"unicode/utf8"
 )
 
 // SplitMessage splits long messages into chunks, preserving code block integrity.
@@ -75,6 +76,7 @@ func SplitMessage(content string, maxLen int) []string {
 						} else {
 							msgEnd = innerLimit
 						}
+						msgEnd = clampToUTF8Boundary(content, msgEnd)
 						messages = append(messages, strings.TrimRight(content[:msgEnd], " \t\n\r")+"\n```")
 						content = strings.TrimSpace(header + "\n" + content[msgEnd:])
 						continue
@@ -93,6 +95,7 @@ func SplitMessage(content string, maxLen int) []string {
 							msgEnd = unclosedIdx
 						} else {
 							msgEnd = maxLen - 5
+							msgEnd = clampToUTF8Boundary(content, msgEnd)
 							messages = append(messages, strings.TrimRight(content[:msgEnd], " \t\n\r")+"\n```")
 							content = strings.TrimSpace(header + "\n" + content[msgEnd:])
 							continue
@@ -106,11 +109,27 @@ func SplitMessage(content string, maxLen int) []string {
 			msgEnd = effectiveLimit
 		}
 
+		msgEnd = clampToUTF8Boundary(content, msgEnd)
 		messages = append(messages, content[:msgEnd])
 		content = strings.TrimSpace(content[msgEnd:])
 	}
 
 	return messages
+}
+
+func clampToUTF8Boundary(s string, idx int) int {
+	if idx <= 0 {
+		return 0
+	}
+	if idx >= len(s) {
+		return len(s)
+	}
+
+	// Ensure idx is at a rune boundary to avoid emitting invalid UTF-8.
+	for idx > 0 && idx < len(s) && !utf8.RuneStart(s[idx]) {
+		idx--
+	}
+	return idx
 }
 
 // findLastUnclosedCodeBlock finds the last opening ``` that doesn't have a closing ```
