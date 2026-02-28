@@ -85,6 +85,7 @@ type Manager struct {
 	config        *config.Config
 	mediaStore    media.MediaStore
 	dispatchTask  *asyncTask
+	healthServer  *health.Server
 	mux           *http.ServeMux
 	httpServer    *http.Server
 	mu            sync.RWMutex
@@ -283,6 +284,7 @@ func (m *Manager) SetupHTTPServer(addr string, healthServer *health.Server) {
 
 	// Register health endpoints
 	if healthServer != nil {
+		m.healthServer = healthServer
 		healthServer.RegisterOnMux(m.mux)
 	}
 
@@ -365,6 +367,10 @@ func (m *Manager) StartAll(ctx context.Context) error {
 		}()
 	}
 
+	if m.healthServer != nil {
+		m.healthServer.SetReady(true)
+	}
+
 	logger.InfoC("channels", "All channels started")
 	return nil
 }
@@ -374,6 +380,10 @@ func (m *Manager) StopAll(ctx context.Context) error {
 	defer m.mu.Unlock()
 
 	logger.InfoC("channels", "Stopping all channels")
+
+	if m.healthServer != nil {
+		m.healthServer.SetReady(false)
+	}
 
 	// Shutdown shared HTTP server first
 	if m.httpServer != nil {
