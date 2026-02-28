@@ -315,4 +315,3 @@ func TestBaseChannelHandleMessageAllowList(t *testing.T) {
 		t.Fatalf("unexpected metadata: %+v", msg.Metadata)
 	}
 }
-

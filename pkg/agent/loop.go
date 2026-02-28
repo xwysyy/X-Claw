@@ -712,10 +712,15 @@ func (al *AgentLoop) runAgentLoop(ctx context.Context, agent *AgentInstance, opt
 		opts.ChatID,
 	)
 
-	// 3. Save user message to session
+	// 3. Set up working state for structured task tracking
+	ws := NewWorkingState(opts.UserMessage)
+	agent.ContextBuilder.SetWorkingState(ws)
+	defer agent.ContextBuilder.SetWorkingState(nil) // clean up after processing
+
+	// 4. Save user message to session
 	agent.Sessions.AddMessage(opts.SessionKey, "user", opts.UserMessage)
 
-	// 4. Run LLM iteration loop
+	// 5. Run LLM iteration loop
 	finalContent, iteration, err := al.runLLMIteration(ctx, agent, messages, opts)
 	if err != nil {
 		return "", err
@@ -814,6 +819,32 @@ func (al *AgentLoop) handleReasoning(ctx context.Context, reasoningContent, chan
 }
 
 // runLLMIteration executes the LLM call loop with tool handling.
+// toolCallSignature captures a tool call for loop detection.
+type toolCallSignature struct {
+	Name string
+	Args string
+}
+
+// detectToolCallLoop checks if any of the current tool calls have been
+// repeated with identical arguments more than the threshold within the
+// recent history. Returns the name of the looping tool, or "" if none.
+func detectToolCallLoop(recent []toolCallSignature, current []providers.ToolCall, threshold int) string {
+	for _, tc := range current {
+		argsJSON, _ := json.Marshal(tc.Arguments)
+		sig := string(argsJSON)
+		count := 0
+		for _, prev := range recent {
+			if prev.Name == tc.Name && prev.Args == sig {
+				count++
+			}
+		}
+		if count >= threshold {
+			return tc.Name
+		}
+	}
+	return ""
+}
+
 func (al *AgentLoop) runLLMIteration(
 	ctx context.Context,
 	agent *AgentInstance,
@@ -822,6 +853,8 @@ func (al *AgentLoop) runLLMIteration(
 ) (string, int, error) {
 	iteration := 0
 	var finalContent string
+	recentToolCalls := make([]toolCallSignature, 0, 32) // for loop detection
+	totalPromptTokens, totalCompletionTokens := 0, 0    // cumulative token tracking
 
 	for iteration < agent.MaxIterations {
 		iteration++
@@ -995,6 +1028,22 @@ func (al *AgentLoop) runLLMIteration(
 			return "", iteration, fmt.Errorf("LLM call failed after retries: %w", err)
 		}
 
+		// Log token usage if available
+		if response.Usage != nil {
+			logger.InfoCF("agent", "Token usage",
+				map[string]any{
+					"agent_id":          agent.ID,
+					"iteration":         iteration,
+					"model":             agent.Model,
+					"prompt_tokens":     response.Usage.PromptTokens,
+					"completion_tokens": response.Usage.CompletionTokens,
+					"total_tokens":      response.Usage.TotalTokens,
+					"session_key":       opts.SessionKey,
+				})
+			totalPromptTokens += response.Usage.PromptTokens
+			totalCompletionTokens += response.Usage.CompletionTokens
+		}
+
 		go al.handleReasoning(ctx, response.Reasoning, opts.Channel, al.targetReasoningChannelID(opts.Channel))
 
 		logger.DebugCF("agent", "LLM response",
@@ -1007,6 +1056,7 @@ func (al *AgentLoop) runLLMIteration(
 				"target_channel": al.targetReasoningChannelID(opts.Channel),
 				"channel":        opts.Channel,
 			})
+
 		// Check if no tool calls - we're done
 		if len(response.ToolCalls) == 0 {
 			finalContent = response.Content
@@ -1024,6 +1074,20 @@ func (al *AgentLoop) runLLMIteration(
 			normalizedToolCalls = append(normalizedToolCalls, providers.NormalizeToolCall(tc))
 		}
 
+		// Update working state with LLM's reasoning as next-action hint
+		if reasoning := strings.TrimSpace(response.Content); reasoning != "" {
+			agent.ContextBuilder.workingStateMu.RLock()
+			ws := agent.ContextBuilder.workingState
+			agent.ContextBuilder.workingStateMu.RUnlock()
+			if ws != nil {
+				hint := reasoning
+				if len(hint) > 200 {
+					hint = hint[:200] + "..."
+				}
+				ws.SetNextAction(hint)
+			}
+		}
+
 		// Log tool calls
 		toolNames := make([]string, 0, len(normalizedToolCalls))
 		for _, tc := range normalizedToolCalls {
@@ -1036,6 +1100,56 @@ func (al *AgentLoop) runLLMIteration(
 				"count":     len(normalizedToolCalls),
 				"iteration": iteration,
 			})
+
+		// Loop detection: check if the same tool+args have been called too many times
+		if loopingTool := detectToolCallLoop(recentToolCalls, normalizedToolCalls, 3); loopingTool != "" {
+			logger.WarnCF("agent", "Tool call loop detected",
+				map[string]any{
+					"agent_id":  agent.ID,
+					"tool":      loopingTool,
+					"iteration": iteration,
+				})
+
+			// Build assistant message so tool results can be attached (API requirement)
+			loopAssistantMsg := providers.Message{
+				Role:    "assistant",
+				Content: response.Content,
+			}
+			for _, tc := range normalizedToolCalls {
+				argumentsJSON, _ := json.Marshal(tc.Arguments)
+				loopAssistantMsg.ToolCalls = append(loopAssistantMsg.ToolCalls, providers.ToolCall{
+					ID:   tc.ID,
+					Type: "function",
+					Name: tc.Name,
+					Function: &providers.FunctionCall{
+						Name:      tc.Name,
+						Arguments: string(argumentsJSON),
+					},
+				})
+			}
+			messages = append(messages, loopAssistantMsg)
+
+			// Return error tool results for each call
+			loopNotice := fmt.Sprintf("Loop detected: '%s' called with same arguments 3+ times. "+
+				"Try a different approach, use a different tool, or explain why you are stuck.", loopingTool)
+			for _, tc := range normalizedToolCalls {
+				messages = append(messages, providers.Message{
+					Role:       "tool",
+					Content:    loopNotice,
+					ToolCallID: tc.ID,
+				})
+			}
+			continue
+		}
+
+		// Track current tool calls for future loop detection
+		for _, tc := range normalizedToolCalls {
+			argsJSON, _ := json.Marshal(tc.Arguments)
+			recentToolCalls = append(recentToolCalls, toolCallSignature{
+				Name: tc.Name,
+				Args: string(argsJSON),
+			})
+		}
 
 		// Build assistant message with tool calls
 		assistantMsg := providers.Message{
@@ -1106,10 +1220,26 @@ func (al *AgentLoop) runLLMIteration(
 				}
 			},
 		})
-
 		for _, executed := range toolExecutions {
 			toolResult := executed.Result
 			tc := executed.ToolCall
+
+			// Track tool execution in working state
+			agent.ContextBuilder.workingStateMu.RLock()
+			ws := agent.ContextBuilder.workingState
+			agent.ContextBuilder.workingStateMu.RUnlock()
+			if ws != nil {
+				ws.RecordToolCall(tc.Name, toolResult.IsError)
+				// Record as a completed step with truncated outcome
+				outcome := toolResult.ForLLM
+				if len(outcome) > 120 {
+					outcome = outcome[:120] + "..."
+				}
+				if toolResult.IsError {
+					outcome = "[error] " + outcome
+				}
+				ws.AddCompletedStep(tc.Name, outcome, tc.Name)
+			}
 
 			// Send ForUser content to user immediately if not Silent.
 			if !toolResult.Silent && toolResult.ForUser != "" && opts.SendResponse {
@@ -1165,6 +1295,19 @@ func (al *AgentLoop) runLLMIteration(
 		}
 	}
 
+	// Log cumulative token usage for the entire request
+	if totalPromptTokens > 0 || totalCompletionTokens > 0 {
+		logger.InfoCF("agent", "Request token usage summary",
+			map[string]any{
+				"agent_id":                agent.ID,
+				"iterations":              iteration,
+				"total_prompt_tokens":     totalPromptTokens,
+				"total_completion_tokens": totalCompletionTokens,
+				"total_tokens":            totalPromptTokens + totalCompletionTokens,
+				"session_key":             opts.SessionKey,
+			})
+	}
+
 	return finalContent, iteration, nil
 }
 
@@ -1212,6 +1355,20 @@ func (al *AgentLoop) maybeSummarize(agent *AgentInstance, sessionKey, channel, c
 				logger.Debug("Memory threshold reached. Optimizing conversation history...")
 				ctx, cancel := al.safeCompactionContext()
 				defer cancel()
+
+				if al.bus != nil && channel != "" && chatID != "" && !constants.IsInternalChannel(channel) {
+					if err := al.bus.PublishOutbound(ctx, bus.OutboundMessage{
+						Channel: channel,
+						ChatID:  chatID,
+						Content: "Memory threshold reached. Optimizing conversation history...",
+					}); err != nil {
+						logger.WarnCF("agent", "Failed to publish compaction notice (best-effort)", map[string]any{
+							"channel": channel,
+							"chat_id": chatID,
+							"error":   err.Error(),
+						})
+					}
+				}
 
 				if flushed, err := al.maybeFlushMemoryBeforeCompaction(
 					ctx,

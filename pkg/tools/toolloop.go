@@ -39,13 +39,15 @@ type ToolLoopResult struct {
 
 // ToolExecutionTrace captures a single tool execution inside the loop.
 type ToolExecutionTrace struct {
-	Iteration  int
-	ToolName   string
-	Arguments  map[string]any
-	Result     string
-	IsError    bool
-	DurationMS int64
-	ToolCallID string
+	Iteration      int
+	ToolName       string
+	Arguments      map[string]any
+	Result         string
+	IsError        bool
+	DurationMS     int64
+	ToolCallID     string
+	LLMReasoning   string   // The LLM's text reasoning that accompanied this tool call
+	PrecedingTools []string // Names of tools called in previous iterations
 }
 
 // RunToolLoop executes the LLM + tool call iteration loop.
@@ -59,6 +61,12 @@ func RunToolLoop(
 	iteration := 0
 	var finalContent string
 	trace := make([]ToolExecutionTrace, 0)
+	precedingTools := make([]string, 0, 16) // accumulates tool names across iterations
+
+	// Loop detection state
+	type toolloopCallSig struct{ name, args string }
+	recentCalls := make([]toolloopCallSig, 0, 32)
+	const loopThreshold = 3
 
 	for iteration < config.MaxIterations {
 		iteration++
@@ -119,6 +127,29 @@ func RunToolLoop(
 				"iteration": iteration,
 			})
 
+		// Loop detection: check for repeated identical tool calls
+		loopDetected := ""
+		for _, tc := range normalizedToolCalls {
+			argsJSON, _ := json.Marshal(tc.Arguments)
+			sig := string(argsJSON)
+			count := 0
+			for _, prev := range recentCalls {
+				if prev.name == tc.Name && prev.args == sig {
+					count++
+				}
+			}
+			if count >= loopThreshold {
+				loopDetected = tc.Name
+				break
+			}
+		}
+
+		// Track current calls
+		for _, tc := range normalizedToolCalls {
+			argsJSON, _ := json.Marshal(tc.Arguments)
+			recentCalls = append(recentCalls, toolloopCallSig{name: tc.Name, args: string(argsJSON)})
+		}
+
 		// 6. Build assistant message with tool calls
 		assistantMsg := providers.Message{
 			Role:    "assistant",
@@ -138,6 +169,40 @@ func RunToolLoop(
 			})
 		}
 		messages = append(messages, assistantMsg)
+
+		// Loop break: if a repeated tool call pattern was detected, skip execution
+		// and inject error tool results so the LLM can course-correct.
+		if loopDetected != "" {
+			logger.WarnCF("toolloop", "Loop detected, injecting error results",
+				map[string]any{
+					"tool":      loopDetected,
+					"iteration": iteration,
+					"threshold": loopThreshold,
+				})
+			for _, tc := range normalizedToolCalls {
+				errMsg := fmt.Sprintf(
+					"Loop detected: tool '%s' has been called with identical arguments %d+ times. "+
+						"This is not making progress. Try a different approach, use different arguments, "+
+						"or consider whether the task can be completed with the information already gathered.",
+					loopDetected, loopThreshold,
+				)
+				trace = append(trace, ToolExecutionTrace{
+					Iteration:    iteration,
+					ToolName:     tc.Name,
+					Arguments:    tc.Arguments,
+					Result:       errMsg,
+					IsError:      true,
+					ToolCallID:   tc.ID,
+					LLMReasoning: response.Content,
+				})
+				messages = append(messages, providers.Message{
+					Role:       "tool",
+					Content:    errMsg,
+					ToolCallID: tc.ID,
+				})
+			}
+			continue
+		}
 
 		toolExecutions := ExecuteToolCalls(ctx, config.Tools, normalizedToolCalls, ToolCallExecutionOptions{
 			Channel:   channel,
@@ -163,15 +228,22 @@ func RunToolLoop(
 				contentForLLM = toolResult.Err.Error()
 			}
 
+			// Copy preceding tools slice for this trace entry
+			ptCopy := make([]string, len(precedingTools))
+			copy(ptCopy, precedingTools)
+
 			trace = append(trace, ToolExecutionTrace{
-				Iteration:  iteration,
-				ToolName:   tc.Name,
-				Arguments:  tc.Arguments,
-				Result:     contentForLLM,
-				IsError:    toolResult.IsError,
-				DurationMS: executed.DurationMS,
-				ToolCallID: tc.ID,
+				Iteration:      iteration,
+				ToolName:       tc.Name,
+				Arguments:      tc.Arguments,
+				Result:         contentForLLM,
+				IsError:        toolResult.IsError,
+				DurationMS:     executed.DurationMS,
+				ToolCallID:     tc.ID,
+				LLMReasoning:   response.Content, // LLM text that accompanied tool calls
+				PrecedingTools: ptCopy,
 			})
+			precedingTools = append(precedingTools, tc.Name)
 
 			// Add tool result message
 			toolResultMsg := providers.Message{
