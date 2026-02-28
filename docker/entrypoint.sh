@@ -63,7 +63,8 @@ if username and pat:
         stderr=devnull,
         check=False,
     )
-    subprocess.run(["git", "config", "--global", "credential.useHttpPath", "true"], stdout=devnull, stderr=devnull, check=False)
+    # Keep host-level matching so one GitHub PAT can be reused across repos.
+    subprocess.run(["git", "config", "--global", "credential.useHttpPath", "false"], stdout=devnull, stderr=devnull, check=False)
 PY
 }
 
