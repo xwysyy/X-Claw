@@ -599,12 +599,21 @@ func (al *AgentLoop) processMessage(ctx context.Context, msg bus.InboundMessage)
 			"matched_by":  route.MatchedBy,
 		})
 
+	userMessage := msg.Content
+	if note := al.importInboundMediaAndBuildNote(agent, msg); note != "" {
+		if strings.TrimSpace(userMessage) != "" {
+			userMessage += "\n\n" + note
+		} else {
+			userMessage = note
+		}
+	}
+
 	return al.runAgentLoop(ctx, agent, processOptions{
 		SessionKey:      sessionKey,
 		Channel:         msg.Channel,
 		ChatID:          msg.ChatID,
 		SenderID:        msg.SenderID,
-		UserMessage:     msg.Content,
+		UserMessage:     userMessage,
 		DefaultResponse: defaultResponse,
 		EnableSummary:   true,
 		SendResponse:    false,

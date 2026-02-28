@@ -69,6 +69,7 @@ func NewAgentInstance(
 	restrict := defaults.RestrictToWorkspace
 	toolsRegistry := tools.NewToolRegistry()
 	toolsRegistry.Register(tools.NewReadFileTool(workspace, restrict))
+	toolsRegistry.Register(tools.NewDocumentTextTool(workspace, restrict))
 	toolsRegistry.Register(tools.NewWriteFileTool(workspace, restrict))
 	toolsRegistry.Register(tools.NewListDirTool(workspace, restrict))
 	execTool, err := tools.NewExecToolWithConfig(workspace, restrict, cfg)
