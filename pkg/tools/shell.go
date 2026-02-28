@@ -65,8 +65,6 @@ var defaultDenyPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`\bdnf\s+(install|remove)\b`),
 	regexp.MustCompile(`\bdocker\s+run\b`),
 	regexp.MustCompile(`\bdocker\s+exec\b`),
-	regexp.MustCompile(`\bgit\s+push\b`),
-	regexp.MustCompile(`\bgit\s+force\b`),
 	regexp.MustCompile(`\bssh\b.*@`),
 	regexp.MustCompile(`\beval\b`),
 	regexp.MustCompile(`\bsource\s+.*\.sh\b`),
