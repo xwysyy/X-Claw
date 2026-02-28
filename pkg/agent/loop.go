@@ -1201,13 +1201,6 @@ func (al *AgentLoop) maybeSummarize(agent *AgentInstance, sessionKey, channel, c
 			go func() {
 				defer al.summarizing.Delete(summarizeKey)
 				logger.Debug("Memory threshold reached. Optimizing conversation history...")
-				if !constants.IsInternalChannel(channel) {
-					al.bus.PublishOutbound(bus.OutboundMessage{
-						Channel: channel,
-						ChatID:  chatID,
-						Content: "Memory threshold reached. Optimizing conversation history...",
-					})
-				}
 				ctx, cancel := al.safeCompactionContext()
 				defer cancel()
 
