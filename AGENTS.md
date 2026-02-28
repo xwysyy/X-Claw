@@ -12,11 +12,11 @@ Current remote setup:
 If `upstream` is missing, add it:
 - `git remote add upstream https://github.com/sipeed/picoclaw.git`
 
-### Periodic sync routine (recommended)
-Run these commands regularly to sync latest upstream changes into your fork branch:
+### Periodic sync routine (recommended: merge)
+Run these commands regularly to sync latest upstream changes into your fork branch (keeps history non-linear, avoids force-push):
 1. `source ~/.zshrc && proxy_on && git fetch upstream`
 2. `git checkout main`
-3. `git rebase upstream/main`
+3. `GIT_EDITOR=true git merge --no-edit upstream/main`
 4. `source ~/.zshrc && proxy_on && git push origin main`
 5. Restart currently running `picoclaw` containers:
    - `docker ps -q --filter label=com.docker.compose.project=picoclaw | xargs -r docker restart`
@@ -24,8 +24,9 @@ Run these commands regularly to sync latest upstream changes into your fork bran
    - `docker ps --filter label=com.docker.compose.project=picoclaw`
    - `curl -sS http://127.0.0.1:18790/health`
 
-If your workflow prefers merge over rebase, use:
-- `git merge upstream/main`
+If you prefer a linear history (rebase), use:
+- `git rebase upstream/main`
+- then push with `git push --force-with-lease origin main`
 
 ## Known API Error: `No tool output found for function call`
 
