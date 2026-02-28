@@ -123,6 +123,26 @@ curl -sS http://127.0.0.1:18790/health
 docker compose -p picoclaw -f docker/docker-compose.yml run --rm picoclaw-agent -m "hello"
 ```
 
+容器镜像内已包含 `git`，可用于 agent 在工作区内提交/推送代码。请在 `config/config.json` 里配置 `tools.git`（PAT + 身份）：
+
+```json
+{
+  "tools": {
+    "git": {
+      "enabled": true,
+      "username": "你的 GitHub 用户名",
+      "pat": "github_pat_xxx",
+      "user_name": "你的名字",
+      "user_email": "you@example.com",
+      "host": "github.com",
+      "protocol": "https"
+    }
+  }
+}
+```
+
+容器启动时会自动写入 `~/.git-credentials` 和 `~/.gitconfig`。
+
 停止服务：
 
 ```bash

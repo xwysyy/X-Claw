@@ -264,6 +264,15 @@
       "enable_deny_patterns": false,
       "custom_deny_patterns": []
     },
+    "git": {
+      "enabled": false,
+      "username": "your-github-username",
+      "pat": "github_pat_xxx",
+      "user_name": "Your Name",
+      "user_email": "you@example.com",
+      "host": "github.com",
+      "protocol": "https"
+    },
     "skills": {
       "registries": {
         "clawhub": {

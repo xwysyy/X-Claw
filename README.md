@@ -123,6 +123,26 @@ Run one-shot agent:
 docker compose -p picoclaw -f docker/docker-compose.yml run --rm picoclaw-agent -m "hello"
 ```
 
+Git is available in the container image for agent-side commits/pushes. Configure PAT and identity in `config/config.json` under `tools.git`:
+
+```json
+{
+  "tools": {
+    "git": {
+      "enabled": true,
+      "username": "your-github-username",
+      "pat": "github_pat_xxx",
+      "user_name": "Your Name",
+      "user_email": "you@example.com",
+      "host": "github.com",
+      "protocol": "https"
+    }
+  }
+}
+```
+
+At container startup, this is written to `~/.git-credentials` and `~/.gitconfig` automatically.
+
 Stop gateway:
 
 ```bash
