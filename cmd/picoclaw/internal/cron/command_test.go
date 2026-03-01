@@ -31,6 +31,7 @@ func TestNewCronCommand(t *testing.T) {
 
 	allowedCommands := []string{
 		"list",
+		"show",
 		"add",
 		"remove",
 		"enable",

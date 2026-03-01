@@ -127,7 +127,7 @@ func newToolTraceWriter(opts ToolCallExecutionOptions, scope string) *toolTraceW
 			return nil
 		}
 
-		dirKey := safePathToken(effectiveSessionKey)
+		dirKey := SafePathToken(effectiveSessionKey)
 		if dirKey == "" {
 			dirKey = "unknown"
 		}
@@ -350,8 +350,8 @@ func (w *toolTraceWriter) writeSnapshot(ts time.Time, iteration int, tc provider
 		"%s_iter%03d_%s_%s",
 		ts.UTC().Format("20060102T150405.000Z0700"),
 		iteration,
-		safePathToken(tc.Name),
-		safePathToken(tc.ID),
+		SafePathToken(tc.Name),
+		SafePathToken(tc.ID),
 	)
 	if base == "" {
 		base = fmt.Sprintf("%d_iter%03d", ts.UnixMilli(), iteration)
@@ -438,7 +438,9 @@ func renderToolSnapshotMarkdown(s toolTraceSnapshot) string {
 
 var safeTokenRe = regexp.MustCompile(`[^a-zA-Z0-9._-]+`)
 
-func safePathToken(s string) string {
+// SafePathToken converts an arbitrary string into a filesystem-friendly token.
+// It is used for tool trace directory names and per-call filenames.
+func SafePathToken(s string) string {
 	s = strings.TrimSpace(s)
 	if s == "" {
 		return ""

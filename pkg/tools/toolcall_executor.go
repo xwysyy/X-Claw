@@ -46,6 +46,13 @@ type ToolCallExecutionOptions struct {
 
 	Trace ToolTraceOptions
 
+	// ErrorTemplate optionally wraps tool errors into a structured, self-recoverable
+	// template for the LLM (A3 in ROADMAP.md).
+	//
+	// This is executor-level (not tool-specific) so we can standardize error recovery
+	// without changing each tool's implementation.
+	ErrorTemplate ToolErrorTemplateOptions
+
 	// AsyncCallbackForCall creates a callback for async-capable tools.
 	// It may be nil when async callbacks are not needed.
 	AsyncCallbackForCall func(call providers.ToolCall) AsyncCallback
@@ -147,6 +154,10 @@ func ExecuteToolCalls(
 		if toolResult == nil {
 			toolResult = ErrorResult(fmt.Sprintf("tool %q returned nil result", tc.Name)).
 				WithError(fmt.Errorf("tool %q returned nil result", tc.Name))
+		}
+
+		if toolResult.IsError && opts.ErrorTemplate.Enabled {
+			applyToolErrorTemplate(registry, tc, argsJSON, toolResult, opts)
 		}
 
 		duration := time.Since(start)

@@ -1220,16 +1220,25 @@ func (al *AgentLoop) runLLMIteration(
 			traceOpts.MaxResultPreviewChars = al.cfg.Tools.Trace.MaxResultPreviewChars
 		}
 
+		errorTemplateOpts := tools.ToolErrorTemplateOptions{}
+		if al.cfg != nil {
+			errorTemplateOpts.Enabled = al.cfg.Tools.ErrorTemplate.Enabled
+			errorTemplateOpts.IncludeSchema = al.cfg.Tools.ErrorTemplate.IncludeSchema
+			// Include tool list for "tool not found" to help the model self-correct.
+			errorTemplateOpts.IncludeAvailableTools = true
+		}
+
 		toolExecutions := tools.ExecuteToolCalls(ctx, agent.Tools, normalizedToolCalls, tools.ToolCallExecutionOptions{
-			Channel:    opts.Channel,
-			ChatID:     opts.ChatID,
-			SenderID:   opts.SenderID,
-			Workspace:  agent.Workspace,
-			SessionKey: opts.SessionKey,
-			Iteration:  iteration,
-			LogScope:   "agent",
-			Parallel:   parallelCfg,
-			Trace:      traceOpts,
+			Channel:       opts.Channel,
+			ChatID:        opts.ChatID,
+			SenderID:      opts.SenderID,
+			Workspace:     agent.Workspace,
+			SessionKey:    opts.SessionKey,
+			Iteration:     iteration,
+			LogScope:      "agent",
+			Parallel:      parallelCfg,
+			Trace:         traceOpts,
+			ErrorTemplate: errorTemplateOpts,
 			// Create async callback for tools that implement AsyncTool.
 			// Following openclaw's design, async tools do not send results directly
 			// to users. The agent handles user notification via processSystemMessage.

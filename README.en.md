@@ -103,6 +103,13 @@ Health endpoint:
 curl -sS http://127.0.0.1:18790/health
 ```
 
+Check runtime status (includes `last_active` / cron / trace, etc.):
+
+```bash
+./build/picoclaw status
+./build/picoclaw status --json
+```
+
 ### Notification API (`/api/notify`)
 
 Gateway also exposes a lightweight notification endpoint so external systems (CI / scripts / daemons) can push a reminder to you via configured channels (e.g. Feishu).
@@ -163,6 +170,45 @@ Config example:
 }
 ```
 
+### Run/Session Export (`picoclaw export`)
+
+When you need to file a bug report, review a conversation, or share a replay bundle, you can export a zip bundle (by default it includes: session snapshot + tool traces + cron/state + redacted config snapshot + manifest).
+
+Common usage:
+
+```bash
+# Export the session matching workspace last_active (recommended)
+./build/picoclaw export --last-active
+
+# Or export an explicit session key
+./build/picoclaw export --session 'agent:main:feishu:group:oc_xxx'
+```
+
+Default output directory:
+
+- ` <workspace>/exports/*.zip `
+
+### Unified Tool Error Template (`tools.error_template`)
+
+When a tool execution fails (`is_error=true`), PicoClaw wraps the error into a small structured JSON payload (`kind=tool_error`) with minimal recovery hints (required args, available/similar tool names, etc.). This helps the model self-correct (adjust args / switch tools / read-before-write).
+
+Notes:
+- This is implemented at the executor layer (no per-tool changes required)
+- It only affects the LLM-facing `ForLLM`. If a tool provides `ForUser`, the human-friendly output is preserved.
+
+Config example (enabled by default):
+
+```json
+{
+  "tools": {
+    "error_template": {
+      "enabled": true,
+      "include_schema": true
+    }
+  }
+}
+```
+
 ### Structured Memory Output (JSON hits)
 
 `memory_search` / `memory_get` return structured JSON to the LLM side (with a stable `kind` field for regression tests and reliable quoting), while still keeping a short human-readable summary:
@@ -183,6 +229,14 @@ The `state` section records:
 - `lastStatus` / `lastRunAtMs` / `lastDurationMs`
 - `lastOutputPreview` (truncated preview)
 - `runHistory` (latest N runs)
+
+Common CLI commands:
+
+```bash
+./build/picoclaw cron list
+./build/picoclaw cron show <job_id>
+./build/picoclaw cron show <job_id> --json
+```
 
 ## Docker Compose
 

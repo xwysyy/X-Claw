@@ -21,9 +21,13 @@ func TestNewStatusCommand(t *testing.T) {
 
 	assert.False(t, cmd.HasSubCommands())
 
-	assert.NotNil(t, cmd.Run)
-	assert.Nil(t, cmd.RunE)
+	assert.Nil(t, cmd.Run)
+	assert.NotNil(t, cmd.RunE)
 
 	assert.Nil(t, cmd.PersistentPreRun)
 	assert.Nil(t, cmd.PersistentPostRun)
+
+	flag := cmd.Flags().Lookup("json")
+	require.NotNil(t, flag)
+	assert.Equal(t, "false", flag.DefValue)
 }

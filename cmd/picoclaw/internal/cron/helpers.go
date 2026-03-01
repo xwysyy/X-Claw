@@ -1,7 +1,10 @@
 package cron
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/sipeed/picoclaw/pkg/cron"
@@ -66,6 +69,116 @@ func cronListCmd(storePath string) {
 			fmt.Printf("    Last error: %s\n", job.State.LastError)
 		}
 	}
+}
+
+func cronShowCmd(storePath, jobID string, jsonOut bool) error {
+	jobID = strings.TrimSpace(jobID)
+	if jobID == "" {
+		return fmt.Errorf("job_id is required")
+	}
+
+	cs := cron.NewCronService(storePath, nil)
+	jobs := cs.ListJobs(true) // include disabled
+
+	var found *cron.CronJob
+	for i := range jobs {
+		if jobs[i].ID == jobID {
+			found = &jobs[i]
+			break
+		}
+	}
+	if found == nil {
+		return fmt.Errorf("job %s not found", jobID)
+	}
+
+	if jsonOut {
+		data, err := marshalIndentNoEscape(found)
+		if err != nil {
+			return err
+		}
+		fmt.Println(string(data))
+		return nil
+	}
+
+	fmt.Printf("\nCron Job: %s (%s)\n", found.Name, found.ID)
+	fmt.Println("------------------------")
+	fmt.Printf("Enabled: %t\n", found.Enabled)
+	fmt.Printf("Schedule: %s\n", formatSchedule(found.Schedule))
+	fmt.Printf("Deliver: %t\n", found.Payload.Deliver)
+	if found.Payload.Channel != "" || found.Payload.To != "" {
+		fmt.Printf("Channel/To: %s/%s\n", found.Payload.Channel, found.Payload.To)
+	}
+	if found.Payload.Command != "" {
+		fmt.Printf("Command: %s\n", found.Payload.Command)
+	}
+	if strings.TrimSpace(found.Payload.Message) != "" {
+		fmt.Printf("Message: %s\n", found.Payload.Message)
+	}
+
+	if found.State.NextRunAtMS != nil {
+		fmt.Printf("Next run: %s\n", time.UnixMilli(*found.State.NextRunAtMS).Format("2006-01-02 15:04:05"))
+	}
+	if found.State.LastRunAtMS != nil {
+		fmt.Printf("Last run: %s\n", time.UnixMilli(*found.State.LastRunAtMS).Format("2006-01-02 15:04:05"))
+	}
+	if found.State.LastStatus != "" {
+		fmt.Printf("Last status: %s\n", found.State.LastStatus)
+	}
+	if found.State.LastDurationMS != nil {
+		fmt.Printf("Last duration: %dms\n", *found.State.LastDurationMS)
+	}
+	if found.State.LastError != "" {
+		fmt.Printf("Last error: %s\n", found.State.LastError)
+	}
+	if strings.TrimSpace(found.State.LastOutputPreview) != "" {
+		fmt.Printf("\nLast output preview:\n%s\n", found.State.LastOutputPreview)
+	}
+	if len(found.State.RunHistory) > 0 {
+		fmt.Printf("\nRun history (latest %d):\n", len(found.State.RunHistory))
+		for _, r := range found.State.RunHistory {
+			started := time.UnixMilli(r.StartedAtMS).Format("2006-01-02 15:04:05")
+			fmt.Printf("  - %s %s (%dms)\n", started, r.Status, r.DurationMS)
+			if r.Error != "" {
+				fmt.Printf("    error: %s\n", r.Error)
+			}
+		}
+	}
+	fmt.Println()
+	return nil
+}
+
+func formatSchedule(s cron.CronSchedule) string {
+	switch s.Kind {
+	case "every":
+		if s.EveryMS != nil {
+			return fmt.Sprintf("every %ds", *s.EveryMS/1000)
+		}
+		return "every"
+	case "cron":
+		tz := s.TZ
+		if tz == "" {
+			tz = "local"
+		}
+		return fmt.Sprintf("%s (tz=%s)", s.Expr, tz)
+	case "at":
+		if s.AtMS != nil {
+			return fmt.Sprintf("at %s", time.UnixMilli(*s.AtMS).Format("2006-01-02 15:04:05"))
+		}
+		return "at"
+	default:
+		return s.Kind
+	}
+}
+
+func marshalIndentNoEscape(v any) ([]byte, error) {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(v); err != nil {
+		return nil, err
+	}
+	return bytes.TrimRight(buf.Bytes(), "\n"), nil
 }
 
 func cronRemoveCmd(storePath, jobID string) {

@@ -34,6 +34,7 @@ func NewCronCommand() *cobra.Command {
 
 	cmd.AddCommand(
 		newListCommand(func() string { return storePath }),
+		newShowCommand(func() string { return storePath }),
 		newAddCommand(func() string { return storePath }),
 		newRemoveCommand(func() string { return storePath }),
 		newEnableCommand(func() string { return storePath }),

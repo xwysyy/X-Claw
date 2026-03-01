@@ -620,6 +620,19 @@ type ToolTraceConfig struct {
 	MaxResultPreviewChars int `json:"max_result_preview_chars" env:"PICOCLAW_TOOLS_TRACE_MAX_RESULT_PREVIEW_CHARS"`
 }
 
+// ToolErrorTemplateConfig controls executor-level tool error wrapping for the LLM.
+//
+// When enabled, tool failures are wrapped into a structured JSON payload with
+// minimal recovery hints. This helps the model self-correct by adjusting args
+// or switching tools, without changing each individual tool implementation.
+type ToolErrorTemplateConfig struct {
+	Enabled bool `json:"enabled" env:"PICOCLAW_TOOLS_ERROR_TEMPLATE_ENABLED"`
+
+	// IncludeSchema adds a small summary of tool parameters (required + known keys)
+	// when the tool definition is available.
+	IncludeSchema bool `json:"include_schema" env:"PICOCLAW_TOOLS_ERROR_TEMPLATE_INCLUDE_SCHEMA"`
+}
+
 type ExecConfig struct {
 	EnableDenyPatterns bool     `json:"enable_deny_patterns" env:"PICOCLAW_TOOLS_EXEC_ENABLE_DENY_PATTERNS"`
 	CustomDenyPatterns []string `json:"custom_deny_patterns" env:"PICOCLAW_TOOLS_EXEC_CUSTOM_DENY_PATTERNS"`
@@ -632,12 +645,13 @@ type MediaCleanupConfig struct {
 }
 
 type ToolsConfig struct {
-	Web          WebToolsConfig     `json:"web"`
-	Trace        ToolTraceConfig    `json:"trace,omitempty"`
-	Cron         CronToolsConfig    `json:"cron"`
-	Exec         ExecConfig         `json:"exec"`
-	Skills       SkillsToolsConfig  `json:"skills"`
-	MediaCleanup MediaCleanupConfig `json:"media_cleanup"`
+	Web           WebToolsConfig          `json:"web"`
+	Trace         ToolTraceConfig         `json:"trace,omitempty"`
+	ErrorTemplate ToolErrorTemplateConfig `json:"error_template,omitempty"`
+	Cron          CronToolsConfig         `json:"cron"`
+	Exec          ExecConfig              `json:"exec"`
+	Skills        SkillsToolsConfig       `json:"skills"`
+	MediaCleanup  MediaCleanupConfig      `json:"media_cleanup"`
 }
 
 type SkillsToolsConfig struct {

@@ -349,6 +349,10 @@ func DefaultConfig() *Config {
 				MaxArgPreviewChars:    200,
 				MaxResultPreviewChars: 400,
 			},
+			ErrorTemplate: ToolErrorTemplateConfig{
+				Enabled:       true,
+				IncludeSchema: true,
+			},
 			Cron: CronToolsConfig{
 				ExecTimeoutMinutes: 5,
 			},

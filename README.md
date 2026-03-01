@@ -103,6 +103,13 @@ vim ~/.picoclaw/config.json
 curl -sS http://127.0.0.1:18790/health
 ```
 
+查看运行状态（包含 `last_active` / cron / trace 等）：
+
+```bash
+./build/picoclaw status
+./build/picoclaw status --json
+```
+
 ### 通知接口（/api/notify）
 
 Gateway 会额外暴露一个通知接口，用于让外部系统（CI / 脚本 / 守护进程）通过已配置的渠道给你发提醒（例如飞书）。
@@ -158,6 +165,45 @@ curl -sS -X POST http://127.0.0.1:18790/api/notify \
 }
 ```
 
+### Run/Session 导出（picoclaw export）
+
+当你需要提交 bug / 复盘某次对话 / 把 “可回放执行” 资料打包给别人时，可以导出一个 zip bundle（默认会包含：session 快照 + tool traces + cron/state/config 脱敏快照 + manifest）。
+
+常用用法：
+
+```bash
+# 直接导出当前 workspace 的 last_active 会话（推荐）
+./build/picoclaw export --last-active
+
+# 或导出指定 sessionKey
+./build/picoclaw export --session 'agent:main:feishu:group:oc_xxx'
+```
+
+默认输出位置：
+
+- ` <workspace>/exports/*.zip `
+
+### 统一工具错误模板（tools.error_template）
+
+当工具执行失败时（`is_error=true`），PicoClaw 会把错误包装成结构化 JSON（`kind=tool_error`），并附带最小的自愈 hints（required 参数、可用工具列表/相似工具名等），让模型更容易自救（换参数 / 换工具 / 先读后写）。
+
+说明：
+- 这是 executor 层的统一能力，不需要每个 tool 单独实现
+- 只影响 LLM 侧的 `ForLLM`；不会强制把 JSON 错误刷给用户（若 tool 提供了 `ForUser`，会优先保留人类友好输出）
+
+配置示例（默认已启用）：
+
+```json
+{
+  "tools": {
+    "error_template": {
+      "enabled": true,
+      "include_schema": true
+    }
+  }
+}
+```
+
 ### 结构化记忆输出（Memory JSON hits）
 
 `memory_search` / `memory_get` 的工具输出对 LLM 侧返回结构化 JSON（`kind` 字段可用于回归测试与稳定引用），同时对人类侧保留简要摘要：
@@ -178,6 +224,14 @@ Cron 的任务状态会持久化到工作区：
 - `lastStatus` / `lastRunAtMs` / `lastDurationMs`
 - `lastOutputPreview`（截断预览）
 - `runHistory`（最近 N 次运行记录）
+
+CLI 侧常用命令：
+
+```bash
+./build/picoclaw cron list
+./build/picoclaw cron show <job_id>
+./build/picoclaw cron show <job_id> --json
+```
 
 ## Docker Compose
 

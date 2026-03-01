@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"sync/atomic"
 	"testing"
@@ -86,6 +87,24 @@ func (t *executorContextualTool) SetContext(channel, chatID string) {
 	t.chatID = chatID
 }
 
+type executorSchemaErrorTool struct{}
+
+func (t *executorSchemaErrorTool) Name() string        { return "schema_error" }
+func (t *executorSchemaErrorTool) Description() string { return "schema error tool" }
+func (t *executorSchemaErrorTool) Parameters() map[string]any {
+	return map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"path": map[string]any{"type": "string"},
+			"mode": map[string]any{"type": "string"},
+		},
+		"required": []string{"path"},
+	}
+}
+func (t *executorSchemaErrorTool) Execute(_ context.Context, _ map[string]any) *ToolResult {
+	return ErrorResult("boom").WithError(fmt.Errorf("boom"))
+}
+
 func TestExecuteToolCalls_PreservesOrderWithParallelBatch(t *testing.T) {
 	registry := NewToolRegistry()
 	registry.Register(&executorMockTool{
@@ -124,6 +143,98 @@ func TestExecuteToolCalls_PreservesOrderWithParallelBatch(t *testing.T) {
 	}
 	if results[1].ToolCall.ID != "tc-2" || results[1].Result.ForLLM != "fast-result" {
 		t.Fatalf("results[1] = %+v, want tc-2/fast-result", results[1])
+	}
+}
+
+func TestExecuteToolCalls_ErrorTemplate_ToolNotFound(t *testing.T) {
+	registry := NewToolRegistry()
+	registry.Register(&executorMockTool{name: "exists"})
+
+	calls := []providers.ToolCall{
+		{ID: "tc-1", Name: "missing", Arguments: map[string]any{"a": "b"}},
+	}
+
+	results := ExecuteToolCalls(context.Background(), registry, calls, ToolCallExecutionOptions{
+		Iteration: 1,
+		LogScope:  "test",
+		ErrorTemplate: ToolErrorTemplateOptions{
+			Enabled:               true,
+			IncludeSchema:         true,
+			IncludeAvailableTools: true,
+		},
+	})
+
+	if len(results) != 1 {
+		t.Fatalf("len(results) = %d, want 1", len(results))
+	}
+	if results[0].Result == nil {
+		t.Fatalf("nil ToolResult")
+	}
+	if !results[0].Result.IsError {
+		t.Fatalf("expected IsError=true")
+	}
+
+	var payload toolErrorTemplate
+	if err := json.Unmarshal([]byte(results[0].Result.ForLLM), &payload); err != nil {
+		t.Fatalf("expected JSON error template, got err=%v content=%q", err, results[0].Result.ForLLM)
+	}
+	if payload.Kind != "tool_error" {
+		t.Fatalf("payload.Kind = %q, want tool_error", payload.Kind)
+	}
+	if payload.Tool != "missing" {
+		t.Fatalf("payload.Tool = %q, want missing", payload.Tool)
+	}
+	if payload.ToolCallID != "tc-1" {
+		t.Fatalf("payload.ToolCallID = %q, want tc-1", payload.ToolCallID)
+	}
+	if len(payload.AvailableTools) == 0 || payload.AvailableTools[0] != "exists" {
+		t.Fatalf("payload.AvailableTools = %#v, want contains 'exists'", payload.AvailableTools)
+	}
+}
+
+func TestExecuteToolCalls_ErrorTemplate_IncludesSchemaSummary(t *testing.T) {
+	registry := NewToolRegistry()
+	registry.Register(&executorSchemaErrorTool{})
+
+	calls := []providers.ToolCall{
+		{ID: "tc-1", Name: "schema_error", Arguments: map[string]any{}},
+	}
+
+	results := ExecuteToolCalls(context.Background(), registry, calls, ToolCallExecutionOptions{
+		Iteration: 7,
+		LogScope:  "test",
+		ErrorTemplate: ToolErrorTemplateOptions{
+			Enabled:               true,
+			IncludeSchema:         true,
+			IncludeAvailableTools: true,
+		},
+	})
+
+	if len(results) != 1 {
+		t.Fatalf("len(results) = %d, want 1", len(results))
+	}
+	if results[0].Result == nil {
+		t.Fatalf("nil ToolResult")
+	}
+
+	var payload toolErrorTemplate
+	if err := json.Unmarshal([]byte(results[0].Result.ForLLM), &payload); err != nil {
+		t.Fatalf("expected JSON error template, got err=%v content=%q", err, results[0].Result.ForLLM)
+	}
+	if payload.Kind != "tool_error" {
+		t.Fatalf("payload.Kind = %q, want tool_error", payload.Kind)
+	}
+	if payload.Iteration != 7 {
+		t.Fatalf("payload.Iteration = %d, want 7", payload.Iteration)
+	}
+	if payload.ToolSchema == nil {
+		t.Fatalf("expected payload.ToolSchema")
+	}
+	if len(payload.ToolSchema.Required) != 1 || payload.ToolSchema.Required[0] != "path" {
+		t.Fatalf("payload.ToolSchema.Required = %#v, want [path]", payload.ToolSchema.Required)
+	}
+	if len(payload.ToolSchema.Keys) != 2 {
+		t.Fatalf("payload.ToolSchema.Keys = %#v, want 2 keys", payload.ToolSchema.Keys)
 	}
 }
 
