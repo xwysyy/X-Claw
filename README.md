@@ -1,35 +1,35 @@
 # PicoClaw
 
-PicoClaw is a lightweight personal AI assistant written in Go.
+[English](README.en.md)
 
-This repository contains the core CLI, gateway service, tool system, and channel integrations.
+PicoClaw 是一个使用 Go 编写的轻量级个人 AI 助手。
 
-Project documentation is kept concise in the root README files.
+本仓库包含核心 CLI、Gateway 服务、工具系统和多种渠道集成。
 
-## Scope
+## 项目范围
 
-PicoClaw supports:
-- CLI chat (`agent` mode)
-- Long-running gateway service (`gateway` mode)
-- Multi-model configuration via `model_list`
-- Tool calling (filesystem, exec, web, cron, memory, skills)
-- Session and workspace persistence
+当前支持：
+- CLI 对话（`agent` 模式）
+- 常驻网关服务（`gateway` 模式）
+- 基于 `model_list` 的多模型配置
+- 工具调用（文件、命令、Web、定时、记忆、技能）
+- 会话与工作区持久化
 
-## Project Status
+## 项目状态
 
-This project is under active development.
+项目仍在持续迭代中。
 
-- Expect behavior changes between versions.
-- Review config changes when upgrading.
-- Avoid exposing it directly to the public internet without your own security controls.
+- 版本升级时可能存在行为变化
+- 建议升级后检查配置兼容性
+- 未加防护前，不建议直接暴露到公网
 
-## Requirements
+## 环境要求
 
-- Linux host recommended (x86_64 / ARM64 / RISC-V)
-- Go toolchain for source builds
-- At least one model provider API key (or a local compatible endpoint)
+- 推荐 Linux 主机（x86_64 / ARM64 / RISC-V）
+- 源码构建需要 Go 工具链
+- 至少一个可用模型 API Key（或兼容的本地/代理端点）
 
-## Quick Start (Local Build)
+## 快速开始（本地构建）
 
 ```bash
 git clone https://github.com/sipeed/picoclaw.git
@@ -38,19 +38,19 @@ make deps
 make build
 ```
 
-Initialize workspace/config:
+初始化工作区与配置：
 
 ```bash
 ./build/picoclaw onboard
 ```
 
-Edit config:
+编辑配置：
 
 ```bash
 vim ~/.picoclaw/config.json
 ```
 
-Minimal example:
+最小配置示例：
 
 ```json
 {
@@ -73,27 +73,27 @@ Minimal example:
 }
 ```
 
-Run one-shot chat:
+单轮问答：
 
 ```bash
 ./build/picoclaw agent -m "hello"
 ```
 
-Run interactive chat:
+交互模式：
 
 ```bash
 ./build/picoclaw agent
 ```
 
-## Gateway Mode
+## Gateway 模式
 
-Start gateway:
+启动 gateway：
 
 ```bash
 ./build/picoclaw gateway
 ```
 
-Health endpoint:
+健康检查：
 
 ```bash
 curl -sS http://127.0.0.1:18790/health
@@ -101,13 +101,13 @@ curl -sS http://127.0.0.1:18790/health
 
 ## Docker Compose
 
-This repo ships `docker/docker-compose.yml` with profiles:
-- `gateway` for long-running service
-- `agent` for one-shot/manual CLI runs
+本仓库的 `docker/docker-compose.yml` 提供两个 profile：
+- `gateway`：常驻服务
+- `agent`：单次/手动执行
 
-Use your local config at `config/config.json` (mounted read-only into the container).
+容器会挂载本地 `config/config.json`（只读）作为运行配置。
 
-Build and run gateway:
+构建并启动 gateway：
 
 ```bash
 docker compose -p picoclaw -f docker/docker-compose.yml --profile gateway up -d --build
@@ -115,22 +115,22 @@ docker compose -p picoclaw -f docker/docker-compose.yml ps
 curl -sS http://127.0.0.1:18790/health
 ```
 
-Run one-shot agent:
+执行单次 agent：
 
 ```bash
 docker compose -p picoclaw -f docker/docker-compose.yml run --rm picoclaw-agent -m "hello"
 ```
 
-Git is available in the container image for agent-side commits/pushes. Configure PAT and identity in `config/config.json` under `tools.git`:
+容器镜像内已包含 `git`，可用于 agent 在工作区内提交/推送代码。请在 `config/config.json` 里配置 `tools.git`（PAT + 身份）：
 
 ```json
 {
   "tools": {
     "git": {
       "enabled": true,
-      "username": "your-github-username",
+      "username": "你的 GitHub 用户名",
       "pat": "github_pat_xxx",
-      "user_name": "Your Name",
+      "user_name": "你的名字",
       "user_email": "you@example.com",
       "host": "github.com",
       "protocol": "https"
@@ -139,37 +139,37 @@ Git is available in the container image for agent-side commits/pushes. Configure
 }
 ```
 
-At container startup, this is written to `~/.git-credentials` and `~/.gitconfig` automatically.
+容器启动时会自动写入 `~/.git-credentials` 和 `~/.gitconfig`。
 
-Stop gateway:
+停止服务：
 
 ```bash
 docker compose -p picoclaw -f docker/docker-compose.yml down
 ```
 
-## Common Commands
+## 常用命令
 
-- `picoclaw onboard` initialize workspace and default config
-- `picoclaw agent` interactive chat
-- `picoclaw agent -m "..."` one-shot chat
-- `picoclaw gateway` run channel gateway
-- `picoclaw status` show runtime status
-- `picoclaw cron list` list scheduled jobs
-- `picoclaw cron add ...` add scheduled job
+- `picoclaw onboard` 初始化工作区与配置
+- `picoclaw agent` 交互式对话
+- `picoclaw agent -m "..."` 单轮对话
+- `picoclaw gateway` 启动网关服务
+- `picoclaw status` 查看运行状态
+- `picoclaw cron list` 查看定时任务
+- `picoclaw cron add ...` 新增定时任务
 
-## Configuration Notes
+## 配置说明
 
-- Main config file: `~/.picoclaw/config.json`
-- Default workspace: `~/.picoclaw/workspace`
-- Example config template: `config/config.example.json`
+- 主配置文件：`~/.picoclaw/config.json`
+- 默认工作区：`~/.picoclaw/workspace`
+- 配置模板：`config/config.example.json`
 
-For advanced options, inspect in-code config structs under `pkg/config`.
+进阶配置可直接查看代码中的配置结构（`pkg/config`）。
 
-## Troubleshooting
+## 排错
 
-Use:
+参考：
 - `docker compose ... logs -f picoclaw-gateway`
 
-## License
+## 许可证
 
 MIT
