@@ -123,6 +123,8 @@ curl -sS -X POST http://127.0.0.1:18790/api/notify \
   -d '{"content":"Task completed (last_active)"}'
 ```
 
+Note: on a fresh gateway start, if there has been no external conversation yet (`last_active` is empty), omitting `channel/to` will return `channel is required`. Send one message to the bot via Feishu/Telegram to establish `last_active`, or specify `channel/to` explicitly.
+
 Security notes:
 - If `gateway.api_key` is empty, only loopback requests are allowed (e.g. `127.0.0.1`)
 - If `gateway.api_key` is set, include `Authorization: Bearer <api_key>` (otherwise you'll get 401)

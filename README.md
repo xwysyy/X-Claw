@@ -123,6 +123,8 @@ curl -sS -X POST http://127.0.0.1:18790/api/notify \
   -d '{"content":"任务完成了（last_active）"}'
 ```
 
+注意：如果 gateway 刚启动、还没有任何外部对话记录（`last_active` 为空），省略 `channel/to` 会返回 `channel is required`。此时请先在飞书/Telegram 等渠道给机器人发一句话建立 `last_active`，或显式指定 `channel/to`。
+
 安全说明：
 - 当 `gateway.api_key` 为空时，仅允许来自本机 loopback 的请求（例如 `127.0.0.1`）
 - 当 `gateway.api_key` 设置为非空时，请携带 `Authorization: Bearer <api_key>`（否则返回 401）
