@@ -259,7 +259,8 @@ func (t *CronTool) listJobs() *ToolResult {
 		return SilentResult("No scheduled jobs")
 	}
 
-	result := "Scheduled jobs:\n"
+	var result strings.Builder
+	result.WriteString("Scheduled jobs:\n")
 	for _, j := range jobs {
 		var scheduleInfo string
 		if j.Schedule.Kind == "every" && j.Schedule.EveryMS != nil {
@@ -271,10 +272,10 @@ func (t *CronTool) listJobs() *ToolResult {
 		} else {
 			scheduleInfo = "unknown"
 		}
-		result += fmt.Sprintf("- %s (id: %s, %s)\n", j.Name, j.ID, scheduleInfo)
+		result.WriteString(fmt.Sprintf("- %s (id: %s, %s)\n", j.Name, j.ID, scheduleInfo))
 	}
 
-	return SilentResult(result)
+	return SilentResult(result.String())
 }
 
 func (t *CronTool) removeJob(args map[string]any) *ToolResult {

@@ -109,7 +109,7 @@ func registerSharedTools(
 		}
 
 		// Web tools
-		if searchTool := tools.NewWebSearchTool(tools.WebSearchToolOptions{
+		searchTool := tools.NewWebSearchTool(tools.WebSearchToolOptions{
 			BraveAPIKey:          cfg.Tools.Web.Brave.APIKey,
 			BraveMaxResults:      cfg.Tools.Web.Brave.MaxResults,
 			BraveEnabled:         cfg.Tools.Web.Brave.Enabled,
@@ -125,10 +125,14 @@ func registerSharedTools(
 			GrokMaxResults:       cfg.Tools.Web.Grok.MaxResults,
 			GrokEnabled:          cfg.Tools.Web.Grok.Enabled,
 			Proxy:                cfg.Tools.Web.Proxy,
-		}); searchTool != nil {
+		})
+		if searchTool != nil {
 			agent.Tools.Register(searchTool)
 		}
-		agent.Tools.Register(tools.NewWebFetchToolWithProxy(50000, cfg.Tools.Web.Proxy))
+		fetchTool := tools.NewWebFetchToolWithProxy(50000, cfg.Tools.Web.Proxy)
+		if fetchTool != nil {
+			agent.Tools.Register(fetchTool)
+		}
 
 		// Message tool
 		messageTool := tools.NewMessageTool()
