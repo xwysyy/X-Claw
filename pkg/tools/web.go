@@ -752,17 +752,6 @@ func (t *WebFetchTool) Execute(ctx context.Context, args map[string]any) *ToolRe
 		llmText = llmText[:llmMaxChars]
 		llmTruncated = true
 	}
-
-	result := map[string]any{
-		"url":       urlStr,
-		"status":    resp.StatusCode,
-		"extractor": extractor,
-		"truncated": truncated,
-		"length":    len(text),
-		"text":      text,
-	}
-
-	resultJSON, _ := json.MarshalIndent(result, "", "  ")
 	llmPayload := map[string]any{
 		"url":          urlStr,
 		"status":       resp.StatusCode,
@@ -774,8 +763,14 @@ func (t *WebFetchTool) Execute(ctx context.Context, args map[string]any) *ToolRe
 	llmJSON, _ := json.MarshalIndent(llmPayload, "", "  ")
 
 	return &ToolResult{
-		ForLLM:  string(llmJSON),
-		ForUser: string(resultJSON),
+		ForLLM: string(llmJSON),
+		ForUser: fmt.Sprintf(
+			"Fetched %d bytes from %s (extractor: %s, truncated: %v)",
+			len(text),
+			urlStr,
+			extractor,
+			truncated,
+		),
 	}
 }
 
