@@ -1,5 +1,5 @@
 # ============================================================
-# Stage 1: Build the picoclaw binary
+# Stage 1: Build the x-claw binary
 # ============================================================
 FROM golang:1.25-alpine AS builder
 
@@ -64,19 +64,19 @@ HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
   CMD curl --silent --fail --noproxy '*' http://localhost:18790/health >/dev/null || exit 1
 
 # Copy binary
-COPY --from=builder /src/build/picoclaw /usr/local/bin/picoclaw
-COPY docker/entrypoint.sh /usr/local/bin/picoclaw-entrypoint.sh
-RUN chmod +x /usr/local/bin/picoclaw-entrypoint.sh
+COPY --from=builder /src/build/x-claw /usr/local/bin/x-claw
+COPY docker/entrypoint.sh /usr/local/bin/x-claw-entrypoint.sh
+RUN chmod +x /usr/local/bin/x-claw-entrypoint.sh
 
 # Create non-root user and group
-RUN addgroup -g 1000 picoclaw && \
-    adduser -D -u 1000 -G picoclaw picoclaw
+RUN addgroup -g 1000 xclaw && \
+    adduser -D -u 1000 -G xclaw xclaw
 
 # Switch to non-root user
-USER picoclaw
+USER xclaw
 
 # Run onboard to create initial directories and config
-RUN /usr/local/bin/picoclaw onboard
+RUN /usr/local/bin/x-claw onboard
 
-ENTRYPOINT ["/usr/local/bin/picoclaw-entrypoint.sh"]
+ENTRYPOINT ["/usr/local/bin/x-claw-entrypoint.sh"]
 CMD ["gateway"]

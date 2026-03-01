@@ -23,13 +23,13 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/sipeed/picoclaw/pkg/bus"
-	"github.com/sipeed/picoclaw/pkg/channels"
-	"github.com/sipeed/picoclaw/pkg/config"
-	"github.com/sipeed/picoclaw/pkg/identity"
-	"github.com/sipeed/picoclaw/pkg/logger"
-	"github.com/sipeed/picoclaw/pkg/media"
-	"github.com/sipeed/picoclaw/pkg/utils"
+	"github.com/xwysyy/picoclaw/pkg/bus"
+	"github.com/xwysyy/picoclaw/pkg/channels"
+	"github.com/xwysyy/picoclaw/pkg/config"
+	"github.com/xwysyy/picoclaw/pkg/identity"
+	"github.com/xwysyy/picoclaw/pkg/logger"
+	"github.com/xwysyy/picoclaw/pkg/media"
+	"github.com/xwysyy/picoclaw/pkg/utils"
 )
 
 const feishuMaxPostImageAttachments = 4
@@ -168,7 +168,7 @@ func (c *FeishuChannel) Send(ctx context.Context, msg bus.OutboundMessage) error
 				ReceiveId(msg.ChatID).
 				MsgType("post").
 				Content(postJSON).
-				Uuid(fmt.Sprintf("picoclaw-%d-%d", sendID, idx)).
+				Uuid(fmt.Sprintf("x-claw-%d-%d", sendID, idx)).
 				Build()).
 			Build()
 
@@ -266,7 +266,7 @@ func (c *FeishuChannel) SendPlaceholder(ctx context.Context, chatID string) (str
 			ReceiveId(chatID).
 			MsgType("text").
 			Content(string(payload)).
-			Uuid("picoclaw-ph-" + uuid.NewString()).
+			Uuid("x-claw-ph-" + uuid.NewString()).
 			Build()).
 		Build()
 
@@ -406,7 +406,7 @@ func (c *FeishuChannel) SendMedia(ctx context.Context, msg bus.OutboundMediaMess
 					ReceiveId(msg.ChatID).
 					MsgType("image").
 					Content(string(payload)).
-					Uuid(fmt.Sprintf("picoclaw-media-%d-%d", sendID, partIdx)).
+					Uuid(fmt.Sprintf("x-claw-media-%d-%d", sendID, partIdx)).
 					Build()).
 				Build()
 
@@ -473,7 +473,7 @@ func (c *FeishuChannel) SendMedia(ctx context.Context, msg bus.OutboundMediaMess
 					ReceiveId(msg.ChatID).
 					MsgType(msgType).
 					Content(string(payload)).
-					Uuid(fmt.Sprintf("picoclaw-media-%d-%d", sendID, partIdx)).
+					Uuid(fmt.Sprintf("x-claw-media-%d-%d", sendID, partIdx)).
 					Build()).
 				Build()
 

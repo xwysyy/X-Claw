@@ -9,11 +9,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sipeed/picoclaw/pkg/bus"
-	"github.com/sipeed/picoclaw/pkg/channels"
-	"github.com/sipeed/picoclaw/pkg/config"
-	"github.com/sipeed/picoclaw/pkg/providers"
-	"github.com/sipeed/picoclaw/pkg/tools"
+	"github.com/xwysyy/picoclaw/pkg/bus"
+	"github.com/xwysyy/picoclaw/pkg/channels"
+	"github.com/xwysyy/picoclaw/pkg/config"
+	"github.com/xwysyy/picoclaw/pkg/providers"
+	"github.com/xwysyy/picoclaw/pkg/tools"
 )
 
 type fakeChannel struct{ id string }

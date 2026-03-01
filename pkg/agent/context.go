@@ -13,10 +13,10 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/sipeed/picoclaw/pkg/logger"
-	"github.com/sipeed/picoclaw/pkg/providers"
-	"github.com/sipeed/picoclaw/pkg/skills"
-	"github.com/sipeed/picoclaw/pkg/tools"
+	"github.com/xwysyy/picoclaw/pkg/logger"
+	"github.com/xwysyy/picoclaw/pkg/providers"
+	"github.com/xwysyy/picoclaw/pkg/skills"
+	"github.com/xwysyy/picoclaw/pkg/tools"
 )
 
 type ContextRuntimeSettings struct {
@@ -62,7 +62,7 @@ func getGlobalConfigDir() string {
 	if err != nil {
 		return ""
 	}
-	return filepath.Join(home, ".picoclaw")
+	return filepath.Join(home, ".x-claw")
 }
 
 func NewContextBuilder(workspace string) *ContextBuilder {
@@ -157,9 +157,9 @@ func (cb *ContextBuilder) getIdentity() string {
 	// Build tools section dynamically
 	toolsSection := cb.buildToolsSection()
 
-	return fmt.Sprintf(`# picoclaw 🦞
+	return fmt.Sprintf(`# X-Claw 🦞
 
-You are picoclaw, a helpful AI assistant.
+You are X-Claw, a helpful AI assistant.
 
 ## Workspace
 Your workspace is at: %s

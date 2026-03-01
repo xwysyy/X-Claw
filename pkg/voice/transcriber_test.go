@@ -246,4 +246,3 @@ func TestGroqTranscriber_Transcribe_ContextCanceled(t *testing.T) {
 		t.Fatalf("expected context cancellation error, got: %v", err)
 	}
 }
-

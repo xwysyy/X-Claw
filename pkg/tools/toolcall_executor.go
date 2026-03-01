@@ -10,9 +10,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/sipeed/picoclaw/pkg/logger"
-	"github.com/sipeed/picoclaw/pkg/providers"
-	"github.com/sipeed/picoclaw/pkg/utils"
+	"github.com/xwysyy/picoclaw/pkg/logger"
+	"github.com/xwysyy/picoclaw/pkg/providers"
+	"github.com/xwysyy/picoclaw/pkg/utils"
 )
 
 // ToolCallParallelConfig configures in-batch parallel execution for tool calls.

@@ -8,8 +8,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/sipeed/picoclaw/pkg/providers"
-	"github.com/sipeed/picoclaw/pkg/session"
+	"github.com/xwysyy/picoclaw/pkg/providers"
+	"github.com/xwysyy/picoclaw/pkg/session"
 )
 
 const (

@@ -1,16 +1,16 @@
-// PicoClaw - Ultra-lightweight personal AI agent
+// X-Claw - Ultra-lightweight personal AI agent
 // License: MIT
 //
-// Copyright (c) 2026 PicoClaw contributors
+// Copyright (c) 2026 X-Claw contributors
 
 package config
 
-// DefaultConfig returns the default configuration for PicoClaw.
+// DefaultConfig returns the default configuration for X-Claw.
 func DefaultConfig() *Config {
 	return &Config{
 		Agents: AgentsConfig{
 			Defaults: AgentDefaults{
-				Workspace:           "~/.picoclaw/workspace",
+				Workspace:           "~/.x-claw/workspace",
 				RestrictToWorkspace: true,
 				Provider:            "",
 				Model:               "",

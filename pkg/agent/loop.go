@@ -1,8 +1,8 @@
-// PicoClaw - Ultra-lightweight personal AI agent
+// X-Claw - Ultra-lightweight personal AI agent
 // Inspired by and based on nanobot: https://github.com/HKUDS/nanobot
 // License: MIT
 //
-// Copyright (c) 2026 PicoClaw contributors
+// Copyright (c) 2026 X-Claw contributors
 
 package agent
 
@@ -17,18 +17,18 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/sipeed/picoclaw/pkg/bus"
-	"github.com/sipeed/picoclaw/pkg/channels"
-	"github.com/sipeed/picoclaw/pkg/config"
-	"github.com/sipeed/picoclaw/pkg/constants"
-	"github.com/sipeed/picoclaw/pkg/logger"
-	"github.com/sipeed/picoclaw/pkg/media"
-	"github.com/sipeed/picoclaw/pkg/providers"
-	"github.com/sipeed/picoclaw/pkg/routing"
-	"github.com/sipeed/picoclaw/pkg/skills"
-	"github.com/sipeed/picoclaw/pkg/state"
-	"github.com/sipeed/picoclaw/pkg/tools"
-	"github.com/sipeed/picoclaw/pkg/utils"
+	"github.com/xwysyy/picoclaw/pkg/bus"
+	"github.com/xwysyy/picoclaw/pkg/channels"
+	"github.com/xwysyy/picoclaw/pkg/config"
+	"github.com/xwysyy/picoclaw/pkg/constants"
+	"github.com/xwysyy/picoclaw/pkg/logger"
+	"github.com/xwysyy/picoclaw/pkg/media"
+	"github.com/xwysyy/picoclaw/pkg/providers"
+	"github.com/xwysyy/picoclaw/pkg/routing"
+	"github.com/xwysyy/picoclaw/pkg/skills"
+	"github.com/xwysyy/picoclaw/pkg/state"
+	"github.com/xwysyy/picoclaw/pkg/tools"
+	"github.com/xwysyy/picoclaw/pkg/utils"
 )
 
 type AgentLoop struct {

@@ -6,8 +6,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/sipeed/picoclaw/pkg/logger"
-	"github.com/sipeed/picoclaw/pkg/providers"
+	"github.com/xwysyy/picoclaw/pkg/logger"
+	"github.com/xwysyy/picoclaw/pkg/providers"
 )
 
 func (al *AgentLoop) maybeFlushMemoryBeforeCompaction(
