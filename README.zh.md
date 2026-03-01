@@ -4,9 +4,7 @@ PicoClaw 是一个使用 Go 编写的轻量级个人 AI 助手。
 
 本仓库包含核心 CLI、Gateway 服务、工具系统和多种渠道集成。
 
-详细文档入口：
-- 中文：`docs/README.zh.md`
-- English：`docs/README.md`
+项目文档做了精简，核心说明保留在根目录 README 中。
 
 ## 项目范围
 
@@ -165,15 +163,11 @@ docker compose -p picoclaw -f docker/docker-compose.yml down
 - 默认工作区：`~/.picoclaw/workspace`
 - 配置模板：`config/config.example.json`
 
-完整配置文档见：
-- `docs/tools_configuration.md`
-- `docs/channels/*`
-- `docs/migration/model-list-migration.md`
+进阶配置可直接查看代码中的配置结构（`pkg/config`）。
 
 ## 排错
 
 参考：
-- `docs/troubleshooting.md`
 - `docker compose ... logs -f picoclaw-gateway`
 
 ## 许可证

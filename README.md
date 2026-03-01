@@ -4,9 +4,7 @@ PicoClaw is a lightweight personal AI assistant written in Go.
 
 This repository contains the core CLI, gateway service, tool system, and channel integrations.
 
-If you want full channel/provider details, use:
-- English docs: `docs/README.md`
-- Chinese docs: `docs/README.zh.md`
+Project documentation is kept concise in the root README files.
 
 ## Scope
 
@@ -165,15 +163,11 @@ docker compose -p picoclaw -f docker/docker-compose.yml down
 - Default workspace: `~/.picoclaw/workspace`
 - Example config template: `config/config.example.json`
 
-For complete tool/channel/provider options, see:
-- `docs/tools_configuration.md`
-- `docs/channels/*`
-- `docs/migration/model-list-migration.md`
+For advanced options, inspect in-code config structs under `pkg/config`.
 
 ## Troubleshooting
 
 Use:
-- `docs/troubleshooting.md`
 - `docker compose ... logs -f picoclaw-gateway`
 
 ## License
