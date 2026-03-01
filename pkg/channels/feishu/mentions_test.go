@@ -90,3 +90,77 @@ func TestFeishuCleanTextMentions_WithoutBotID_StripsMultipleLeadingMentions(t *t
 		t.Fatalf("unexpected cleaned content: %q", cleaned)
 	}
 }
+
+func TestFeishuDetectAndStripBotMention_NonTextMessages(t *testing.T) {
+	key := "@_user_1"
+	name := "Bot"
+	openID := "ou_bot_123"
+
+	mentions := []*larkim.MentionEvent{
+		{
+			Key:  &key,
+			Name: &name,
+			Id:   &larkim.UserId{OpenId: &openID},
+		},
+	}
+
+	msgType := "post"
+	message := &larkim.EventMessage{
+		MessageType: &msgType,
+		Mentions:    mentions,
+	}
+
+	mentioned, cleaned := feishuDetectAndStripBotMention(message, " hello ", "")
+	if !mentioned {
+		t.Fatalf("expected mentioned=true when bot_id is empty and mentions exist")
+	}
+	if cleaned != "hello" {
+		t.Fatalf("unexpected cleaned content: %q", cleaned)
+	}
+
+	mentioned, cleaned = feishuDetectAndStripBotMention(message, " hi ", openID)
+	if !mentioned {
+		t.Fatalf("expected mentioned=true when mention matches bot_id")
+	}
+	if cleaned != "hi" {
+		t.Fatalf("unexpected cleaned content: %q", cleaned)
+	}
+
+	mentioned, cleaned = feishuDetectAndStripBotMention(message, "hi", "ou_other")
+	if mentioned {
+		t.Fatalf("expected mentioned=false when no mention matches configured bot_id")
+	}
+	if cleaned != "hi" {
+		t.Fatalf("unexpected cleaned content: %q", cleaned)
+	}
+}
+
+func TestFeishuUserIDMatches(t *testing.T) {
+	userID := "u_1"
+	openID := "ou_1"
+	unionID := "un_1"
+	id := &larkim.UserId{
+		UserId:  &userID,
+		OpenId:  &openID,
+		UnionId: &unionID,
+	}
+
+	if !feishuUserIDMatches(id, userID) {
+		t.Fatalf("expected user_id match")
+	}
+	if !feishuUserIDMatches(id, openID) {
+		t.Fatalf("expected open_id match")
+	}
+	if !feishuUserIDMatches(id, unionID) {
+		t.Fatalf("expected union_id match")
+	}
+	if feishuUserIDMatches(id, "other") {
+		t.Fatalf("did not expect mismatch to return true")
+	}
+	if feishuUserIDMatches(nil, openID) {
+		t.Fatalf("nil id should not match")
+	}
+	if feishuUserIDMatches(id, "") {
+		t.Fatalf("empty expected value should not match")
+	}
+}
