@@ -30,6 +30,7 @@
 - [x] `ref/feishu-openclaw`（Node，飞书本地长连接桥接 + 媒体最稳）— 2026-03-02
 - [x] `ref/CoPaw`（Python，console/分发/多渠道工程化；偏产品化）— 2026-03-02
 - [x] `ref/open-cowork`（TS/Electron，桌面端沙箱 + GUI 操作 + Trace Panel）— 2026-03-02
+- [x] `ref/poco-agent`（Python/TS，Poco：安全沙箱 + UI + 异步/定时任务）— 2026-03-02
 - [x] `ref/pi-mono`（TS，Pi Coding Agent：会话树 JSONL + steering/follow-up）— 2026-03-02
 - [x] `ref/clawdbot-feishu`（TS，OpenClaw 飞书插件：消息/媒体/权限/策略都很全）— 2026-03-02
 - [x] `ref/UltimateSearchSkill`（Shell，双引擎搜索 Skill：Grok + Tavily + Fetch/Map）— 2026-03-02
@@ -1136,3 +1137,89 @@ zeroclaw 是我们必须认真对标的 claw 类竞品：它把“pico-scale 的
 - PR-1（安全）：`estop` 子系统（本地 state.json + CLI 命令 + 对 exec/web 工具生效）
 - PR-2（可观测）：runtime trace JSONL（对齐 Phase A1，先写 tool 事件）
 - PR-3（生态）：MCP stdio client（先做一种传输），再扩展 HTTP/SSE
+
+---
+
+### 3.19 ✅ poco-agent（Python/TS）— “可运营的 Agent 平台：回调 + TODO 进度 + 计划审批 + 定时任务” 的体系化答案（已完成：2026-03-02）
+
+仓库：`ref/poco-agent`
+
+#### (1) 一句话价值
+
+poco-agent 的价值不在“又一个 agent”，而在于它把 **Agent 运行**当成“可运营系统”来设计：  
+**前端可视化 + 后端状态/队列 + Executor 沙箱 + 回调/进度 + 定时任务**，并且把 Claude Code/Claude Agent SDK 的一些成熟交互范式（Plan Mode / Slash Commands / AskQuestion）产品化。
+
+对 PicoClaw 来说，虽然我们不一定走“多服务 + UI + 容器沙箱”全家桶路线，但它提供了非常清晰的对照：  
+哪些能力是 **“长期使用会刚需”**（进度、回调、审批、定时、归档），哪些可以保持 pico-scale（默认关闭、按需启用）。
+
+#### (2) 最值得抄的 8 个点（优先可迁移的设计模式）
+
+1) **“多进程/多服务职责分离”非常清楚：Backend / Executor-Manager / Executor / Frontend**  
+   - 文档线索：`ref/poco-agent/docs/en/configuration.md`（服务划分与依赖）  
+   - 关键点：内部调用使用 `INTERNAL_API_TOKEN`（内部 API token），避免“服务之间裸奔”  
+   - PicoClaw 启发：即便我们仍是单二进制，也可以在内部抽象出同样的边界：  
+     - `gateway` = ingress/router  
+     - `agent loop` = orchestrator  
+     - `tool exec` = executor（带策略）  
+     - `run store` = 状态与持久化
+
+2) **Callback 模型：每次 agent 输出/状态变化都回传，UI 只做展示，不做推理**  
+   - 关键位置：`ref/poco-agent/executor/app/hooks/callback.py`（running/completed/failed + state_patch + progress）  
+   - 启发：PicoClaw 的 Gateway 未来如果做轻量 UI（或 WebSocket 推送），也应该是“事件流”而不是“轮询拼 JSON”
+
+3) **TODO 驱动的进度条：把工作流状态变成稳定结构（可计算）**  
+   - 关键位置：`ref/poco-agent/executor/app/hooks/todo.py`（从 `TodoWrite` tool 抽取 todos + current_step）  
+   - 启发：这与我们 Roadmap 的 **Replayable Runs / Durable Tasks** 强相关：  
+     - 把“进度”定义为结构化数据（而不是模型口头说“快做完了”）
+
+4) **Plan Mode 的“工具白名单”策略：计划阶段先禁执行工具，审批后才开放**  
+   - 关键位置：`ref/poco-agent/executor/app/core/engine.py`（`permission_mode == "plan"` + tool allowlist + `ExitPlanMode` 审批）  
+   - 启发：这就是 **Policy-first Tools** 最干净的一种落地：  
+     - 不靠 prompt 劝模型“别乱跑”，而是硬策略限制工具可用性
+
+5) **Slash Commands 必须“原样透传”，否则 SDK 无法识别**  
+   - 关键位置：`ref/poco-agent/executor/app/core/engine.py`（`prompt.lstrip().startswith("/")`）  
+   - 启发：对 PicoClaw 来说，如果我们未来加 slash 指令体系，必须把“命令解析”做成稳定协议（而不是靠 LLM 猜）
+
+6) **定时任务：timezone + cron 校验 + next_run_at（UTC）+ coalesce missed execution**  
+   - 关键位置：`ref/poco-agent/backend/app/services/scheduled_task_service.py`  
+   - 启发：我们当前 cron tool 已能 add/list/enable/disable，但“可运营”还缺：  
+     - timezone  
+     - next_run_at  
+     - run history（成功/失败/耗时/输出摘要）  
+     - coalesce（当上一次还在跑时，不要无限堆队列）
+
+7) **“reuse_session vs new session per run”是非常实用的产品化开关**  
+   - 关键位置：`ref/poco-agent/backend/app/services/scheduled_task_service.py`（`reuse_session` / `session_id` pinning）  
+   - 启发：PicoClaw 的 cron 也应该支持这两种模式：  
+     - **固定 workspace**（做持续维护型任务，比如日报、持续研究）  
+     - **每次新 workspace**（避免污染，适合一次性任务）
+
+8) **“推荐用 Tailscale 远程访问，而不是直接暴露公网”是一种很现实的安全建议**  
+   - 文档线索：`ref/poco-agent/docs/en/docker-compose.md`（Tailscale Serve 示例）  
+   - 启发：这对我们的 `/api/notify` 很有参考价值：  
+     - 如果用户不想做复杂反代/HTTPS，Tailscale 是更安全的“公网替代品”
+
+#### (3) 对 PicoClaw 的落地映射（对齐我们的差异化支柱）
+
+- Replayable Runs（可回放执行）：  
+  - 参考 poco 的 callback + state_patch 思路，把我们 Phase A 的 tool trace 做成**事件流**（JSONL append-only）
+
+- Policy-first Tools（工具策略层）：  
+  - 参考 Plan Mode：引入“计划阶段 tool allowlist”，把危险工具（exec/write）默认锁住，直到用户确认
+
+- Structured Memory（结构化记忆资产）：  
+  - 参考 scheduled task 的 `config_snapshot`：把“运行配置快照”当成一等公民对象（可回滚/可审计）
+
+- Durable Long Tasks（可恢复长任务）：  
+  - 参考 scheduled_task 的 next_run_at/coalesce/reuse_session/run record：把 cron 从“定时触发”升级为“可运营任务系统”
+
+- Channel & Notification（联动扩展）：  
+  - Poco 的“回调/推送”理念提示我们：任务完成后应该能主动提醒用户  
+  - 我们已经实现 `/api/notify` + cron 完工通知，下一步是把“通知”升级成可配置的工作流节点（可选开启）
+
+#### (4) 最小 PR 切法（优先 pico-scale 可落地）
+
+- PR-1（cron 可运营化）：为 cron job 增加 `timezone/next_run_at/run_history/coalesce`（先写 store schema + list 输出）
+- PR-2（Plan Mode 最小实现）：在 agent loop 中加“计划阶段工具白名单 + 用户确认开关”（先只管 `exec`/`edit`）
+- PR-3（通知工作流）：把“任务完成提醒”做成可选 hook（配置 `notify.on_task_complete=true` + 使用 `message` tool）

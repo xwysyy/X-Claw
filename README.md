@@ -127,6 +127,13 @@ curl -sS -X POST http://127.0.0.1:18790/api/notify \
 - 当 `gateway.api_key` 为空时，仅允许来自本机 loopback 的请求（例如 `127.0.0.1`）
 - 当 `gateway.api_key` 设置为非空时，请携带 `Authorization: Bearer <api_key>`（否则返回 401）
 
+公网暴露建议（如需远程/跨机器通知）：
+- 强烈不建议在 `gateway.api_key` 为空时暴露公网
+- 建议优先使用反向代理（HTTPS）或私网方案（如 Tailscale）再对外提供 `/api/notify`
+- 如必须直连：将 `gateway.host` 设为 `0.0.0.0` 并配置强随机 `gateway.api_key`
+
+同时仓库内置了一个通知技巧文档：`workspace/skills/task-notify/SKILL.md`（推荐通过 `message` tool 主动提醒；外部系统也可调用 `/api/notify`）。
+
 ## Docker Compose
 
 本仓库的 `docker/docker-compose.yml` 提供两个 profile：

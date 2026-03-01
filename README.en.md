@@ -127,6 +127,13 @@ Security notes:
 - If `gateway.api_key` is empty, only loopback requests are allowed (e.g. `127.0.0.1`)
 - If `gateway.api_key` is set, include `Authorization: Bearer <api_key>` (otherwise you'll get 401)
 
+Public exposure (remote / cross-machine notifications):
+- Never expose `/api/notify` to the public internet with an empty `gateway.api_key`
+- Prefer HTTPS reverse proxy or private networking (e.g. Tailscale) for remote access
+- If you must bind it publicly: set `gateway.host` to `0.0.0.0` and configure a strong random `gateway.api_key`
+
+This repo also ships a notification skill doc at `workspace/skills/task-notify/SKILL.md` (preferred: proactive `message` tool; external systems can call `/api/notify`).
+
 ## Docker Compose
 
 This repo ships `docker/docker-compose.yml` with profiles:
