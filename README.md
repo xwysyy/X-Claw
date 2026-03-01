@@ -134,6 +134,49 @@ curl -sS -X POST http://127.0.0.1:18790/api/notify \
 
 外部 Agent（例如 Claude Code / Codex）对接 PicoClaw 通知的扩展文档见：`extensions/picoclaw-notify/SKILL.md`（通过调用 `/api/notify` 推送提醒）。
 
+### Tool Trace（工具调用可追溯 / 可复盘）
+
+当你把配置里的 `tools.trace.enabled` 设为 `true` 时，每一次 tool call 都会追加写入一个 JSONL 事件流，并可选写 per-call 文件，便于排查 “模型为什么调用了某个工具 / 工具到底返回了什么 / 耗时多少”。
+
+默认落盘位置（当 `tools.trace.dir` 为空时）：
+
+- ` <workspace>/.picoclaw/audit/tools/<session>/events.jsonl `
+- ` <workspace>/.picoclaw/audit/tools/<session>/calls/*.json|*.md `（当 `tools.trace.write_per_call_files=true`）
+
+配置示例：
+
+```json
+{
+  "tools": {
+    "trace": {
+      "enabled": true,
+      "write_per_call_files": true
+    }
+  }
+}
+```
+
+### 结构化记忆输出（Memory JSON hits）
+
+`memory_search` / `memory_get` 的工具输出对 LLM 侧返回结构化 JSON（`kind` 字段可用于回归测试与稳定引用），同时对人类侧保留简要摘要：
+
+- `memory_search` → `{"kind":"memory_search_result","hits":[...]}`
+- `memory_get` → `{"kind":"memory_get_result","found":...,"hit":...}`
+
+这能显著降低 “模型看不懂纯文本结果 / 引用不稳定” 的概率。
+
+### Cron 可运营任务状态（runHistory / lastStatus）
+
+Cron 的任务状态会持久化到工作区：
+
+- ` <workspace>/cron/jobs.json `
+
+其中 `state` 会记录：
+
+- `lastStatus` / `lastRunAtMs` / `lastDurationMs`
+- `lastOutputPreview`（截断预览）
+- `runHistory`（最近 N 次运行记录）
+
 ## Docker Compose
 
 本仓库的 `docker/docker-compose.yml` 提供两个 profile：
@@ -141,6 +184,7 @@ curl -sS -X POST http://127.0.0.1:18790/api/notify \
 - `agent`：单次/手动执行
 
 容器会挂载本地 `config/config.json`（只读）作为运行配置。
+如果容器日志提示 `permission denied` 无法读取 `/home/picoclaw/.picoclaw/config.json`，通常是因为宿主机上的 `config/config.json` 权限过严（例如 `600`），请确保容器用户可读（例如 `chmod 644 config/config.json`）。
 
 构建并启动 gateway：
 

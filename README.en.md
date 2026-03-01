@@ -134,6 +134,54 @@ Public exposure (remote / cross-machine notifications):
 
 For external agents (Claude Code / Codex) to notify PicoClaw, see: `extensions/picoclaw-notify/SKILL.md` (calls `/api/notify`).
 
+### Tool Trace (replayable tool-call logs)
+
+When `tools.trace.enabled=true`, every tool call appends to an on-disk JSONL event stream, and can optionally write per-call files. This makes it easy to debug:
+
+- why the model decided to call a tool
+- what arguments were used
+- what the tool returned
+- duration / error summary
+
+Default trace locations (when `tools.trace.dir` is empty):
+
+- ` <workspace>/.picoclaw/audit/tools/<session>/events.jsonl `
+- ` <workspace>/.picoclaw/audit/tools/<session>/calls/*.json|*.md ` (when `tools.trace.write_per_call_files=true`)
+
+Config example:
+
+```json
+{
+  "tools": {
+    "trace": {
+      "enabled": true,
+      "write_per_call_files": true
+    }
+  }
+}
+```
+
+### Structured Memory Output (JSON hits)
+
+`memory_search` / `memory_get` return structured JSON to the LLM side (with a stable `kind` field for regression tests and reliable quoting), while still keeping a short human-readable summary:
+
+- `memory_search` → `{"kind":"memory_search_result","hits":[...]}`
+- `memory_get` → `{"kind":"memory_get_result","found":...,"hit":...}`
+
+This significantly improves second-pass consumption and reduces “model misreads plain text” issues.
+
+### Operable Cron State (runHistory / lastStatus)
+
+Cron job state is persisted under your workspace:
+
+- ` <workspace>/cron/jobs.json `
+
+The `state` section records:
+
+- `lastStatus` / `lastRunAtMs` / `lastDurationMs`
+- `lastOutputPreview` (truncated preview)
+- `runHistory` (latest N runs)
+
 ## Docker Compose
 
 This repo ships `docker/docker-compose.yml` with profiles:
@@ -141,6 +189,7 @@ This repo ships `docker/docker-compose.yml` with profiles:
 - `agent` for one-shot/manual CLI runs
 
 Use your local config at `config/config.json` (mounted read-only into the container).
+If the container logs show `permission denied` for `/home/picoclaw/.picoclaw/config.json`, your host `config/config.json` is likely too strict (e.g. `600`). Ensure it is readable by the container user (e.g. `chmod 644 config/config.json`).
 
 Build and run gateway:
 
