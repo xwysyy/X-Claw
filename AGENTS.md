@@ -83,3 +83,15 @@ Expected healthy state:
 In non-interactive command contexts, use:
 
 - `source ~/.zshrc && proxy_on && <your-command>`
+
+## Post-change Notification (Feishu / last_active)
+
+When finishing a coding task (feature/fix/docs), proactively notify the user via the running Gateway.
+
+- Preferred: call `POST /api/notify` without `channel/to` so it targets `last_active`.
+- If `gateway.api_key` is configured, include `Authorization: Bearer <api_key>`.
+- This is intended for "done/ready-to-review" pings (e.g., after redeploy).
+
+Example:
+
+- `curl -sS -X POST http://127.0.0.1:18790/api/notify -H 'Content-Type: application/json' -d '{"content":"✅ PicoClaw: change complete (redeployed)."}'`

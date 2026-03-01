@@ -1,6 +1,10 @@
 # PicoClaw
 
-[中文](README.md)
+<p align="center">
+  <img src="assets/logo.svg" alt="PicoClaw logo" width="120" />
+</p>
+
+[中文](README.md) | [Roadmap](ROADMAP.md)
 
 PicoClaw is a lightweight personal AI assistant written in Go.
 
@@ -98,6 +102,30 @@ Health endpoint:
 ```bash
 curl -sS http://127.0.0.1:18790/health
 ```
+
+### Notification API (`/api/notify`)
+
+Gateway also exposes a lightweight notification endpoint so external systems (CI / scripts / daemons) can push a reminder to you via configured channels (e.g. Feishu).
+
+Send to a specific channel + recipient:
+
+```bash
+curl -sS -X POST http://127.0.0.1:18790/api/notify \
+  -H 'Content-Type: application/json' \
+  -d '{"channel":"feishu","to":"oc_xxx","content":"Task completed"}'
+```
+
+If you omit `channel/to`, it defaults to the most recent conversation (`last_active`):
+
+```bash
+curl -sS -X POST http://127.0.0.1:18790/api/notify \
+  -H 'Content-Type: application/json' \
+  -d '{"content":"Task completed (last_active)"}'
+```
+
+Security notes:
+- If `gateway.api_key` is empty, only loopback requests are allowed (e.g. `127.0.0.1`)
+- If `gateway.api_key` is set, include `Authorization: Bearer <api_key>` (otherwise you'll get 401)
 
 ## Docker Compose
 

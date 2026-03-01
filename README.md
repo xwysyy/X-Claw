@@ -1,6 +1,10 @@
 # PicoClaw
 
-[English](README.en.md)
+<p align="center">
+  <img src="assets/logo.svg" alt="PicoClaw logo" width="120" />
+</p>
+
+[English](README.en.md) | [Roadmap](ROADMAP.md)
 
 PicoClaw 是一个使用 Go 编写的轻量级个人 AI 助手。
 
@@ -98,6 +102,30 @@ vim ~/.picoclaw/config.json
 ```bash
 curl -sS http://127.0.0.1:18790/health
 ```
+
+### 通知接口（/api/notify）
+
+Gateway 会额外暴露一个通知接口，用于让外部系统（CI / 脚本 / 守护进程）通过已配置的渠道给你发提醒（例如飞书）。
+
+指定渠道与收件人：
+
+```bash
+curl -sS -X POST http://127.0.0.1:18790/api/notify \
+  -H 'Content-Type: application/json' \
+  -d '{"channel":"feishu","to":"oc_xxx","content":"任务完成了"}'
+```
+
+如果省略 `channel/to`，会默认发送到最近一次对话的 `last_active`：
+
+```bash
+curl -sS -X POST http://127.0.0.1:18790/api/notify \
+  -H 'Content-Type: application/json' \
+  -d '{"content":"任务完成了（last_active）"}'
+```
+
+安全说明：
+- 当 `gateway.api_key` 为空时，仅允许来自本机 loopback 的请求（例如 `127.0.0.1`）
+- 当 `gateway.api_key` 设置为非空时，请携带 `Authorization: Bearer <api_key>`（否则返回 401）
 
 ## Docker Compose
 
