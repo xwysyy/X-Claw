@@ -38,6 +38,13 @@ make test
 ./scripts/test-unit.sh -v
 ```
 
+提示：`-race` 通常需要 `CGO_ENABLED=1` 且机器上有可用的 C 编译器（gcc/clang）。
+同时 race 检测会显著增加 CPU/内存消耗；在小内存环境建议只对关键包启用，例如：
+
+```bash
+CGO_ENABLED=1 PICOCLAW_TEST_PKGS='./pkg/agent ./pkg/tools' ./scripts/test-unit.sh -race
+```
+
 如果只想测试部分包，可以用环境变量覆盖：
 
 ```bash
