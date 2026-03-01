@@ -1,7 +1,5 @@
-# PicoClaw Channel System 重构：完整开发指南
+# PicoClaw Channel System：完整开发指南
 
-> **分支**: `refactor/channel-system`
-> **状态**: 活跃开发中（约 40 commits）
 > **影响范围**: `pkg/channels/`, `pkg/bus/`, `pkg/media/`, `pkg/identity/`, `cmd/picoclaw/internal/gateway/`
 
 ---
@@ -46,6 +44,8 @@ pkg/channels/
 pkg/channels/
 ├── base.go              # BaseChannel 共享抽象层
 ├── interfaces.go        # 可选能力接口（TypingCapable, MessageEditor, ReactionCapable, PlaceholderCapable, PlaceholderRecorder）
+├── README.md            # 英文文档
+├── README.zh.md         # 中文文档
 ├── media.go             # MediaSender 可选接口
 ├── webhook.go           # WebhookHandler, HealthChecker 可选接口
 ├── errors.go            # 错误哨兵值（ErrNotRunning, ErrRateLimit, ErrTemporary, ErrSendFailed）
@@ -60,7 +60,7 @@ pkg/channels/
 ├── discord/
 │   ├── init.go
 │   └── discord.go
-├── slack/ line/ onebot/ dingtalk/ feishu/ wecom/ qq/ whatsapp/ pico/
+├── slack/ line/ onebot/ dingtalk/ feishu/ wecom/ qq/ whatsapp/ whatsapp_native/ maixcam/ pico/
 │   └── ...
 
 pkg/bus/
@@ -111,7 +111,7 @@ pkg/identity/
 |------|------|
 | **子包隔离** | 每个 channel 一个独立 Go 子包，依赖 `channels` 父包提供的 `BaseChannel` 和接口 |
 | **工厂注册** | 各子包通过 `init()` 自注册，Manager 通过名字查找工厂，消除 import 耦合 |
-| **能力发现** | 可选能力通过接口（`MediaSender`, `TypingCapable`, `ReactionCapable`, `PlaceholderCapable`, `MessageEditor`, `WebhookHandler`）声明，Manager 运行时类型断言发现 |
+| **能力发现** | 可选能力通过接口（`MediaSender`, `TypingCapable`, `ReactionCapable`, `PlaceholderCapable`, `MessageEditor`, `WebhookHandler`, `HealthChecker`）声明，Manager 运行时类型断言发现 |
 | **结构化消息** | Peer、MessageID、SenderInfo 从 Metadata 提升为 InboundMessage 的一等字段 |
 | **错误分类** | Channel 返回哨兵错误（`ErrRateLimit`, `ErrTemporary` 等），Manager 据此决定重试策略 |
 | **集中编排** | 速率限制、消息分割、重试、Typing/Reaction/Placeholder 全部由 Manager 和 BaseChannel 统一处理，Channel 只负责 Send |
@@ -145,6 +145,7 @@ pkg/identity/
 | _(不存在)_ | `pkg/channels/interfaces.go` | 新增可选能力接口 |
 | _(不存在)_ | `pkg/channels/media.go` | 新增 MediaSender 接口 |
 | _(不存在)_ | `pkg/channels/webhook.go` | 新增 WebhookHandler/HealthChecker |
+| _(不存在)_ | `pkg/channels/whatsapp_native/` | 新增 WhatsApp 原生模式（whatsmeow） |
 | _(不存在)_ | `pkg/channels/split.go` | 新增消息分割（从 utils 迁入） |
 | _(不存在)_ | `pkg/bus/types.go` | 新增结构化消息类型 |
 | _(不存在)_ | `pkg/media/store.go` | 新增媒体文件生命周期管理 |
@@ -220,6 +221,7 @@ func NewTelegramChannel(cfg *config.Config, bus *bus.MessageBus) (*TelegramChann
         cfg.Channels.Telegram.AllowFrom, // 允许列表
         channels.WithMaxMessageLength(4096),                     // 平台消息长度上限
         channels.WithGroupTrigger(cfg.Channels.Telegram.GroupTrigger), // 群聊触发配置
+        channels.WithReasoningChannelID(cfg.Channels.Telegram.ReasoningChannelID), // 思维链路由
     )
     return &TelegramChannel{
         BaseChannel: base,
@@ -466,6 +468,7 @@ func NewMatrixChannel(cfg *config.Config, msgBus *bus.MessageBus) (*MatrixChanne
         matrixCfg.AllowFrom,                // 允许列表
         channels.WithMaxMessageLength(65536), // Matrix 消息长度限制
         channels.WithGroupTrigger(matrixCfg.GroupTrigger),
+        channels.WithReasoningChannelID(matrixCfg.ReasoningChannelID), // 思维链路由（可选）
     )
 
     return &MatrixChannel{
@@ -666,6 +669,31 @@ func (c *MatrixChannel) EditMessage(ctx context.Context, chatID, messageID, cont
 }
 ```
 
+#### PlaceholderCapable — 占位消息
+
+```go
+// 如果平台支持发送占位消息（如 "Thinking... 💭"），并且实现了 MessageEditor，
+// 则 Manager 的 preSend 会在出站时自动将占位消息编辑为最终回复。
+// SendPlaceholder 内部根据 PlaceholderConfig.Enabled 决定是否发送；
+// 返回 ("", nil) 表示跳过。
+func (c *MatrixChannel) SendPlaceholder(ctx context.Context, chatID string) (string, error) {
+    cfg := c.config.Channels.Matrix.Placeholder
+    if !cfg.Enabled {
+        return "", nil
+    }
+    text := cfg.Text
+    if text == "" {
+        text = "Thinking... 💭"
+    }
+    // 调用 Matrix API 发送占位消息
+    msg, err := c.sendText(ctx, chatID, text)
+    if err != nil {
+        return "", err
+    }
+    return msg.ID, nil
+}
+```
+
 #### WebhookHandler — HTTP Webhook 接收
 
 ```go
@@ -746,15 +774,17 @@ if c.owner != nil && c.placeholderRecorder != nil {
 ```go
 type ChannelsConfig struct {
     // ... 现有 channels
-    Matrix  MatrixChannelConfig  `yaml:"matrix" json:"matrix"`
+    Matrix  MatrixChannelConfig  `json:"matrix"`
 }
 
 type MatrixChannelConfig struct {
-    Enabled    bool     `yaml:"enabled" json:"enabled"`
-    HomeServer string   `yaml:"home_server" json:"home_server"`
-    Token      string   `yaml:"token" json:"token"`
-    AllowFrom  []string `yaml:"allow_from" json:"allow_from"`
-    GroupTrigger GroupTriggerConfig `yaml:"group_trigger" json:"group_trigger"`
+    Enabled    bool     `json:"enabled"`
+    HomeServer string   `json:"home_server"`
+    Token      string   `json:"token"`
+    AllowFrom  []string `json:"allow_from"`
+    GroupTrigger GroupTriggerConfig `json:"group_trigger"`
+    Placeholder  PlaceholderConfig  `json:"placeholder"`
+    ReasoningChannelID string `json:"reasoning_channel_id"`
 }
 ```
 
@@ -766,6 +796,15 @@ if m.config.Channels.Matrix.Enabled && m.config.Channels.Matrix.Token != "" {
     m.initChannel("matrix", "Matrix")
 }
 ```
+
+> **注意**：如果你的 channel 有多种模式（如 WhatsApp Bridge vs Native），需要在 initChannels 中根据配置分支：
+> ```go
+> if cfg.UseNative {
+>     m.initChannel("whatsapp_native", "WhatsApp Native")
+> } else {
+>     m.initChannel("whatsapp", "WhatsApp")
+> }
+> ```
 
 #### 在 Gateway 中添加 blank import
 
@@ -882,19 +921,21 @@ BaseChannel 是所有 channel 的共享抽象层，提供以下能力：
 | `IsRunning() bool` | 原子读取运行状态 |
 | `SetRunning(bool)` | 原子设置运行状态 |
 | `MaxMessageLength() int` | 消息长度限制（rune 计数），0 = 无限制 |
+| `ReasoningChannelID() string` | 思维链路由目标 channel ID（空 = 不路由） |
 | `IsAllowed(senderID string) bool` | 旧格式允许列表检查（支持 `"id\|username"` 和 `"@username"` 格式） |
 | `IsAllowedSender(sender SenderInfo) bool` | 新格式允许列表检查（委托给 `identity.MatchAllowed`） |
 | `ShouldRespondInGroup(isMentioned, content) (bool, string)` | 统一群聊触发过滤逻辑 |
-| `HandleMessage(...)` | 统一入站消息处理：权限检查 → 构建 MediaScope → 自动触发 Typing/Reaction → 发布到 Bus |
+| `HandleMessage(...)` | 统一入站消息处理：权限检查 → 构建 MediaScope → 自动触发 Typing/Reaction/Placeholder → 发布到 Bus |
 | `SetMediaStore(s) / GetMediaStore()` | Manager 注入的媒体存储 |
 | `SetPlaceholderRecorder(r) / GetPlaceholderRecorder()` | Manager 注入的占位符记录器 |
-| `SetOwner(ch) ` | Manager 注入的具体 channel 引用（用于 HandleMessage 内部的 Typing/Reaction 类型断言） |
+| `SetOwner(ch) ` | Manager 注入的具体 channel 引用（用于 HandleMessage 内部的 Typing/Reaction/Placeholder 类型断言） |
 
 **功能选项**：
 
 ```go
 channels.WithMaxMessageLength(4096)        // 设置平台消息长度限制
 channels.WithGroupTrigger(groupTriggerCfg) // 设置群聊触发配置
+channels.WithReasoningChannelID(id)        // 设置思维链路由目标 channel
 ```
 
 ### 4.4 工厂注册表
@@ -998,7 +1039,7 @@ StartAll:
      - runMediaWorker (per-channel 出站媒体)
      - dispatchOutbound (从 bus 路由到 worker 队列)
      - dispatchOutboundMedia (从 bus 路由到 media worker 队列)
-     - runTTLJanitor (每 10s 清理过期 typing/placeholder)
+     - runTTLJanitor (每 10s 清理过期 typing/reaction/placeholder)
   4. 启动共享 HTTP 服务器（如已配置）
 
 StopAll:
@@ -1206,17 +1247,20 @@ make test                                       # 全量测试
 
 | 子包 | 注册名 | 可选接口 |
 |------|--------|----------|
-| `pkg/channels/telegram/` | `"telegram"` | MessageEditor, MediaSender, TypingCapable, PlaceholderCapable |
-| `pkg/channels/discord/` | `"discord"` | MessageEditor, TypingCapable, PlaceholderCapable |
-| `pkg/channels/slack/` | `"slack"` | ReactionCapable |
-| `pkg/channels/line/` | `"line"` | WebhookHandler, HealthChecker, TypingCapable |
-| `pkg/channels/onebot/` | `"onebot"` | ReactionCapable |
-| `pkg/channels/dingtalk/` | `"dingtalk"` | WebhookHandler |
-| `pkg/channels/feishu/` | `"feishu"` | WebhookHandler (架构特定 build tags) |
-| `pkg/channels/wecom/` | `"wecom"` + `"wecom_app"` | WebhookHandler |
+| `pkg/channels/telegram/` | `"telegram"` | TypingCapable, PlaceholderCapable, MessageEditor, MediaSender |
+| `pkg/channels/discord/` | `"discord"` | TypingCapable, PlaceholderCapable, MessageEditor, MediaSender |
+| `pkg/channels/slack/` | `"slack"` | ReactionCapable, MediaSender |
+| `pkg/channels/line/` | `"line"` | TypingCapable, MediaSender, WebhookHandler |
+| `pkg/channels/onebot/` | `"onebot"` | ReactionCapable, MediaSender |
+| `pkg/channels/dingtalk/` | `"dingtalk"` | — |
+| `pkg/channels/feishu/` | `"feishu"` | — (架构特定 build tags: `feishu_32.go` / `feishu_64.go`) |
+| `pkg/channels/wecom/` | `"wecom"` | WebhookHandler, HealthChecker |
+| `pkg/channels/wecom/` | `"wecom_app"` | MediaSender, WebhookHandler, HealthChecker |
 | `pkg/channels/qq/` | `"qq"` | — |
-| `pkg/channels/whatsapp/` | `"whatsapp"` | — |
-| `pkg/channels/pico/` | `"pico"` | WebhookHandler (Pico Protocol), TypingCapable, PlaceholderCapable |
+| `pkg/channels/whatsapp/` | `"whatsapp"` | — (Bridge 模式) |
+| `pkg/channels/whatsapp_native/` | `"whatsapp_native"` | — (原生 whatsmeow 模式) |
+| `pkg/channels/maixcam/` | `"maixcam"` | — |
+| `pkg/channels/pico/` | `"pico"` | TypingCapable, PlaceholderCapable, MessageEditor, WebhookHandler |
 
 ### A.3 接口速查表
 
@@ -1230,6 +1274,7 @@ type Channel interface {
     IsRunning() bool
     IsAllowed(senderID string) bool
     IsAllowedSender(sender bus.SenderInfo) bool
+    ReasoningChannelID() string
 }
 
 // ===== 可选实现 =====
@@ -1323,8 +1368,16 @@ agentLoop.Stop()               // 停止 Agent
 
 1. **媒体清理暂时禁用**：Agent loop 中的 `ReleaseAll` 调用被注释掉了（`refactor(loop): disable media cleanup to prevent premature file deletion`），因为会话边界尚未明确定义。TTL 清理仍然有效。
 
-2. **Feishu 架构特定编译**：Feishu channel 使用 build tags 区分 32 位和 64 位架构（`feishu_32.go` / `feishu_64.go`）。
+2. **Feishu 架构特定编译**：Feishu channel 使用 build tags 区分 32 位和 64 位架构（`feishu_32.go` / `feishu_64.go`）。Feishu 使用 SDK 的 WebSocket 模式（非 HTTP webhook），因此不实现 `WebhookHandler`。
 
-3. **WeCom 有两个工厂**：`"wecom"`（Bot 模式）和 `"wecom_app"`（应用模式）分别注册。
+3. **WeCom 有两个工厂**：`"wecom"`（Bot 模式，纯 webhook）和 `"wecom_app"`（应用模式，支持 MediaSender）分别注册。两者都实现了 `WebhookHandler` 和 `HealthChecker`。
 
-4. **Pico Protocol**：`pkg/channels/pico/` 实现了一个自定义的 PicoClaw 原生协议 channel，通过 webhook 接收消息。
+4. **Pico Protocol**：`pkg/channels/pico/` 实现了一个自定义的 PicoClaw 原生协议 channel，通过 WebSocket webhook (`/pico/ws`) 接收消息。
+
+5. **WhatsApp 有两种模式**：`"whatsapp"`（Bridge 模式，通过外部 bridge URL 通信）和 `"whatsapp_native"`（原生 whatsmeow 模式，直接连接 WhatsApp）。Manager 根据 `WhatsAppConfig.UseNative` 决定初始化哪个。
+
+6. **DingTalk 使用 Stream 模式**：DingTalk 使用 SDK 的 Stream/WebSocket 模式（非 HTTP webhook），因此不实现 `WebhookHandler`。
+
+7. **PlaceholderConfig 的配置与实现**：`PlaceholderConfig` 出现在 6 个 channel config 中（Telegram、Discord、Slack、LINE、OneBot、Pico），但只有实现了 `PlaceholderCapable` + `MessageEditor` 的 channel（Telegram、Discord、Pico）能真正使用占位消息编辑功能。其余 channel 的 `PlaceholderConfig` 为预留字段。
+
+8. **ReasoningChannelID**：大多数 channel config 都包含 `reasoning_channel_id` 字段，用于将 LLM 的思维链（reasoning/thinking）路由到指定 channel（WhatsApp、Telegram、Feishu、Discord、MaixCam、QQ、DingTalk、Slack、LINE、OneBot、WeCom、WeComApp）。注意：`PicoConfig` 目前不包含该字段。`BaseChannel` 通过 `WithReasoningChannelID` 选项和 `ReasoningChannelID()` 方法暴露此配置。
