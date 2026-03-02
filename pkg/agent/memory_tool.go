@@ -12,16 +12,16 @@ import (
 
 // MemorySearchTool performs semantic lookup over persisted memory files.
 type MemorySearchTool struct {
-	memoryProvider  func(ctx context.Context) *MemoryStore
+	memoryProvider  func(ctx context.Context) MemoryReader
 	defaultTopK     int
 	defaultMinScore float64
 }
 
-func NewMemorySearchTool(memory *MemoryStore, defaultTopK int, defaultMinScore float64) *MemorySearchTool {
-	return NewMemorySearchToolWithProvider(func(context.Context) *MemoryStore { return memory }, defaultTopK, defaultMinScore)
+func NewMemorySearchTool(memory MemoryReader, defaultTopK int, defaultMinScore float64) *MemorySearchTool {
+	return NewMemorySearchToolWithProvider(func(context.Context) MemoryReader { return memory }, defaultTopK, defaultMinScore)
 }
 
-func NewMemorySearchToolWithProvider(provider func(ctx context.Context) *MemoryStore, defaultTopK int, defaultMinScore float64) *MemorySearchTool {
+func NewMemorySearchToolWithProvider(provider func(ctx context.Context) MemoryReader, defaultTopK int, defaultMinScore float64) *MemorySearchTool {
 	if defaultTopK <= 0 {
 		defaultTopK = defaultMemoryVectorTopK
 	}
@@ -69,7 +69,7 @@ func (t *MemorySearchTool) Parameters() map[string]any {
 }
 
 func (t *MemorySearchTool) Execute(ctx context.Context, args map[string]any) *tools.ToolResult {
-	memory := (*MemoryStore)(nil)
+	memory := (MemoryReader)(nil)
 	if t.memoryProvider != nil {
 		memory = t.memoryProvider(ctx)
 	}
@@ -178,14 +178,14 @@ func (t *MemorySearchTool) Execute(ctx context.Context, args map[string]any) *to
 
 // MemoryGetTool returns a specific memory item by its source citation.
 type MemoryGetTool struct {
-	memoryProvider func(ctx context.Context) *MemoryStore
+	memoryProvider func(ctx context.Context) MemoryReader
 }
 
-func NewMemoryGetTool(memory *MemoryStore) *MemoryGetTool {
-	return NewMemoryGetToolWithProvider(func(context.Context) *MemoryStore { return memory })
+func NewMemoryGetTool(memory MemoryReader) *MemoryGetTool {
+	return NewMemoryGetToolWithProvider(func(context.Context) MemoryReader { return memory })
 }
 
-func NewMemoryGetToolWithProvider(provider func(ctx context.Context) *MemoryStore) *MemoryGetTool {
+func NewMemoryGetToolWithProvider(provider func(ctx context.Context) MemoryReader) *MemoryGetTool {
 	return &MemoryGetTool{memoryProvider: provider}
 }
 
@@ -215,7 +215,7 @@ func (t *MemoryGetTool) Parameters() map[string]any {
 }
 
 func (t *MemoryGetTool) Execute(ctx context.Context, args map[string]any) *tools.ToolResult {
-	memory := (*MemoryStore)(nil)
+	memory := (MemoryReader)(nil)
 	if t.memoryProvider != nil {
 		memory = t.memoryProvider(ctx)
 	}

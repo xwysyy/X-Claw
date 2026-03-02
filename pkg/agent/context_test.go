@@ -160,6 +160,49 @@ func TestBuildMessagesForSession_IncludesRetrievedMemory(t *testing.T) {
 	}
 }
 
+func TestBuildMessagesForSession_GroupSession_IncludesAgentMemoryBaseline(t *testing.T) {
+	workspace := t.TempDir()
+	memoryDir := filepath.Join(workspace, "memory")
+	if err := os.MkdirAll(memoryDir, 0o755); err != nil {
+		t.Fatalf("mkdir memory dir: %v", err)
+	}
+
+	memoryContent := `# MEMORY
+
+## Long-term Facts
+- arXiv monitoring focus: algorithmic problem synthesis (not generic RAG)
+`
+	if err := os.WriteFile(filepath.Join(memoryDir, "MEMORY.md"), []byte(memoryContent), 0o644); err != nil {
+		t.Fatalf("write memory file: %v", err)
+	}
+
+	cb := NewContextBuilder(workspace)
+	cb.SetRuntimeSettings(ContextRuntimeSettings{
+		ContextWindowTokens:      4096,
+		PruningMode:              "off",
+		BootstrapSnapshotEnabled: false,
+		MemoryVectorEnabled:      false,
+	})
+
+	messages := cb.BuildMessagesForSession(
+		"agent:main:feishu:group:oc_test",
+		nil,
+		"",
+		"我的早报呢",
+		nil,
+		"feishu",
+		"oc_test",
+	)
+	if len(messages) == 0 {
+		t.Fatalf("expected at least one message")
+	}
+
+	system := strings.ToLower(messages[0].Content)
+	if !strings.Contains(system, "algorithmic problem synthesis") {
+		t.Fatalf("expected agent memory baseline to be present in group session prompt, got:\n%s", messages[0].Content)
+	}
+}
+
 func TestSanitizeHistoryForProvider_SynthesizesMissingToolOutputs(t *testing.T) {
 	history := []providers.Message{
 		{Role: "user", Content: "check file"},

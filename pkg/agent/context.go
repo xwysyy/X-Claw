@@ -162,6 +162,44 @@ func (cb *ContextBuilder) MemoryForSession(sessionKey, channel, chatID string) *
 	return store
 }
 
+// MemoryReadForSession returns a read-only memory view for the current session.
+//
+// For scoped sessions (user/session), reads are layered:
+//   - agent memory (shared baseline)
+//   - scoped memory (isolated overlay)
+//
+// This keeps durable global preferences available across channels, while still
+// routing new writes (memory flush) into the scoped store to avoid pollution.
+func (cb *ContextBuilder) MemoryReadForSession(sessionKey, channel, chatID string) MemoryReader {
+	if cb == nil {
+		return nil
+	}
+
+	scope := deriveMemoryScope(sessionKey, channel, chatID)
+	if scope.Kind == memoryScopeAgent {
+		return cb.memory
+	}
+
+	// Scoped store for this session (writes go here).
+	scoped := cb.MemoryForSession(sessionKey, channel, chatID)
+	if scoped == nil || cb.memory == nil || scoped == cb.memory {
+		// Best-effort fallback.
+		if scoped != nil {
+			return scoped
+		}
+		return cb.memory
+	}
+
+	token := memoryScopeToken(scope.RawID)
+	prefix := filepath.ToSlash(filepath.Join("scopes", string(scope.Kind), token))
+	return &memoryReadStack{
+		root:         cb.memory,
+		scoped:       scoped,
+		scopedKind:   scope.Kind,
+		scopedPrefix: prefix,
+	}
+}
+
 // SetToolsRegistry sets the tools registry for dynamic tool summary generation.
 func (cb *ContextBuilder) SetToolsRegistry(registry *tools.ToolRegistry) {
 	cb.tools = registry
@@ -555,7 +593,7 @@ func (cb *ContextBuilder) BuildMessagesForSession(
 ) []providers.Message {
 	messages := []providers.Message{}
 
-	memoryStore := cb.MemoryForSession(sessionKey, channel, chatID)
+	memoryStore := cb.MemoryReadForSession(sessionKey, channel, chatID)
 
 	staticPrompt := cb.BuildSystemPromptWithCache()
 	dynamicCtx := cb.buildDynamicContext(channel, chatID)

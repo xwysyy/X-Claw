@@ -186,11 +186,11 @@ func NewAgentInstance(
 		MemoryVectorEmbedding:    memVec.Embedding,
 	})
 
-	memoryProvider := func(ctx context.Context) *MemoryStore {
+	memoryProvider := func(ctx context.Context) MemoryReader {
 		if contextBuilder == nil {
 			return nil
 		}
-		return contextBuilder.MemoryForSession(tools.ExecutionSessionKey(ctx), "", "")
+		return contextBuilder.MemoryReadForSession(tools.ExecutionSessionKey(ctx), "", "")
 	}
 	toolsRegistry.Register(NewMemorySearchToolWithProvider(memoryProvider, memVec.TopK, memVec.MinScore))
 	toolsRegistry.Register(NewMemoryGetToolWithProvider(memoryProvider))
