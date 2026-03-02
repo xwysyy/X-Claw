@@ -183,7 +183,8 @@ func registerGatewayHTTPAPI(svc *gatewayServices) {
 	}
 
 	resume := httpapi.NewResumeLastTaskHandler(httpapi.ResumeLastTaskHandlerOptions{
-		APIKey: svc.cfg.Gateway.APIKey,
+		APIKey:  svc.cfg.Gateway.APIKey,
+		Timeout: 2 * time.Minute,
 		Resume: func(ctx context.Context) (any, string, error) {
 			if svc.agentLoop == nil {
 				return nil, "", fmt.Errorf("agent loop not available")

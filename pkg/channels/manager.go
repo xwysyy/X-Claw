@@ -303,10 +303,14 @@ func (m *Manager) SetupHTTPServer(addr string, healthServer *health.Server) {
 	}
 
 	m.httpServer = &http.Server{
-		Addr:         addr,
-		Handler:      m.mux,
-		ReadTimeout:  30 * time.Second,
-		WriteTimeout: 30 * time.Second,
+		Addr:        addr,
+		Handler:     m.mux,
+		ReadTimeout: 30 * time.Second,
+		// Some gateway endpoints (e.g. resume_last_task) may take longer than a typical
+		// webhook response because they can trigger LLM + tool execution.
+		// Keep ReadTimeout strict to avoid slowloris, but allow longer writes.
+		WriteTimeout: 3 * time.Minute,
+		IdleTimeout:  3 * time.Minute,
 	}
 }
 
