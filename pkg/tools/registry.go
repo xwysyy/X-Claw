@@ -99,9 +99,11 @@ func (r *ToolRegistry) Execute(ctx context.Context, name string, args map[string
 	return r.ExecuteWithContext(ctx, name, args, "", "", "", nil)
 }
 
-// ExecuteWithContext executes a tool with channel/chatID context and optional async callback.
-// If the tool implements AsyncTool and a non-nil callback is provided,
-// the callback will be set on the tool before execution.
+// ExecuteWithContext executes a tool with channel/chatID context and an optional
+// async callback.
+//
+// The async callback is attached to the execution context so async-capable tools
+// can retrieve it without relying on shared mutable tool instance state.
 func (r *ToolRegistry) ExecuteWithContext(
 	ctx context.Context,
 	name string,
@@ -111,6 +113,7 @@ func (r *ToolRegistry) ExecuteWithContext(
 	asyncCallback AsyncCallback,
 ) *ToolResult {
 	ctx = withExecutionContext(ctx, channel, chatID, senderID)
+	ctx = withExecutionAsyncCallback(ctx, asyncCallback)
 
 	// Avoid logging raw args (may contain secrets). ToolTrace/Policy is the
 	// canonical place for detailed auditing.
@@ -133,20 +136,6 @@ func (r *ToolRegistry) ExecuteWithContext(
 				"tool": name,
 			})
 		return ErrorResult(fmt.Sprintf("tool %q not found", name)).WithError(fmt.Errorf("tool not found"))
-	}
-
-	// If tool implements ContextualTool, set context
-	if contextualTool, ok := tool.(ContextualTool); ok && channel != "" && chatID != "" {
-		contextualTool.SetContext(channel, chatID)
-	}
-
-	// If tool implements AsyncTool and callback is provided, set callback
-	if asyncTool, ok := tool.(AsyncTool); ok && asyncCallback != nil {
-		asyncTool.SetCallback(asyncCallback)
-		logger.DebugCF("tool", "Async callback injected",
-			map[string]any{
-				"tool": name,
-			})
 	}
 
 	start := time.Now()

@@ -26,6 +26,12 @@ type ExecTool struct {
 	customAllowPatterns []*regexp.Regexp
 	restrictToWorkspace bool
 	processes           *ProcessManager
+
+	backend string // host | docker
+
+	dockerImage          string
+	dockerNetwork        string
+	dockerReadOnlyRootFS bool
 }
 
 var (
@@ -103,6 +109,10 @@ func NewExecTool(workingDir string, restrict bool) (*ExecTool, error) {
 func NewExecToolWithConfig(workingDir string, restrict bool, config *config.Config) (*ExecTool, error) {
 	denyPatterns := make([]*regexp.Regexp, 0)
 	customAllowPatterns := make([]*regexp.Regexp, 0)
+	backend := "host"
+	dockerImage := ""
+	dockerNetwork := ""
+	dockerReadOnly := false
 
 	if config != nil {
 		execConfig := config.Tools.Exec
@@ -130,6 +140,24 @@ func NewExecToolWithConfig(workingDir string, restrict bool, config *config.Conf
 			}
 			customAllowPatterns = append(customAllowPatterns, re)
 		}
+
+		backend = strings.ToLower(strings.TrimSpace(execConfig.Backend))
+		if backend == "" {
+			backend = "host"
+		}
+		switch backend {
+		case "host", "docker":
+			// ok
+		default:
+			return nil, fmt.Errorf("invalid tools.exec.backend %q (expected \"host\" or \"docker\")", execConfig.Backend)
+		}
+
+		dockerImage = strings.TrimSpace(execConfig.Docker.Image)
+		dockerNetwork = strings.TrimSpace(execConfig.Docker.Network)
+		if dockerNetwork == "" {
+			dockerNetwork = "none"
+		}
+		dockerReadOnly = execConfig.Docker.ReadOnlyRootFS
 	} else {
 		denyPatterns = append(denyPatterns, defaultDenyPatterns...)
 	}
@@ -142,6 +170,10 @@ func NewExecToolWithConfig(workingDir string, restrict bool, config *config.Conf
 		customAllowPatterns: customAllowPatterns,
 		restrictToWorkspace: restrict,
 		processes:           NewProcessManager(defaultProcessMaxOutputChars),
+		backend:             backend,
+		dockerImage:         dockerImage,
+		dockerNetwork:       dockerNetwork,
+		dockerReadOnlyRootFS: dockerReadOnly,
 	}, nil
 }
 
@@ -246,7 +278,17 @@ func (t *ExecTool) Execute(ctx context.Context, args map[string]any) *ToolResult
 	}
 
 	if !background && yieldMS <= 0 {
+		if strings.EqualFold(strings.TrimSpace(t.backend), "docker") {
+			if !t.restrictToWorkspace {
+				return ErrorResult("docker sandbox requires restrict_to_workspace=true")
+			}
+			return t.executeDockerSync(ctx, command, cwd, timeout)
+		}
 		return t.executeSync(ctx, command, cwd, timeout)
+	}
+
+	if strings.EqualFold(strings.TrimSpace(t.backend), "docker") {
+		return ErrorResult("docker exec backend does not support background/yield mode (set tools.exec.backend=host)")
 	}
 
 	return t.executeManaged(
@@ -257,6 +299,124 @@ func (t *ExecTool) Execute(ctx context.Context, args map[string]any) *ToolResult
 		time.Duration(yieldMS)*time.Millisecond,
 		timeout,
 	)
+}
+
+func (t *ExecTool) executeDockerSync(ctx context.Context, command, cwd string, timeout time.Duration) *ToolResult {
+	image := strings.TrimSpace(t.dockerImage)
+	if image == "" {
+		return ErrorResult("docker backend selected but tools.exec.docker.image is empty")
+	}
+	workspace := strings.TrimSpace(t.workingDir)
+	if workspace == "" {
+		return ErrorResult("docker backend requires a non-empty workingDir")
+	}
+
+	// timeout == 0 means no timeout.
+	var cmdCtx context.Context
+	var cancel context.CancelFunc
+	if timeout > 0 {
+		cmdCtx, cancel = context.WithTimeout(ctx, timeout)
+	} else {
+		cmdCtx, cancel = context.WithCancel(ctx)
+	}
+	defer cancel()
+
+	containerWD := "/workspace"
+	if strings.TrimSpace(cwd) != "" && strings.TrimSpace(workspace) != "" {
+		if rel, err := filepath.Rel(workspace, cwd); err == nil {
+			rel = strings.TrimSpace(rel)
+			if rel != "" && rel != "." && !strings.HasPrefix(rel, "..") {
+				containerWD = filepath.ToSlash(filepath.Join(containerWD, rel))
+			}
+		}
+	}
+
+	network := strings.TrimSpace(t.dockerNetwork)
+	if network == "" {
+		network = "none"
+	}
+
+	args := []string{
+		"run",
+		"--rm",
+		"--init",
+		"--network", network,
+		"-v", fmt.Sprintf("%s:/workspace", workspace),
+		"-w", containerWD,
+	}
+	if t.dockerReadOnlyRootFS {
+		args = append(args,
+			"--read-only",
+			"--tmpfs", "/tmp:rw,size=64m",
+			"--tmpfs", "/var/tmp:rw,size=64m",
+		)
+	}
+	// Run the command via a shell for compatibility with existing behavior.
+	args = append(args, image, "sh", "-lc", command)
+
+	cmd := exec.CommandContext(cmdCtx, "docker", args...)
+	prepareCommandForTermination(cmd)
+
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	if err := cmd.Start(); err != nil {
+		return ErrorResult(fmt.Sprintf("failed to start docker sandbox: %v", err))
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- cmd.Wait()
+	}()
+
+	var err error
+	select {
+	case err = <-done:
+	case <-cmdCtx.Done():
+		_ = terminateProcessTree(cmd)
+		select {
+		case err = <-done:
+		case <-time.After(2 * time.Second):
+			if cmd.Process != nil {
+				_ = cmd.Process.Kill()
+			}
+			err = <-done
+		}
+	}
+
+	output := stdout.String()
+	if stderr.Len() > 0 {
+		output += "\nSTDERR:\n" + stderr.String()
+	}
+
+	if err != nil {
+		if errors.Is(cmdCtx.Err(), context.DeadlineExceeded) {
+			msg := fmt.Sprintf("Command timed out after %v", timeout)
+			return &ToolResult{
+				ForLLM:  msg,
+				ForUser: msg,
+				IsError: true,
+			}
+		}
+		output += fmt.Sprintf("\nExit code: %v", err)
+	}
+
+	output = truncateExecOutput(output)
+
+	if err != nil {
+		return &ToolResult{
+			ForLLM:  output,
+			ForUser: output,
+			IsError: true,
+		}
+	}
+
+	return &ToolResult{
+		ForLLM:  output,
+		ForUser: output,
+		IsError: false,
+	}
 }
 
 func (t *ExecTool) executeSync(ctx context.Context, command, cwd string, timeout time.Duration) *ToolResult {

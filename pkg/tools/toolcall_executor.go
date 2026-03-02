@@ -32,6 +32,14 @@ type ToolCallExecutionOptions struct {
 	ChatID   string
 	SenderID string
 
+	// PlanMode enables the "plan" permission mode (Plan Mode, ROADMAP.md:1225).
+	// When true, restricted tools are denied (typically side-effect tools).
+	PlanMode bool
+	// PlanRestrictedTools are denied while PlanMode is true.
+	PlanRestrictedTools []string
+	// PlanRestrictedPrefixes are denied while PlanMode is true.
+	PlanRestrictedPrefixes []string
+
 	// Workspace is the agent workspace path used for optional on-disk tool tracing.
 	// When empty, tracing falls back to Trace.Dir (if set) or is disabled.
 	Workspace string
@@ -51,6 +59,11 @@ type ToolCallExecutionOptions struct {
 	// PolicyTags are attached to tool trace events and snapshots.
 	// When empty, no tags are recorded.
 	PolicyTags map[string]string
+
+	// Estop enables the global kill switch for tool execution (ROADMAP.md:1138).
+	// It is evaluated before Plan Mode / tool policy and applies to all tools
+	// (built-in + MCP) through this executor chokepoint.
+	Estop config.EstopConfig
 
 	Iteration int
 	LogScope  string
@@ -98,6 +111,21 @@ func ExecuteToolCalls(
 
 	traceWriter := newToolTraceWriter(opts, scope)
 	policy := newToolPolicy(opts.Workspace, opts.SessionKey, opts.RunID, opts.IsResume, opts.Policy)
+	planGate := newPlanModeGate(opts.PlanMode, opts.PlanRestrictedTools, opts.PlanRestrictedPrefixes)
+	var estopState EstopState
+	estopEnabled := false
+	estopLoadErr := error(nil)
+	if opts.Estop.Enabled && strings.TrimSpace(opts.Workspace) != "" {
+		estopEnabled = true
+		estopState, estopLoadErr = LoadEstopState(opts.Workspace)
+		if estopLoadErr != nil && opts.Estop.FailClosed {
+			estopState = EstopState{
+				Mode: EstopModeKillAll,
+				Note: "fail-closed: " + estopLoadErr.Error(),
+			}.Normalized()
+			estopLoadErr = nil
+		}
+	}
 
 	results := make([]ToolCallExecution, len(toolCalls))
 	parallelCount := 0
@@ -166,6 +194,42 @@ func ExecuteToolCalls(
 			execCtx, cancel, policyTimeoutMS = policy.toolTimeoutContext(execCtx)
 		}
 		defer cancel()
+
+		// Estop (ROADMAP.md:1138): global kill switch / freeze layer.
+		if toolResult == nil && estopEnabled && strings.ToLower(strings.TrimSpace(tc.Name)) != "tool_confirm" {
+			if estopLoadErr != nil {
+				policyDecision = "estop_deny"
+				policyReason = "estop state load error: " + estopLoadErr.Error()
+				toolResult = ErrorResult("ESTOP_DENY: " + policyReason)
+			} else {
+				allowed, reason := true, ""
+				if denied, r := estopState.DeniesTool(tc.Name, tc.Arguments); denied {
+					allowed, reason = false, r
+				}
+				if !allowed {
+					policyDecision = "estop_deny"
+					policyReason = reason
+					toolResult = ErrorResult(
+						fmt.Sprintf(
+							"ESTOP_DENY: tool %q blocked by estop (%s). "+
+								"If this is unexpected, disable estop via /api/estop or CLI.",
+							tc.Name,
+							strings.TrimSpace(reason),
+						),
+					)
+				}
+			}
+		}
+
+		// Plan Mode (ROADMAP.md:1225): deny side-effect tools during planning phase.
+		if toolResult == nil && planGate != nil && planGate.Enabled() && strings.ToLower(strings.TrimSpace(tc.Name)) != "tool_confirm" {
+			allowed, reason := planGate.Allows(tc.Name)
+			if !allowed {
+				policyDecision = string(toolPolicyDecisionDeny)
+				policyReason = reason
+				toolResult = planGate.DeniedResult(tc.Name, reason)
+			}
+		}
 
 		// Phase D2: centralized tool policy layer (allow/deny, confirm, idempotency).
 		if policy != nil && !policy.policyDisabled() && strings.ToLower(strings.TrimSpace(tc.Name)) != "tool_confirm" {

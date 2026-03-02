@@ -21,15 +21,11 @@ type SessionsSendExecutor interface {
 
 type SessionsSendTool struct {
 	executor SessionsSendExecutor
-	channel  string
-	chatID   string
 }
 
 func NewSessionsSendTool(executor SessionsSendExecutor) *SessionsSendTool {
 	return &SessionsSendTool{
 		executor: executor,
-		channel:  "system",
-		chatID:   "sessions-send",
 	}
 }
 
@@ -66,15 +62,6 @@ func (t *SessionsSendTool) Parameters() map[string]any {
 			},
 		},
 		"required": []string{"session_key", "message"},
-	}
-}
-
-func (t *SessionsSendTool) SetContext(channel, chatID string) {
-	if strings.TrimSpace(channel) != "" {
-		t.channel = channel
-	}
-	if strings.TrimSpace(chatID) != "" {
-		t.chatID = chatID
 	}
 }
 
@@ -146,16 +133,12 @@ func (t *SessionsSendTool) Execute(ctx context.Context, args map[string]any) *To
 
 type SessionsSpawnTool struct {
 	manager        *SubagentManager
-	originChannel  string
-	originChatID   string
 	allowlistCheck func(targetAgentID string) bool
 }
 
 func NewSessionsSpawnTool(manager *SubagentManager) *SessionsSpawnTool {
 	return &SessionsSpawnTool{
-		manager:       manager,
-		originChannel: "cli",
-		originChatID:  "direct",
+		manager: manager,
 	}
 }
 
@@ -193,11 +176,6 @@ func (t *SessionsSpawnTool) Parameters() map[string]any {
 	}
 }
 
-func (t *SessionsSpawnTool) SetContext(channel, chatID string) {
-	t.originChannel = channel
-	t.originChatID = chatID
-}
-
 func (t *SessionsSpawnTool) SetAllowlistChecker(check func(targetAgentID string) bool) {
 	t.allowlistCheck = check
 }
@@ -221,13 +199,22 @@ func (t *SessionsSpawnTool) Execute(ctx context.Context, args map[string]any) *T
 		return ErrorResult(fmt.Sprintf("not allowed to spawn agent '%s'", agentID))
 	}
 
+	originChannel := toolExecutionChannel(ctx)
+	originChatID := toolExecutionChatID(ctx)
+	if strings.TrimSpace(originChannel) == "" {
+		originChannel = "cli"
+	}
+	if strings.TrimSpace(originChatID) == "" {
+		originChatID = "direct"
+	}
+
 	taskInfo, err := t.manager.SpawnTask(
 		ctx,
 		strings.TrimSpace(task),
 		label,
 		agentID,
-		t.originChannel,
-		t.originChatID,
+		originChannel,
+		originChatID,
 		nil,
 	)
 	if err != nil {

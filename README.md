@@ -112,6 +112,26 @@ curl -sS http://127.0.0.1:18790/health
 ./build/picoclaw status --json
 ```
 
+### Gateway inbound 队列（gateway.inbound_queue）
+
+为了让 Gateway 能长期稳定跑多会话/长任务，PicoClaw 支持 **按 session 分桶串行** + **全局并发上限** 的 inbound 队列：
+- 同一会话串行：避免上下文/记忆写入竞争
+- 不同会话并发：避免一个会话长任务拖死全部
+
+配置示例：
+
+```json
+{
+  "gateway": {
+    "inbound_queue": {
+      "enabled": true,
+      "max_concurrency": 4,
+      "per_session_buffer": 32
+    }
+  }
+}
+```
+
 ### 通知接口（/api/notify）
 
 Gateway 会额外暴露一个通知接口，用于让外部系统（CI / 脚本 / 守护进程）通过已配置的渠道给你发提醒（例如飞书）。
@@ -144,6 +164,112 @@ curl -sS -X POST http://127.0.0.1:18790/api/notify \
 - 如必须直连：将 `gateway.host` 设为 `0.0.0.0` 并配置强随机 `gateway.api_key`
 
 外部 Agent（例如 Claude Code / Codex）对接 PicoClaw 通知的扩展文档见：`extensions/picoclaw-notify/SKILL.md`（通过调用 `/api/notify` 推送提醒）。
+
+### E-STOP（/api/estop：全局 kill switch）
+
+PicoClaw 提供一个全局 `estop`（Emergency Stop）控制面：用于在你发现异常行为时，**一键冻结工具执行**（或禁网）。
+
+前置条件：
+- 配置中 `tools.estop.enabled=true`（默认开启）
+- `/api/estop` 的鉴权策略与 `/api/notify` 相同（`gateway.api_key` 为空时仅允许 loopback）
+
+查看当前 estop 状态：
+
+```bash
+curl -sS http://127.0.0.1:18790/api/estop
+```
+
+开启全停（`kill_all`，所有工具调用都会返回 `ESTOP_DENY`）：
+
+```bash
+curl -sS -X POST http://127.0.0.1:18790/api/estop \
+  -H 'Content-Type: application/json' \
+  -d '{"mode":"kill_all","note":"maintenance"}'
+```
+
+禁网（`network_kill`，会禁用 `web_search`/`web_fetch` 以及 `mcp_*` 外部工具调用）：
+
+```bash
+curl -sS -X POST http://127.0.0.1:18790/api/estop \
+  -H 'Content-Type: application/json' \
+  -d '{"mode":"network_kill"}'
+```
+
+关闭 estop（恢复正常）：
+
+```bash
+curl -sS -X POST http://127.0.0.1:18790/api/estop \
+  -H 'Content-Type: application/json' \
+  -d '{"mode":"off"}'
+```
+
+状态文件落盘位置：
+- ` <workspace>/.picoclaw/state/estop.json `
+
+CLI（等价于直接写 state file）：
+
+```bash
+./build/picoclaw estop status
+./build/picoclaw estop kill_all --note "maintenance"
+./build/picoclaw estop network_kill
+./build/picoclaw estop off
+```
+
+### Web 证据模式（tools.web.evidence_mode）
+
+当你把 `tools.web.evidence_mode.enabled=true` 时：
+- `web_search` 会返回结构化 JSON（包含 `sources[]` 和 `evidence.satisfied/distinct_domains`）
+- system prompt 会强制“事实/最新信息”回答引用 ≥2 个不同域名来源；否则明确不确定性并给出验证建议
+
+配置示例：
+
+```json
+{
+  "tools": {
+    "web": {
+      "evidence_mode": {
+        "enabled": true,
+        "min_domains": 2
+      }
+    }
+  }
+}
+```
+
+### Plan Mode（计划阶段：先出方案，再允许执行）
+
+Plan Mode 用于把“工具执行”从默认放开，升级为“先计划、再审批”：
+- `/plan <任务>`：进入计划阶段（此时会拒绝 `exec/edit/write` 等危险工具）
+- `/approve` 或 `/run`：批准并执行刚才计划阶段捕获的任务
+- `/cancel`：退出计划阶段并清空 pending task
+- `/mode`：查看当前 mode 和 pending task 预览
+
+### Exec Docker Sandbox（tools.exec.backend=docker）
+
+PicoClaw 的 `exec` 工具支持两种后端：
+- `host`（默认）：直接在宿主机执行
+- `docker`：在一次性容器里执行（只挂载 workspace），更适合长期运行时的安全边界
+
+配置示例：
+
+```json
+{
+  "tools": {
+    "exec": {
+      "backend": "docker",
+      "docker": {
+        "image": "alpine:3.20",
+        "network": "none",
+        "read_only_rootfs": true
+      }
+    }
+  }
+}
+```
+
+注意：
+- `docker` 后端要求 `restrict_to_workspace=true`
+- 当前 `docker` 后端不支持 `background=true` / `yield_ms`（建议用 `host` 后端配合 process tool 做长任务）
 
 ### Tool Trace（工具调用可追溯 / 可复盘）
 

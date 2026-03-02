@@ -599,16 +599,12 @@ func isTerminalTaskStatus(status string) bool {
 // Unlike SpawnTool which runs tasks asynchronously, SubagentTool waits for completion
 // and returns the result directly in the ToolResult.
 type SubagentTool struct {
-	manager       *SubagentManager
-	originChannel string
-	originChatID  string
+	manager *SubagentManager
 }
 
 func NewSubagentTool(manager *SubagentManager) *SubagentTool {
 	return &SubagentTool{
-		manager:       manager,
-		originChannel: "cli",
-		originChatID:  "direct",
+		manager: manager,
 	}
 }
 
@@ -644,11 +640,6 @@ func (t *SubagentTool) Parameters() map[string]any {
 		},
 		"required": []string{"task"},
 	}
-}
-
-func (t *SubagentTool) SetContext(channel, chatID string) {
-	t.originChannel = channel
-	t.originChatID = chatID
 }
 
 func (t *SubagentTool) Execute(ctx context.Context, args map[string]any) *ToolResult {
@@ -733,6 +724,15 @@ func (t *SubagentTool) Execute(ctx context.Context, args map[string]any) *ToolRe
 		}
 	}
 
+	originChannel := toolExecutionChannel(ctx)
+	originChatID := toolExecutionChatID(ctx)
+	if strings.TrimSpace(originChannel) == "" {
+		originChannel = "cli"
+	}
+	if strings.TrimSpace(originChatID) == "" {
+		originChatID = "direct"
+	}
+
 	loopResult, err := RunToolLoop(ctx, ToolLoopConfig{
 		Provider:                 execution.Provider,
 		Model:                    execution.Model,
@@ -752,7 +752,7 @@ func (t *SubagentTool) Execute(ctx context.Context, args map[string]any) *ToolRe
 		MaxToolCallConcurrency:   maxToolCallConcurrency,
 		ParallelToolsMode:        parallelToolsMode,
 		ToolPolicyOverrides:      toolPolicyOverrides,
-	}, messages, t.originChannel, t.originChatID)
+	}, messages, originChannel, originChatID)
 	if err != nil {
 		return ErrorResult(fmt.Sprintf("Subagent execution failed: %v", err)).WithError(err)
 	}

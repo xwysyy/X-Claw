@@ -196,6 +196,17 @@ func registerGatewayHTTPAPI(svc *gatewayServices) {
 	if err := svc.channelManager.RegisterHTTPHandler("/api/resume_last_task", resume); err != nil {
 		fmt.Printf("⚠ Warning: failed to register /api/resume_last_task: %v\n", err)
 	}
+
+	estop := httpapi.NewEstopHandler(httpapi.EstopHandlerOptions{
+		APIKey:       svc.cfg.Gateway.APIKey,
+		Workspace:    svc.cfg.WorkspacePath(),
+		Enabled:      svc.cfg.Tools.Estop.Enabled,
+		FailClosed:   svc.cfg.Tools.Estop.FailClosed,
+		MaxBodyBytes: 8 << 10,
+	})
+	if err := svc.channelManager.RegisterHTTPHandler("/api/estop", estop); err != nil {
+		fmt.Printf("⚠ Warning: failed to register /api/estop: %v\n", err)
+	}
 }
 
 // shutdownGateway performs graceful shutdown of all services.

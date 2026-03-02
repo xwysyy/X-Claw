@@ -39,20 +39,17 @@ type ContextRuntimeSettings struct {
 }
 
 type ContextBuilder struct {
-	workspace      string
-	skillsLoader   *skills.SkillsLoader
-	memory         *MemoryStore
-	memoryScopesMu sync.Mutex
-	memoryScopes   map[string]*MemoryStore
-	tools          *tools.ToolRegistry // Direct reference to tool registry
-	settings       ContextRuntimeSettings
-	bootstrapMu    sync.RWMutex
-	bootstrapCache map[string]string
-
-	// WorkingState provides structured task progress for the current session.
-	// Set by the agent loop; if nil, no working state section is injected.
-	workingState   *WorkingState
-	workingStateMu sync.RWMutex
+	workspace             string
+	skillsLoader          *skills.SkillsLoader
+	memory                *MemoryStore
+	memoryScopesMu        sync.Mutex
+	memoryScopes          map[string]*MemoryStore
+	tools                 *tools.ToolRegistry // Direct reference to tool registry
+	settings              ContextRuntimeSettings
+	webEvidenceEnabled    bool
+	webEvidenceMinDomains int
+	bootstrapMu           sync.RWMutex
+	bootstrapCache        map[string]string
 
 	// Cache for static system prompt to avoid rebuilding on every call.
 	// Dynamic per-request data (time/session/summary) is appended in BuildMessages.
@@ -265,11 +262,40 @@ func (cb *ContextBuilder) SetRuntimeSettings(settings ContextRuntimeSettings) {
 	cb.memoryScopesMu.Unlock()
 }
 
+// SetWebEvidenceMode enables/disables web "evidence mode" instructions in the system prompt.
+//
+// When enabled, the assistant is instructed to cite at least N sources from distinct domains
+// for fact/latest-information answers.
+func (cb *ContextBuilder) SetWebEvidenceMode(enabled bool, minDomains int) {
+	if cb == nil {
+		return
+	}
+	if minDomains <= 0 {
+		minDomains = 2
+	}
+	cb.webEvidenceEnabled = enabled
+	cb.webEvidenceMinDomains = minDomains
+	cb.InvalidateCache()
+}
+
 func (cb *ContextBuilder) getIdentity() string {
 	workspacePath, _ := filepath.Abs(filepath.Join(cb.workspace))
 
 	// Build tools section dynamically
 	toolsSection := cb.buildToolsSection()
+
+	webEvidenceRule := ""
+	if cb.webEvidenceEnabled {
+		minDomains := cb.webEvidenceMinDomains
+		if minDomains <= 0 {
+			minDomains = 2
+		}
+		webEvidenceRule = fmt.Sprintf(
+			"\n\n8. **Web evidence mode** — When answering facts or latest information from the web, cite at least %d sources from distinct domains (URLs). "+
+				"Never fabricate citations. If evidence is insufficient, explicitly state uncertainty and suggest verification steps.",
+			minDomains,
+		)
+	}
 
 	return fmt.Sprintf(`# picoclaw 🦞
 
@@ -308,8 +334,8 @@ When you receive a task, follow these steps:
 
 6. **Error recovery** — If a tool fails, read the error message and try an alternative approach. Do NOT repeat the same failed tool call with identical arguments. If you've tried 3+ approaches without progress, explain what you've tried and ask for help.
 
-7. **Avoid loops** — NEVER call the same tool with the same arguments more than twice. If you find yourself repeating actions, stop and reassess your approach.`,
-		workspacePath, workspacePath, workspacePath, workspacePath, workspacePath, workspacePath, toolsSection)
+7. **Avoid loops** — NEVER call the same tool with the same arguments more than twice. If you find yourself repeating actions, stop and reassess your approach.%s`,
+		workspacePath, workspacePath, workspacePath, workspacePath, workspacePath, workspacePath, toolsSection, webEvidenceRule)
 }
 
 func (cb *ContextBuilder) buildToolsSection() string {
@@ -540,21 +566,7 @@ func (cb *ContextBuilder) LoadBootstrapFiles(sessionKey string) string {
 	return content
 }
 
-// SetWorkingState sets the structured working state for context injection.
-func (cb *ContextBuilder) SetWorkingState(ws *WorkingState) {
-	cb.workingStateMu.Lock()
-	defer cb.workingStateMu.Unlock()
-	cb.workingState = ws
-}
-
-// GetWorkingState returns the current working state, or nil if unset.
-func (cb *ContextBuilder) GetWorkingState() *WorkingState {
-	cb.workingStateMu.RLock()
-	defer cb.workingStateMu.RUnlock()
-	return cb.workingState
-}
-
-func (cb *ContextBuilder) buildDynamicContext(channel, chatID string) string {
+func (cb *ContextBuilder) buildDynamicContext(channel, chatID string, ws *WorkingState) string {
 	now := time.Now().Format("2006-01-02 15:04 (Monday)")
 	rt := fmt.Sprintf("%s %s, Go %s", runtime.GOOS, runtime.GOARCH, runtime.Version())
 
@@ -565,7 +577,7 @@ func (cb *ContextBuilder) buildDynamicContext(channel, chatID string) string {
 	}
 
 	// Inject working state if available
-	if ws := cb.GetWorkingState(); ws != nil {
+	if ws != nil {
 		if wsCtx := ws.FormatForContext(); wsCtx != "" {
 			fmt.Fprintf(&sb, "\n\n%s", wsCtx)
 		}
@@ -589,6 +601,7 @@ func (cb *ContextBuilder) BuildMessages(
 		media,
 		channel,
 		chatID,
+		nil,
 	)
 }
 
@@ -599,13 +612,14 @@ func (cb *ContextBuilder) BuildMessagesForSession(
 	currentMessage string,
 	media []string,
 	channel, chatID string,
+	ws *WorkingState,
 ) []providers.Message {
 	messages := []providers.Message{}
 
 	memoryStore := cb.MemoryReadForSession(sessionKey, channel, chatID)
 
 	staticPrompt := cb.BuildSystemPromptWithCache()
-	dynamicCtx := cb.buildDynamicContext(channel, chatID)
+	dynamicCtx := cb.buildDynamicContext(channel, chatID, ws)
 
 	stringParts := []string{staticPrompt, dynamicCtx}
 	contentBlocks := []providers.ContentBlock{

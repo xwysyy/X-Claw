@@ -10,7 +10,9 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"sort"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -25,6 +27,7 @@ var (
 	reTags       = regexp.MustCompile(`<[^>]+>`)
 	reWhitespace = regexp.MustCompile(`[^\S\n]+`)
 	reBlankLines = regexp.MustCompile(`\n{3,}`)
+	reURL        = regexp.MustCompile(`https?://[^\s<>"')]+`)
 
 	// DuckDuckGo result extraction
 	reDDGLink    = regexp.MustCompile(`<a[^>]*class="[^"]*result__a[^"]*"[^>]*href="([^"]+)"[^>]*>([\s\S]*?)</a>`)
@@ -469,8 +472,15 @@ func parseGrokResponseContent(body []byte) (string, error) {
 }
 
 type WebSearchTool struct {
-	provider   SearchProvider
+	provider      SearchProvider
+	providerName  string
+	secondary     SearchProvider
+	secondaryName string
+
 	maxResults int
+
+	evidenceMode      bool
+	evidenceMinDomain int
 }
 
 type WebSearchToolOptions struct {
@@ -489,50 +499,114 @@ type WebSearchToolOptions struct {
 	GrokMaxResults       int
 	GrokEnabled          bool
 	Proxy                string
+
+	EvidenceModeEnabled bool
+	EvidenceMinDomains  int
 }
 
 func NewWebSearchTool(opts WebSearchToolOptions) *WebSearchTool {
-	var provider SearchProvider
+	type candidate struct {
+		name       string
+		provider   SearchProvider
+		maxResults int
+	}
+
 	maxResults := 5
+	candidates := make([]candidate, 0, 4)
 
 	// Priority: Grok > Brave > Tavily > DuckDuckGo
-	if opts.GrokEnabled && opts.GrokAPIKey != "" {
-		provider = &GrokSearchProvider{
-			apiKey:   opts.GrokAPIKey,
-			endpoint: opts.GrokEndpoint,
-			model:    opts.GrokModel,
-			proxy:    opts.Proxy,
-		}
+	if opts.GrokEnabled && strings.TrimSpace(opts.GrokAPIKey) != "" {
+		mr := maxResults
 		if opts.GrokMaxResults > 0 {
-			maxResults = opts.GrokMaxResults
+			mr = opts.GrokMaxResults
 		}
-	} else if opts.BraveEnabled && opts.BraveAPIKey != "" {
-		provider = &BraveSearchProvider{apiKey: opts.BraveAPIKey, proxy: opts.Proxy}
+		candidates = append(candidates, candidate{
+			name: "grok",
+			provider: &GrokSearchProvider{
+				apiKey:   opts.GrokAPIKey,
+				endpoint: opts.GrokEndpoint,
+				model:    opts.GrokModel,
+				proxy:    opts.Proxy,
+			},
+			maxResults: mr,
+		})
+	}
+
+	if opts.BraveEnabled && strings.TrimSpace(opts.BraveAPIKey) != "" {
+		mr := maxResults
 		if opts.BraveMaxResults > 0 {
-			maxResults = opts.BraveMaxResults
+			mr = opts.BraveMaxResults
 		}
-	} else if opts.TavilyEnabled && opts.TavilyAPIKey != "" {
-		provider = &TavilySearchProvider{
-			apiKey:  opts.TavilyAPIKey,
-			baseURL: opts.TavilyBaseURL,
-			proxy:   opts.Proxy,
-		}
+		candidates = append(candidates, candidate{
+			name:       "brave",
+			provider:   &BraveSearchProvider{apiKey: opts.BraveAPIKey, proxy: opts.Proxy},
+			maxResults: mr,
+		})
+	}
+
+	if opts.TavilyEnabled && strings.TrimSpace(opts.TavilyAPIKey) != "" {
+		mr := maxResults
 		if opts.TavilyMaxResults > 0 {
-			maxResults = opts.TavilyMaxResults
+			mr = opts.TavilyMaxResults
 		}
-	} else if opts.DuckDuckGoEnabled {
-		provider = &DuckDuckGoSearchProvider{proxy: opts.Proxy}
+		candidates = append(candidates, candidate{
+			name: "tavily",
+			provider: &TavilySearchProvider{
+				apiKey:  opts.TavilyAPIKey,
+				baseURL: opts.TavilyBaseURL,
+				proxy:   opts.Proxy,
+			},
+			maxResults: mr,
+		})
+	}
+
+	if opts.DuckDuckGoEnabled {
+		mr := maxResults
 		if opts.DuckDuckGoMaxResults > 0 {
-			maxResults = opts.DuckDuckGoMaxResults
+			mr = opts.DuckDuckGoMaxResults
 		}
-	} else {
+		candidates = append(candidates, candidate{
+			name:       "duckduckgo",
+			provider:   &DuckDuckGoSearchProvider{proxy: opts.Proxy},
+			maxResults: mr,
+		})
+	}
+
+	if len(candidates) == 0 {
 		return nil
 	}
 
-	return &WebSearchTool{
-		provider:   provider,
-		maxResults: maxResults,
+	primary := candidates[0]
+	secondary := candidate{}
+	hasSecondary := len(candidates) > 1
+	if hasSecondary {
+		secondary = candidates[1]
 	}
+
+	minDomains := opts.EvidenceMinDomains
+	if minDomains <= 0 {
+		minDomains = 2
+	}
+
+	tool := &WebSearchTool{
+		provider:          primary.provider,
+		providerName:      primary.name,
+		secondary:         nil,
+		secondaryName:     "",
+		maxResults:        primary.maxResults,
+		evidenceMode:      opts.EvidenceModeEnabled,
+		evidenceMinDomain: minDomains,
+	}
+	if tool.evidenceMode && hasSecondary {
+		tool.secondary = secondary.provider
+		tool.secondaryName = secondary.name
+		// Use the smaller max results across providers as a safe default.
+		if secondary.maxResults > 0 && secondary.maxResults < tool.maxResults {
+			tool.maxResults = secondary.maxResults
+		}
+	}
+
+	return tool
 }
 
 func (t *WebSearchTool) Name() string {
@@ -544,11 +618,15 @@ func (t *WebSearchTool) ParallelPolicy() ToolParallelPolicy {
 }
 
 func (t *WebSearchTool) Description() string {
-	return "Search the web for current information. " +
+	desc := "Search the web for current information. " +
 		"Input: query (string, required), count (integer, optional, 1-10, default 5). " +
 		"Output: list of results with title, URL, and snippet for each. " +
 		"Use this for questions about current events, recent data, or facts you are unsure about. " +
 		"For reading a specific URL after searching, use the 'web_fetch' tool."
+	if t != nil && t.evidenceMode {
+		desc += " Evidence mode is enabled: the tool returns structured JSON with extracted sources and an evidence summary."
+	}
+	return desc
 }
 
 func (t *WebSearchTool) Parameters() map[string]any {
@@ -583,14 +661,181 @@ func (t *WebSearchTool) Execute(ctx context.Context, args map[string]any) *ToolR
 		}
 	}
 
-	result, err := t.provider.Search(ctx, query, count)
-	if err != nil {
-		return ErrorResult(fmt.Sprintf("search failed: %v", err))
+	if t == nil || t.provider == nil {
+		return ErrorResult("web_search tool is not configured")
 	}
 
+	if !t.evidenceMode {
+		result, err := t.provider.Search(ctx, query, count)
+		if err != nil {
+			return ErrorResult(fmt.Sprintf("search failed: %v", err))
+		}
+
+		return &ToolResult{
+			ForLLM:  result,
+			ForUser: result,
+		}
+	}
+
+	type evidenceSource struct {
+		URL      string `json:"url"`
+		Domain   string `json:"domain,omitempty"`
+		Provider string `json:"provider,omitempty"`
+	}
+	type providerEvidence struct {
+		Name        string           `json:"name"`
+		OK          bool             `json:"ok"`
+		Error       string           `json:"error,omitempty"`
+		SourceCount int              `json:"source_count,omitempty"`
+		Sources     []evidenceSource `json:"sources,omitempty"`
+	}
+	type evidenceSummary struct {
+		Enabled         bool `json:"enabled"`
+		MinDomains      int  `json:"min_domains"`
+		DistinctDomains int  `json:"distinct_domains"`
+		Satisfied       bool `json:"satisfied"`
+	}
+	type payload struct {
+		Kind      string             `json:"kind"`
+		Query     string             `json:"query"`
+		Count     int                `json:"count"`
+		Providers []providerEvidence `json:"providers,omitempty"`
+		Sources   []evidenceSource   `json:"sources,omitempty"`
+		Evidence  evidenceSummary    `json:"evidence"`
+	}
+
+	extractSources := func(providerName, text string) []evidenceSource {
+		if strings.TrimSpace(text) == "" {
+			return nil
+		}
+		seen := make(map[string]bool)
+		matches := reURL.FindAllString(text, -1)
+		out := make([]evidenceSource, 0, len(matches))
+		for _, raw := range matches {
+			raw = strings.TrimSpace(raw)
+			raw = strings.TrimRight(raw, ".,;:)]}\"'")
+			if raw == "" || seen[raw] {
+				continue
+			}
+			seen[raw] = true
+
+			host := ""
+			if u, err := url.Parse(raw); err == nil {
+				host = strings.TrimSpace(u.Host)
+				if host != "" {
+					host = strings.ToLower(strings.TrimSpace(strings.Split(host, ":")[0]))
+				}
+			}
+			out = append(out, evidenceSource{
+				URL:      raw,
+				Domain:   host,
+				Provider: providerName,
+			})
+		}
+		return out
+	}
+
+	runProvider := func(name string, provider SearchProvider) providerEvidence {
+		if provider == nil {
+			return providerEvidence{Name: name, OK: false, Error: "provider not configured"}
+		}
+		text, err := provider.Search(ctx, query, count)
+		if err != nil {
+			return providerEvidence{Name: name, OK: false, Error: err.Error()}
+		}
+		sources := extractSources(name, text)
+		return providerEvidence{
+			Name:        name,
+			OK:          true,
+			SourceCount: len(sources),
+			Sources:     sources,
+		}
+	}
+
+	type toRun struct {
+		name     string
+		provider SearchProvider
+	}
+	toRunList := []toRun{
+		{name: t.providerName, provider: t.provider},
+	}
+	if t.secondary != nil {
+		toRunList = append(toRunList, toRun{name: t.secondaryName, provider: t.secondary})
+	}
+
+	var wg sync.WaitGroup
+	results := make([]providerEvidence, len(toRunList))
+	for i, item := range toRunList {
+		wg.Add(1)
+		go func(i int, item toRun) {
+			defer wg.Done()
+			results[i] = runProvider(item.name, item.provider)
+		}(i, item)
+	}
+	wg.Wait()
+
+	merged := make([]evidenceSource, 0, 16)
+	seenURL := make(map[string]bool)
+	distinctDomains := make(map[string]bool)
+	for _, p := range results {
+		for _, s := range p.Sources {
+			u := strings.TrimSpace(s.URL)
+			if u == "" || seenURL[u] {
+				continue
+			}
+			seenURL[u] = true
+			merged = append(merged, s)
+			if s.Domain != "" {
+				distinctDomains[s.Domain] = true
+			}
+		}
+	}
+	sort.Slice(merged, func(i, j int) bool {
+		if merged[i].Domain == merged[j].Domain {
+			return merged[i].URL < merged[j].URL
+		}
+		return merged[i].Domain < merged[j].Domain
+	})
+
+	minDomains := t.evidenceMinDomain
+	if minDomains <= 0 {
+		minDomains = 2
+	}
+	summary := evidenceSummary{
+		Enabled:         true,
+		MinDomains:      minDomains,
+		DistinctDomains: len(distinctDomains),
+		Satisfied:       len(distinctDomains) >= minDomains,
+	}
+
+	out := payload{
+		Kind:      "web_search_result",
+		Query:     query,
+		Count:     count,
+		Providers: results,
+		Sources:   merged,
+		Evidence:  summary,
+	}
+	data, _ := json.MarshalIndent(out, "", "  ")
+
+	providerNames := make([]string, 0, len(toRunList))
+	for _, item := range toRunList {
+		if strings.TrimSpace(item.name) != "" {
+			providerNames = append(providerNames, strings.TrimSpace(item.name))
+		}
+	}
+	userSummary := fmt.Sprintf(
+		"Web search (evidence_mode=true): %q (providers: %s; sources=%d; distinct_domains=%d; satisfied=%v)",
+		query,
+		strings.Join(providerNames, ", "),
+		len(merged),
+		len(distinctDomains),
+		summary.Satisfied,
+	)
+
 	return &ToolResult{
-		ForLLM:  result,
-		ForUser: result,
+		ForLLM:  string(data),
+		ForUser: userSummary,
 	}
 }
 

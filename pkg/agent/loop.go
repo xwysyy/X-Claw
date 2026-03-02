@@ -58,6 +58,15 @@ type processOptions struct {
 	SendResponse    bool   // Whether to send response via bus
 	NoHistory       bool   // If true, don't load session history (for heartbeat)
 
+	// PlanMode enables "plan" permission mode (ROADMAP.md:1225).
+	// When true, side-effect tools are denied by the tool executor.
+	PlanMode bool
+
+	// WorkingState carries per-run structured progress state. It must be per-run
+	// (not stored globally on the agent) so multiple sessions can be processed
+	// concurrently without cross-talk.
+	WorkingState *WorkingState
+
 	// Phase E2: resume support
 	RunID  string // optional: resume into an existing run_id
 	Resume bool   // true when invoked by resume_last_task
@@ -161,6 +170,8 @@ func registerSharedTools(
 			GrokMaxResults:       cfg.Tools.Web.Grok.MaxResults,
 			GrokEnabled:          cfg.Tools.Web.Grok.Enabled,
 			Proxy:                cfg.Tools.Web.Proxy,
+			EvidenceModeEnabled:  cfg.Tools.Web.Evidence.Enabled,
+			EvidenceMinDomains:   cfg.Tools.Web.Evidence.MinDomains,
 		})
 		if searchTool != nil {
 			agent.Tools.Register(searchTool)
@@ -381,59 +392,141 @@ func (al *AgentLoop) Run(ctx context.Context) error {
 		go al.runAuditLoop(ctx)
 	}
 
-	for al.running.Load() {
-		select {
-		case <-ctx.Done():
-			return nil
-		default:
+	queueEnabled := true
+	maxConc := 1
+	perSessionBuf := 32
+	if al.cfg != nil {
+		queueEnabled = al.cfg.Gateway.InboundQueue.Enabled
+		maxConc = al.cfg.Gateway.InboundQueue.MaxConcurrency
+		perSessionBuf = al.cfg.Gateway.InboundQueue.PerSessionBuffer
+	}
+	if maxConc <= 0 {
+		maxConc = 1
+	}
+	if perSessionBuf <= 0 {
+		perSessionBuf = 32
+	}
+
+	processOne := func(msg bus.InboundMessage) {
+		roundTracker := &tools.MessageRoundTracker{}
+		msgCtx := tools.WithMessageRoundTracker(ctx, roundTracker)
+
+		response, err := al.processMessage(msgCtx, msg)
+		if err != nil {
+			response = fmt.Sprintf("Error processing message: %v", err)
+		}
+
+		if response == "" {
+			return
+		}
+
+		if roundTracker.Sent() {
+			logger.DebugCF("agent", "Skipped outbound (message tool already sent)", map[string]any{
+				"channel": msg.Channel,
+			})
+			return
+		}
+
+		_ = al.bus.PublishOutbound(msgCtx, bus.OutboundMessage{
+			Channel: msg.Channel,
+			ChatID:  msg.ChatID,
+			Content: response,
+		})
+		logger.InfoCF("agent", "Published outbound response",
+			map[string]any{
+				"channel":     msg.Channel,
+				"chat_id":     msg.ChatID,
+				"content_len": len(response),
+			})
+	}
+
+	if !queueEnabled {
+		for al.running.Load() {
 			msg, ok := al.bus.ConsumeInbound(ctx)
 			if !ok {
-				continue
+				return nil
 			}
-
-			// Process message
-			func() {
-				response, err := al.processMessage(ctx, msg)
-				if err != nil {
-					response = fmt.Sprintf("Error processing message: %v", err)
-				}
-
-				if response != "" {
-					// Check if the message tool already sent a response during this round.
-					// If so, skip publishing to avoid duplicate messages to the user.
-					// Use default agent's tools to check (message tool is shared).
-					alreadySent := false
-					defaultAgent := al.registry.GetDefaultAgent()
-					if defaultAgent != nil {
-						if tool, ok := defaultAgent.Tools.Get("message"); ok {
-							if mt, ok := tool.(*tools.MessageTool); ok {
-								alreadySent = mt.HasSentInRound()
-							}
-						}
-					}
-
-					if !alreadySent {
-						al.bus.PublishOutbound(ctx, bus.OutboundMessage{
-							Channel: msg.Channel,
-							ChatID:  msg.ChatID,
-							Content: response,
-						})
-						logger.InfoCF("agent", "Published outbound response",
-							map[string]any{
-								"channel":     msg.Channel,
-								"chat_id":     msg.ChatID,
-								"content_len": len(response),
-							})
-					} else {
-						logger.DebugCF(
-							"agent",
-							"Skipped outbound (message tool already sent)",
-							map[string]any{"channel": msg.Channel},
-						)
-					}
-				}
-			}()
+			processOne(msg)
 		}
+		return nil
+	}
+
+	type bucket struct {
+		ch chan bus.InboundMessage
+	}
+
+	globalSem := make(chan struct{}, maxConc)
+	buckets := make(map[string]*bucket)
+	var bucketsMu sync.Mutex
+
+	getBucketKey := func(msg bus.InboundMessage) string {
+		// System messages are always bucketed to the main agent session to avoid
+		// concurrent writes to the shared agent:main:main session history.
+		if msg.Channel == "system" {
+			if da := al.registry.GetDefaultAgent(); da != nil {
+				return routing.BuildAgentMainSessionKey(da.ID)
+			}
+			return "system"
+		}
+
+		route := al.registry.ResolveRoute(routing.RouteInput{
+			Channel:    msg.Channel,
+			AccountID:  msg.Metadata["account_id"],
+			Peer:       extractPeer(msg),
+			ParentPeer: extractParentPeer(msg),
+			GuildID:    msg.Metadata["guild_id"],
+			TeamID:     msg.Metadata["team_id"],
+		})
+
+		sessionKey := route.SessionKey
+		if msg.SessionKey != "" && strings.HasPrefix(msg.SessionKey, "agent:") {
+			sessionKey = msg.SessionKey
+		}
+		sessionKey = strings.TrimSpace(sessionKey)
+		if sessionKey == "" {
+			sessionKey = strings.TrimSpace(msg.Channel) + ":" + strings.TrimSpace(msg.ChatID)
+		}
+		return sessionKey
+	}
+
+	enqueue := func(msg bus.InboundMessage) {
+		key := getBucketKey(msg)
+
+		bucketsMu.Lock()
+		b := buckets[key]
+		if b == nil {
+			b = &bucket{ch: make(chan bus.InboundMessage, perSessionBuf)}
+			buckets[key] = b
+
+			// One worker per session key: strict in-order processing within the session.
+			go func(key string, b *bucket) {
+				for {
+					select {
+					case <-ctx.Done():
+						return
+					case msg := <-b.ch:
+						globalSem <- struct{}{}
+						func() {
+							defer func() { <-globalSem }()
+							processOne(msg)
+						}()
+					}
+				}
+			}(key, b)
+		}
+		bucketsMu.Unlock()
+
+		// Backpressure: if this session queue is full, we block here. This keeps
+		// strict ordering and prevents unbounded memory growth.
+		b.ch <- msg
+	}
+
+	for al.running.Load() {
+		msg, ok := al.bus.ConsumeInbound(ctx)
+		if !ok {
+			return nil
+		}
+		enqueue(msg)
 	}
 
 	return nil
@@ -634,11 +727,6 @@ func (al *AgentLoop) processMessage(ctx context.Context, msg bus.InboundMessage)
 		return al.processSystemMessage(ctx, msg)
 	}
 
-	// Check for commands
-	if response, handled := al.handleCommand(ctx, msg); handled {
-		return response, nil
-	}
-
 	// Route to determine agent and session key
 	route := al.registry.ResolveRoute(routing.RouteInput{
 		Channel:    msg.Channel,
@@ -657,17 +745,15 @@ func (al *AgentLoop) processMessage(ctx context.Context, msg bus.InboundMessage)
 		return "", fmt.Errorf("no agent available for route (agent_id=%s)", route.AgentID)
 	}
 
-	// Reset message-tool state for this round so we don't skip publishing due to a previous round.
-	if tool, ok := agent.Tools.Get("message"); ok {
-		if mt, ok := tool.(tools.ContextualTool); ok {
-			mt.SetContext(msg.Channel, msg.ChatID)
-		}
-	}
-
 	// Use routed session key, but honor pre-set agent-scoped keys (for ProcessDirect/cron)
 	sessionKey := route.SessionKey
 	if msg.SessionKey != "" && strings.HasPrefix(msg.SessionKey, "agent:") {
 		sessionKey = msg.SessionKey
+	}
+
+	// Check for commands (after routing so commands can be scoped to session/agent).
+	if response, handled := al.handleCommand(ctx, msg, agent, sessionKey); handled {
+		return response, nil
 	}
 
 	logger.InfoCF("agent", "Routed message",
@@ -686,6 +772,27 @@ func (al *AgentLoop) processMessage(ctx context.Context, msg bus.InboundMessage)
 		}
 	}
 
+	planMode := false
+	if al.cfg != nil && al.cfg.Tools.PlanMode.Enabled {
+		defaultMode := sessionPermissionModeRun
+		if strings.EqualFold(strings.TrimSpace(al.cfg.Tools.PlanMode.DefaultMode), "plan") {
+			defaultMode = sessionPermissionModePlan
+		}
+		perm := loadSessionPermissionStateWithDefault(agent.Workspace, sessionKey, defaultMode)
+		if perm.isPlan() {
+			planMode = true
+			if strings.TrimSpace(userMessage) != "" {
+				perm.PendingTask = userMessage
+				if err := saveSessionPermissionState(agent.Workspace, sessionKey, perm); err != nil {
+					logger.WarnCF("agent", "Failed to persist plan-mode pending task (best-effort)", map[string]any{
+						"session_key": sessionKey,
+						"error":       err.Error(),
+					})
+				}
+			}
+		}
+	}
+
 	return al.runAgentLoop(ctx, agent, processOptions{
 		SessionKey:      sessionKey,
 		Channel:         msg.Channel,
@@ -695,6 +802,7 @@ func (al *AgentLoop) processMessage(ctx context.Context, msg bus.InboundMessage)
 		DefaultResponse: defaultResponse,
 		EnableSummary:   true,
 		SendResponse:    false,
+		PlanMode:        planMode,
 	})
 }
 
@@ -770,30 +878,43 @@ func (al *AgentLoop) runAgentLoop(ctx context.Context, agent *AgentInstance, opt
 		}
 	}
 
-	// 1. Update tool contexts
-	al.updateToolContexts(agent, opts.Channel, opts.ChatID)
-
-	// 2. Build messages (skip history for heartbeat)
+	// 1. Build messages (skip history for heartbeat)
 	var history []providers.Message
 	var summary string
 	if !opts.NoHistory {
 		history = agent.Sessions.GetHistory(opts.SessionKey)
 		summary = agent.Sessions.GetSummary(opts.SessionKey)
 	}
+
+	// Per-run working state (must NOT be stored globally on ContextBuilder).
+	ws := NewWorkingState(opts.UserMessage)
+	opts.WorkingState = ws
+
+	llmUserMessage := opts.UserMessage
+	if opts.PlanMode {
+		restricted := "exec/edit_file/write_file/append_file"
+		if al.cfg != nil && len(al.cfg.Tools.PlanMode.RestrictedTools) > 0 {
+			restricted = strings.Join(al.cfg.Tools.PlanMode.RestrictedTools, ", ")
+		}
+		llmUserMessage = fmt.Sprintf(
+			"[PLAN MODE]\nYou are currently in PLAN mode for this session.\n"+
+				"- You MUST NOT call restricted tools (%s).\n"+
+				"- Draft a plan, ask the user to approve execution (/approve or /run), then stop.\n\n"+
+				"USER REQUEST:\n%s",
+			restricted,
+			opts.UserMessage,
+		)
+	}
 	messages := agent.ContextBuilder.BuildMessagesForSession(
 		opts.SessionKey,
 		history,
 		summary,
-		opts.UserMessage,
+		llmUserMessage,
 		nil,
 		opts.Channel,
 		opts.ChatID,
+		ws,
 	)
-
-	// 3. Set up working state for structured task tracking
-	ws := NewWorkingState(opts.UserMessage)
-	agent.ContextBuilder.SetWorkingState(ws)
-	defer agent.ContextBuilder.SetWorkingState(nil) // clean up after processing
 
 	// Phase E1: durable run checkpoint (append-only JSONL event stream).
 	runTraceEnabled := al.cfg != nil && al.cfg.Tools.Trace.Enabled
@@ -865,6 +986,32 @@ func (al *AgentLoop) runAgentLoop(ctx context.Context, agent *AgentInstance, opt
 
 	if runTrace != nil {
 		runTrace.recordEnd(iteration, finalContent)
+	}
+
+	// Optional notification hook (ROADMAP.md:1226): when a run completes in an
+	// internal channel (system/cli/subagent), notify the last active external chat.
+	if al.cfg != nil && al.cfg.Notify.OnTaskComplete && constants.IsInternalChannel(opts.Channel) {
+		targetCh, targetChat := al.LastActive()
+		if strings.TrimSpace(targetCh) != "" && strings.TrimSpace(targetChat) != "" && !constants.IsInternalChannel(targetCh) {
+			notifyText := fmt.Sprintf(
+				"✅ Task complete\n\nTask:\n%s\n\nResult:\n%s",
+				utils.Truncate(strings.TrimSpace(opts.UserMessage), 240),
+				utils.Truncate(strings.TrimSpace(finalContent), 1200),
+			)
+			if tool, ok := agent.Tools.Get("message"); ok && tool != nil {
+				_ = tool.Execute(ctx, map[string]any{
+					"content": notifyText,
+					"channel": targetCh,
+					"chat_id": targetChat,
+				})
+			} else if al.bus != nil {
+				_ = al.bus.PublishOutbound(ctx, bus.OutboundMessage{
+					Channel: targetCh,
+					ChatID:  targetChat,
+					Content: notifyText,
+				})
+			}
+		}
 	}
 
 	return finalContent, nil
@@ -1101,6 +1248,7 @@ func (al *AgentLoop) runLLMIteration(
 					opts.SessionKey,
 					newHistory, newSummary, "",
 					nil, opts.Channel, opts.ChatID,
+					opts.WorkingState,
 				)
 				continue
 			}
@@ -1174,7 +1322,7 @@ func (al *AgentLoop) runLLMIteration(
 
 		// Update working state with LLM's reasoning as next-action hint
 		if reasoning := strings.TrimSpace(response.Content); reasoning != "" {
-			if ws := agent.ContextBuilder.GetWorkingState(); ws != nil {
+			if ws := opts.WorkingState; ws != nil {
 				hint := reasoning
 				if len(hint) > 200 {
 					hint = hint[:200] + "..."
@@ -1318,22 +1466,37 @@ func (al *AgentLoop) runLLMIteration(
 			policyCfg = al.cfg.Tools.Policy
 			policyTags = al.cfg.Tools.Policy.Audit.Tags
 		}
+		estopCfg := config.EstopConfig{}
+		if al.cfg != nil {
+			estopCfg = al.cfg.Tools.Estop
+		}
+
+		planRestrictedTools := []string(nil)
+		planRestrictedPrefixes := []string(nil)
+		if al.cfg != nil {
+			planRestrictedTools = al.cfg.Tools.PlanMode.RestrictedTools
+			planRestrictedPrefixes = al.cfg.Tools.PlanMode.RestrictedPrefixes
+		}
 
 		toolExecutions := tools.ExecuteToolCalls(ctx, agent.Tools, normalizedToolCalls, tools.ToolCallExecutionOptions{
-			Channel:       opts.Channel,
-			ChatID:        opts.ChatID,
-			SenderID:      opts.SenderID,
-			Workspace:     agent.Workspace,
-			SessionKey:    opts.SessionKey,
-			RunID:         runID,
-			IsResume:      opts.Resume,
-			Policy:        policyCfg,
-			PolicyTags:    policyTags,
-			Iteration:     iteration,
-			LogScope:      "agent",
-			Parallel:      parallelCfg,
-			Trace:         traceOpts,
-			ErrorTemplate: errorTemplateOpts,
+			Channel:                opts.Channel,
+			ChatID:                 opts.ChatID,
+			SenderID:               opts.SenderID,
+			PlanMode:               opts.PlanMode,
+			PlanRestrictedTools:    planRestrictedTools,
+			PlanRestrictedPrefixes: planRestrictedPrefixes,
+			Workspace:              agent.Workspace,
+			SessionKey:             opts.SessionKey,
+			RunID:                  runID,
+			IsResume:               opts.Resume,
+			Policy:                 policyCfg,
+			PolicyTags:             policyTags,
+			Estop:                  estopCfg,
+			Iteration:              iteration,
+			LogScope:               "agent",
+			Parallel:               parallelCfg,
+			Trace:                  traceOpts,
+			ErrorTemplate:          errorTemplateOpts,
 			// Create async callback for tools that implement AsyncTool.
 			// Following openclaw's design, async tools do not send results directly
 			// to users. The agent handles user notification via processSystemMessage.
@@ -1359,8 +1522,8 @@ func (al *AgentLoop) runLLMIteration(
 			toolResult := executed.Result
 			tc := executed.ToolCall
 
-			// Track tool execution in working state
-			if ws := agent.ContextBuilder.GetWorkingState(); ws != nil {
+			// Track tool execution in working state (per-run).
+			if ws := opts.WorkingState; ws != nil {
 				ws.RecordToolCall(tc.Name, toolResult.IsError)
 				// Record as a completed step with truncated outcome
 				outcome := toolResult.ForLLM
@@ -1441,22 +1604,6 @@ func (al *AgentLoop) runLLMIteration(
 	}
 
 	return finalContent, iteration, nil
-}
-
-// contextualToolNames lists tools that need channel/chatID context updates.
-var contextualToolNames = []string{
-	"message", "spawn", "subagent", "sessions_send", "sessions_spawn",
-}
-
-// updateToolContexts updates the context for tools that need channel/chatID info.
-func (al *AgentLoop) updateToolContexts(agent *AgentInstance, channel, chatID string) {
-	for _, name := range contextualToolNames {
-		if tool, ok := agent.Tools.Get(name); ok {
-			if ct, ok := tool.(tools.ContextualTool); ok {
-				ct.SetContext(channel, chatID)
-			}
-		}
-	}
 }
 
 // maybeSummarize triggers summarization if the session history exceeds thresholds.
@@ -1782,7 +1929,7 @@ func (al *AgentLoop) estimateMessageTokens(message providers.Message) int {
 	return estimateTotalTokens("", []providers.Message{message})
 }
 
-func (al *AgentLoop) handleCommand(ctx context.Context, msg bus.InboundMessage) (string, bool) {
+func (al *AgentLoop) handleCommand(ctx context.Context, msg bus.InboundMessage, agent *AgentInstance, sessionKey string) (string, bool) {
 	content := strings.TrimSpace(msg.Content)
 	if !strings.HasPrefix(content, "/") {
 		return "", false
@@ -1797,6 +1944,178 @@ func (al *AgentLoop) handleCommand(ctx context.Context, msg bus.InboundMessage) 
 	args := parts[1:]
 
 	switch cmd {
+	case "/plan":
+		if al.cfg == nil || !al.cfg.Tools.PlanMode.Enabled {
+			return "Plan mode is disabled (set tools.plan_mode.enabled=true in config.json)", true
+		}
+		if agent == nil {
+			agent = al.registry.GetDefaultAgent()
+		}
+		if agent == nil {
+			return "No agent available", true
+		}
+		if strings.TrimSpace(sessionKey) == "" {
+			return "No session available for plan mode (missing session_key)", true
+		}
+
+		defaultMode := sessionPermissionModeRun
+		if strings.EqualFold(strings.TrimSpace(al.cfg.Tools.PlanMode.DefaultMode), "plan") {
+			defaultMode = sessionPermissionModePlan
+		}
+		perm := loadSessionPermissionStateWithDefault(agent.Workspace, sessionKey, defaultMode)
+		perm.Mode = sessionPermissionModePlan
+
+		// If the user provided a task inline ("/plan <task>"), immediately run
+		// the plan-stage loop in the same session.
+		task := strings.TrimSpace(strings.Join(args, " "))
+		if task != "" {
+			perm.PendingTask = task
+			if err := saveSessionPermissionState(agent.Workspace, sessionKey, perm); err != nil {
+				logger.WarnCF("agent", "Failed to persist plan mode state (best-effort)", map[string]any{
+					"session_key": sessionKey,
+					"error":       err.Error(),
+				})
+			}
+			response, runErr := al.runAgentLoop(ctx, agent, processOptions{
+				SessionKey:      sessionKey,
+				Channel:         msg.Channel,
+				ChatID:          msg.ChatID,
+				SenderID:        msg.SenderID,
+				UserMessage:     task,
+				DefaultResponse: defaultResponse,
+				EnableSummary:   true,
+				SendResponse:    false,
+				PlanMode:        true,
+			})
+			if runErr != nil {
+				return fmt.Sprintf("Error: %v", runErr), true
+			}
+			return response, true
+		}
+
+		if err := saveSessionPermissionState(agent.Workspace, sessionKey, perm); err != nil {
+			logger.WarnCF("agent", "Failed to persist plan mode state (best-effort)", map[string]any{
+				"session_key": sessionKey,
+				"error":       err.Error(),
+			})
+		}
+		return "Plan mode enabled for this session. Send your task, then send /approve (or /run) to execute.", true
+
+	case "/approve", "/run":
+		if al.cfg == nil || !al.cfg.Tools.PlanMode.Enabled {
+			return "Plan mode is disabled (set tools.plan_mode.enabled=true in config.json)", true
+		}
+		if agent == nil {
+			agent = al.registry.GetDefaultAgent()
+		}
+		if agent == nil {
+			return "No agent available", true
+		}
+		if strings.TrimSpace(sessionKey) == "" {
+			return "No session available for plan mode (missing session_key)", true
+		}
+
+		defaultMode := sessionPermissionModeRun
+		if strings.EqualFold(strings.TrimSpace(al.cfg.Tools.PlanMode.DefaultMode), "plan") {
+			defaultMode = sessionPermissionModePlan
+		}
+		perm := loadSessionPermissionStateWithDefault(agent.Workspace, sessionKey, defaultMode)
+		if !perm.isPlan() {
+			return "Plan mode is not active for this session. Use /plan first.", true
+		}
+		task := strings.TrimSpace(perm.PendingTask)
+		if task == "" {
+			perm.Mode = sessionPermissionModeRun
+			perm.PendingTask = ""
+			_ = saveSessionPermissionState(agent.Workspace, sessionKey, perm)
+			return "No pending task captured. Send a task while in plan mode, then /approve.", true
+		}
+
+		perm.Mode = sessionPermissionModeRun
+		perm.PendingTask = ""
+		if err := saveSessionPermissionState(agent.Workspace, sessionKey, perm); err != nil {
+			logger.WarnCF("agent", "Failed to persist plan mode state (best-effort)", map[string]any{
+				"session_key": sessionKey,
+				"error":       err.Error(),
+			})
+		}
+
+		approvedPrompt := fmt.Sprintf("[Plan approved] Execute the plan for the following task.\n\nTASK:\n%s", task)
+		response, runErr := al.runAgentLoop(ctx, agent, processOptions{
+			SessionKey:      sessionKey,
+			Channel:         msg.Channel,
+			ChatID:          msg.ChatID,
+			SenderID:        msg.SenderID,
+			UserMessage:     approvedPrompt,
+			DefaultResponse: defaultResponse,
+			EnableSummary:   true,
+			SendResponse:    false,
+			PlanMode:        false,
+		})
+		if runErr != nil {
+			return fmt.Sprintf("Error: %v", runErr), true
+		}
+		return response, true
+
+	case "/cancel":
+		if al.cfg == nil || !al.cfg.Tools.PlanMode.Enabled {
+			return "Plan mode is disabled (set tools.plan_mode.enabled=true in config.json)", true
+		}
+		if agent == nil {
+			agent = al.registry.GetDefaultAgent()
+		}
+		if agent == nil {
+			return "No agent available", true
+		}
+		if strings.TrimSpace(sessionKey) == "" {
+			return "No session available for plan mode (missing session_key)", true
+		}
+
+		defaultMode := sessionPermissionModeRun
+		if strings.EqualFold(strings.TrimSpace(al.cfg.Tools.PlanMode.DefaultMode), "plan") {
+			defaultMode = sessionPermissionModePlan
+		}
+		perm := loadSessionPermissionStateWithDefault(agent.Workspace, sessionKey, defaultMode)
+		perm.Mode = sessionPermissionModeRun
+		perm.PendingTask = ""
+		if err := saveSessionPermissionState(agent.Workspace, sessionKey, perm); err != nil {
+			logger.WarnCF("agent", "Failed to persist plan mode state (best-effort)", map[string]any{
+				"session_key": sessionKey,
+				"error":       err.Error(),
+			})
+		}
+		return "Plan mode cancelled; pending task cleared.", true
+
+	case "/mode":
+		if al.cfg == nil || !al.cfg.Tools.PlanMode.Enabled {
+			return "Plan mode is disabled (tools.plan_mode.enabled=false)", true
+		}
+		if agent == nil {
+			agent = al.registry.GetDefaultAgent()
+		}
+		if agent == nil {
+			return "No agent available", true
+		}
+		if strings.TrimSpace(sessionKey) == "" {
+			return "No session available (missing session_key)", true
+		}
+
+		defaultMode := sessionPermissionModeRun
+		if strings.EqualFold(strings.TrimSpace(al.cfg.Tools.PlanMode.DefaultMode), "plan") {
+			defaultMode = sessionPermissionModePlan
+		}
+		perm := loadSessionPermissionStateWithDefault(agent.Workspace, sessionKey, defaultMode)
+
+		pendingPreview := utils.Truncate(strings.TrimSpace(perm.PendingTask), 120)
+		if pendingPreview == "" {
+			pendingPreview = "(none)"
+		}
+		mode := "run"
+		if perm.isPlan() {
+			mode = "plan"
+		}
+		return fmt.Sprintf("mode=%s (session=%s)\npending_task=%s", mode, sessionKey, pendingPreview), true
+
 	case "/show":
 		if len(args) < 1 {
 			return "Usage: /show [model|channel|agents]", true

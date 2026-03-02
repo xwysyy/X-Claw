@@ -14,6 +14,7 @@ const (
 	executionContextSessionKey  executionContextKey = "tool_execution_session_key"
 	executionContextRunIDKey    executionContextKey = "tool_execution_run_id"
 	executionContextIsResumeKey executionContextKey = "tool_execution_is_resume"
+	executionContextAsyncCBKey  executionContextKey = "tool_execution_async_callback"
 )
 
 func withExecutionContext(ctx context.Context, channel, chatID, senderID string) context.Context {
@@ -58,6 +59,16 @@ func withExecutionIsResume(ctx context.Context, isResume bool) context.Context {
 	}
 	if isResume {
 		ctx = context.WithValue(ctx, executionContextIsResumeKey, true)
+	}
+	return ctx
+}
+
+func withExecutionAsyncCallback(ctx context.Context, cb AsyncCallback) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if cb != nil {
+		ctx = context.WithValue(ctx, executionContextAsyncCBKey, cb)
 	}
 	return ctx
 }
@@ -107,6 +118,14 @@ func toolExecutionIsResume(ctx context.Context) bool {
 		return false
 	}
 	v, _ := ctx.Value(executionContextIsResumeKey).(bool)
+	return v
+}
+
+func toolExecutionAsyncCallback(ctx context.Context) AsyncCallback {
+	if ctx == nil {
+		return nil
+	}
+	v, _ := ctx.Value(executionContextAsyncCBKey).(AsyncCallback)
 	return v
 }
 

@@ -35,7 +35,6 @@ func (s *stubSessionsSendExecutor) ProcessSessionMessage(
 func TestSessionsSendTool_Success(t *testing.T) {
 	exec := &stubSessionsSendExecutor{reply: "target reply"}
 	tool := NewSessionsSendTool(exec)
-	tool.SetContext("cli", "direct")
 
 	result := tool.Execute(context.Background(), map[string]any{
 		"session_key": "agent:main:main",

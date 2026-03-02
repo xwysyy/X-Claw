@@ -32,8 +32,14 @@ type mockCtxTool struct {
 }
 
 func (m *mockCtxTool) SetContext(channel, chatID string) {
-	m.channel = channel
-	m.chatID = chatID
+	// Legacy interface retained for backward compatibility; context is now
+	// provided via ctx values for concurrency safety.
+}
+
+func (m *mockCtxTool) Execute(ctx context.Context, args map[string]any) *ToolResult {
+	m.channel = toolExecutionChannel(ctx)
+	m.chatID = toolExecutionChatID(ctx)
+	return m.mockRegistryTool.Execute(ctx, args)
 }
 
 type mockAsyncRegistryTool struct {
@@ -41,8 +47,9 @@ type mockAsyncRegistryTool struct {
 	cb AsyncCallback
 }
 
-func (m *mockAsyncRegistryTool) SetCallback(cb AsyncCallback) {
-	m.cb = cb
+func (m *mockAsyncRegistryTool) Execute(ctx context.Context, args map[string]any) *ToolResult {
+	m.cb = toolExecutionAsyncCallback(ctx)
+	return m.mockRegistryTool.Execute(ctx, args)
 }
 
 type mockConcurrentSafeTool struct {
@@ -181,7 +188,7 @@ func TestToolRegistry_ExecuteWithContext_SkipsEmptyContext(t *testing.T) {
 	r.ExecuteWithContext(context.Background(), "ctx_tool", nil, "", "", "", nil)
 
 	if ct.channel != "" || ct.chatID != "" {
-		t.Error("SetContext should not be called with empty channel/chatID")
+		t.Error("expected empty channel/chatID in context")
 	}
 }
 
@@ -198,7 +205,7 @@ func TestToolRegistry_ExecuteWithContext_AsyncCallback(t *testing.T) {
 
 	result := r.ExecuteWithContext(context.Background(), "async_tool", nil, "", "", "", cb)
 	if at.cb == nil {
-		t.Error("expected SetCallback to have been called")
+		t.Error("expected async callback to be available via context")
 	}
 	if !result.Async {
 		t.Error("expected async result")

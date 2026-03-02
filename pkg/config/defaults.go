@@ -336,6 +336,14 @@ func DefaultConfig() *Config {
 			Host:   "127.0.0.1",
 			Port:   18790,
 			APIKey: "",
+			InboundQueue: GatewayInboundQueueConfig{
+				Enabled:          true,
+				MaxConcurrency:   4,
+				PerSessionBuffer: 32,
+			},
+		},
+		Notify: NotifyConfig{
+			OnTaskComplete: false,
 		},
 		Tools: ToolsConfig{
 			Policy: ToolPolicyConfig{
@@ -388,6 +396,21 @@ func DefaultConfig() *Config {
 					Tags: map[string]string{},
 				},
 			},
+			PlanMode: PlanModeConfig{
+				Enabled:     true,
+				DefaultMode: "run",
+				RestrictedTools: []string{
+					"exec",
+					"write_file",
+					"edit_file",
+					"append_file",
+				},
+				RestrictedPrefixes: []string{},
+			},
+			Estop: EstopConfig{
+				Enabled:    true,
+				FailClosed: true,
+			},
 			MediaCleanup: MediaCleanupConfig{
 				Enabled:  true,
 				MaxAge:   30,
@@ -404,6 +427,10 @@ func DefaultConfig() *Config {
 				DuckDuckGo: DuckDuckGoConfig{
 					Enabled:    true,
 					MaxResults: 5,
+				},
+				Evidence: WebEvidenceModeConfig{
+					Enabled:    false,
+					MinDomains: 2,
 				},
 				Grok: GrokConfig{
 					Enabled:      false,
@@ -433,6 +460,12 @@ func DefaultConfig() *Config {
 			},
 			Exec: ExecConfig{
 				EnableDenyPatterns: true,
+				Backend:            "host",
+				Docker: ExecDockerConfig{
+					Image:          "alpine:3.20",
+					Network:        "none",
+					ReadOnlyRootFS: true,
+				},
 			},
 			Skills: SkillsToolsConfig{
 				Registries: SkillsRegistriesConfig{

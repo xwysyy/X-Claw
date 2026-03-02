@@ -146,6 +146,7 @@ func TestBuildMessagesForSession_IncludesRetrievedMemory(t *testing.T) {
 		nil,
 		"",
 		"",
+		nil,
 	)
 	if len(messages) == 0 {
 		t.Fatalf("expected at least one message")
@@ -192,6 +193,7 @@ func TestBuildMessagesForSession_GroupSession_IncludesAgentMemoryBaseline(t *tes
 		nil,
 		"feishu",
 		"oc_test",
+		nil,
 	)
 	if len(messages) == 0 {
 		t.Fatalf("expected at least one message")

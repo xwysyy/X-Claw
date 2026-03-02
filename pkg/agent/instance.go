@@ -214,6 +214,9 @@ func NewAgentInstance(
 		MemoryVectorEmbedding:    memVec.Embedding,
 		MemoryHybrid:             memVec.Hybrid,
 	})
+	if cfg != nil {
+		contextBuilder.SetWebEvidenceMode(cfg.Tools.Web.Evidence.Enabled, cfg.Tools.Web.Evidence.MinDomains)
+	}
 
 	memoryProvider := func(ctx context.Context) MemoryReader {
 		if contextBuilder == nil {

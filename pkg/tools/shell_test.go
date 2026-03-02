@@ -477,3 +477,72 @@ func TestShellTool_CustomAllowPatterns(t *testing.T) {
 		t.Errorf("'git push upstream main' should still be blocked by deny pattern")
 	}
 }
+
+func TestShellTool_DockerBackend_RejectsBackgroundAndYield(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Tools.Exec.Backend = "docker"
+	cfg.Tools.Exec.Docker.Image = "alpine:3.20"
+
+	tool, err := NewExecToolWithConfig(t.TempDir(), true, cfg)
+	if err != nil {
+		t.Fatalf("unable to configure exec tool: %s", err)
+	}
+
+	res := tool.Execute(context.Background(), map[string]any{
+		"command":    "echo hi",
+		"background": true,
+	})
+	if !res.IsError || !strings.Contains(res.ForLLM, "background/yield") {
+		t.Fatalf("expected background to be rejected, got: %+v", res)
+	}
+
+	res = tool.Execute(context.Background(), map[string]any{
+		"command":         "echo hi",
+		"yield_ms":        10,
+		"timeout_seconds": 1,
+	})
+	if !res.IsError || !strings.Contains(res.ForLLM, "background/yield") {
+		t.Fatalf("expected yield_ms to be rejected, got: %+v", res)
+	}
+}
+
+func TestShellTool_DockerBackend_RequiresRestrictToWorkspace(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Tools.Exec.Backend = "docker"
+	cfg.Tools.Exec.Docker.Image = "alpine:3.20"
+
+	tool, err := NewExecToolWithConfig(t.TempDir(), false, cfg)
+	if err != nil {
+		t.Fatalf("unable to configure exec tool: %s", err)
+	}
+
+	res := tool.Execute(context.Background(), map[string]any{"command": "echo hi"})
+	if !res.IsError || !strings.Contains(res.ForLLM, "restrict_to_workspace") {
+		t.Fatalf("expected restrict_to_workspace enforcement, got: %+v", res)
+	}
+}
+
+func TestShellTool_DockerBackend_RequiresImage(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Tools.Exec.Backend = "docker"
+	cfg.Tools.Exec.Docker.Image = ""
+
+	tool, err := NewExecToolWithConfig(t.TempDir(), true, cfg)
+	if err != nil {
+		t.Fatalf("unable to configure exec tool: %s", err)
+	}
+
+	res := tool.Execute(context.Background(), map[string]any{"command": "echo hi"})
+	if !res.IsError || !strings.Contains(res.ForLLM, "docker.image") {
+		t.Fatalf("expected missing image error, got: %+v", res)
+	}
+}
+
+func TestShellTool_DockerBackend_InvalidBackendRejected(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Tools.Exec.Backend = "invalid_backend"
+
+	if _, err := NewExecToolWithConfig(t.TempDir(), true, cfg); err == nil {
+		t.Fatalf("expected invalid backend to be rejected")
+	}
+}

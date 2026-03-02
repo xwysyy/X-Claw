@@ -53,10 +53,22 @@ type Config struct {
 	Providers     ProvidersConfig     `json:"providers,omitempty"`
 	ModelList     []ModelConfig       `json:"model_list"` // New model-centric provider configuration
 	Gateway       GatewayConfig       `json:"gateway"`
+	Notify        NotifyConfig        `json:"notify,omitempty"`
 	Tools         ToolsConfig         `json:"tools"`
 	Heartbeat     HeartbeatConfig     `json:"heartbeat"`
 	Orchestration OrchestrationConfig `json:"orchestration,omitempty"`
 	Audit         AuditConfig         `json:"audit,omitempty"`
+}
+
+// NotifyConfig controls optional notification hooks.
+//
+// Phase PR-3 in ROADMAP.md (ROADMAP.md:1226): make "task completed" reminders
+// a configurable workflow hook.
+type NotifyConfig struct {
+	// OnTaskComplete sends a short completion notification when a run finishes
+	// in an internal channel (e.g., system/cli), using the message tool routed to
+	// the last active external conversation.
+	OnTaskComplete bool `json:"on_task_complete,omitempty"`
 }
 
 // MarshalJSON implements custom JSON marshaling for Config
@@ -589,6 +601,21 @@ type GatewayConfig struct {
 	Host   string `json:"host"    env:"PICOCLAW_GATEWAY_HOST"`
 	Port   int    `json:"port"    env:"PICOCLAW_GATEWAY_PORT"`
 	APIKey string `json:"api_key,omitempty" env:"PICOCLAW_GATEWAY_API_KEY"`
+
+	// InboundQueue enables per-session serial processing with a global concurrency cap.
+	InboundQueue GatewayInboundQueueConfig `json:"inbound_queue,omitempty"`
+}
+
+type GatewayInboundQueueConfig struct {
+	Enabled bool `json:"enabled,omitempty"`
+
+	// MaxConcurrency caps how many sessions may be processed concurrently.
+	// Values <= 0 default to 1 (fully serial).
+	MaxConcurrency int `json:"max_concurrency,omitempty"`
+
+	// PerSessionBuffer caps queued inbound messages per session.
+	// Values <= 0 default to 32.
+	PerSessionBuffer int `json:"per_session_buffer,omitempty"`
 }
 
 type BraveConfig struct {
@@ -617,11 +644,25 @@ type GrokConfig struct {
 	MaxResults   int    `json:"max_results"   env:"PICOCLAW_TOOLS_WEB_GROK_MAX_RESULTS"`
 }
 
+// WebEvidenceModeConfig enables "evidence mode" for web tools.
+//
+// Phase W1 / ROADMAP.md: for fact / latest information queries, require at least
+// N distinct sources (domains). When evidence cannot be satisfied, the assistant
+// should explicitly state uncertainty and suggest verification steps.
+type WebEvidenceModeConfig struct {
+	Enabled bool `json:"enabled,omitempty"`
+
+	// MinDomains is the minimum number of distinct domains required for evidence.
+	// Values <= 0 default to 2.
+	MinDomains int `json:"min_domains,omitempty"`
+}
+
 type WebToolsConfig struct {
-	Brave      BraveConfig      `json:"brave"`
-	Tavily     TavilyConfig     `json:"tavily"`
-	DuckDuckGo DuckDuckGoConfig `json:"duckduckgo"`
-	Grok       GrokConfig       `json:"grok"`
+	Brave      BraveConfig           `json:"brave"`
+	Tavily     TavilyConfig          `json:"tavily"`
+	DuckDuckGo DuckDuckGoConfig      `json:"duckduckgo"`
+	Grok       GrokConfig            `json:"grok"`
+	Evidence   WebEvidenceModeConfig `json:"evidence_mode,omitempty"`
 	// Proxy is an optional proxy URL for web tools (http/https/socks5/socks5h).
 	// For authenticated proxies, prefer HTTP_PROXY/HTTPS_PROXY env vars instead of embedding credentials in config.
 	Proxy           string `json:"proxy,omitempty"             env:"PICOCLAW_TOOLS_WEB_PROXY"`
@@ -668,6 +709,55 @@ type ExecConfig struct {
 	EnableDenyPatterns  bool     `json:"enable_deny_patterns"  env:"PICOCLAW_TOOLS_EXEC_ENABLE_DENY_PATTERNS"`
 	CustomDenyPatterns  []string `json:"custom_deny_patterns"  env:"PICOCLAW_TOOLS_EXEC_CUSTOM_DENY_PATTERNS"`
 	CustomAllowPatterns []string `json:"custom_allow_patterns" env:"PICOCLAW_TOOLS_EXEC_CUSTOM_ALLOW_PATTERNS"`
+
+	// Backend selects the exec runtime:
+	// - "host" (default): run commands on the host directly
+	// - "docker": run commands inside a disposable docker container (workspace mounted)
+	Backend string           `json:"backend,omitempty"`
+	Docker  ExecDockerConfig `json:"docker,omitempty"`
+}
+
+type ExecDockerConfig struct {
+	// Image is required when Backend="docker" (e.g. "alpine:3.20").
+	Image string `json:"image,omitempty"`
+
+	// Network config for docker run. Recommended: "none".
+	// Empty defaults to "none".
+	Network string `json:"network,omitempty"`
+
+	// ReadOnlyRootFS sets --read-only and mounts tmpfs for /tmp and /var/tmp.
+	ReadOnlyRootFS bool `json:"read_only_rootfs,omitempty"`
+}
+
+// EstopConfig enables a global kill switch for tool execution (Policy-first Tools).
+//
+// ROADMAP.md:1138 - estop subsystem as a durable safety control plane.
+// When enabled, PicoClaw reads <workspace>/.picoclaw/state/estop.json and denies
+// tools accordingly (kill_all / network_kill / frozen tools / blocked domains).
+type EstopConfig struct {
+	Enabled bool `json:"enabled,omitempty"`
+
+	// FailClosed engages safe mode (kill_all) when the estop state file exists but
+	// cannot be read or parsed.
+	FailClosed bool `json:"fail_closed,omitempty"`
+}
+
+// PlanModeConfig controls the "plan" permission mode (Policy-first Tools).
+//
+// When enabled, sessions may enter plan mode, during which a restricted tool set
+// is denied (typically side-effect tools like exec/edit/write). Users can then
+// explicitly approve (exit plan mode) to allow execution.
+type PlanModeConfig struct {
+	Enabled bool `json:"enabled,omitempty"`
+
+	// DefaultMode applies when a session has no saved mode yet.
+	// Supported values: "run" (default) | "plan".
+	DefaultMode string `json:"default_mode,omitempty"`
+
+	// RestrictedTools are denied while in plan mode.
+	RestrictedTools []string `json:"restricted_tools,omitempty"`
+	// RestrictedPrefixes are denied while in plan mode.
+	RestrictedPrefixes []string `json:"restricted_prefixes,omitempty"`
 }
 
 type MediaCleanupConfig struct {
@@ -711,6 +801,8 @@ type ToolsConfig struct {
 	Web             WebToolsConfig          `json:"web"`
 	MCP             MCPToolsConfig          `json:"mcp,omitempty"`
 	Policy          ToolPolicyConfig        `json:"policy,omitempty"`
+	PlanMode        PlanModeConfig          `json:"plan_mode,omitempty"`
+	Estop           EstopConfig             `json:"estop,omitempty"`
 	Trace           ToolTraceConfig         `json:"trace,omitempty"`
 	ErrorTemplate   ToolErrorTemplateConfig `json:"error_template,omitempty"`
 	Cron            CronToolsConfig         `json:"cron"`

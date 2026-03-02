@@ -788,3 +788,93 @@ func TestWebTool_GrokSearch_SSEResponse(t *testing.T) {
 		t.Errorf("Expected SSE URL in output, got: %s", result.ForUser)
 	}
 }
+
+type stubSearchProvider struct {
+	out string
+	err error
+}
+
+func (p stubSearchProvider) Search(ctx context.Context, query string, count int) (string, error) {
+	return p.out, p.err
+}
+
+func TestWebSearchTool_EvidenceMode_ProducesJSONSources(t *testing.T) {
+	tool := &WebSearchTool{
+		provider:          stubSearchProvider{out: "1. A\n   https://a.example.com/x\n2. B\n   https://b.example.com/y\n"},
+		providerName:      "primary",
+		secondary:         stubSearchProvider{out: "1. C\n   https://c.example.com/z\n"},
+		secondaryName:     "secondary",
+		maxResults:        5,
+		evidenceMode:      true,
+		evidenceMinDomain: 2,
+	}
+
+	res := tool.Execute(context.Background(), map[string]any{"query": "test query"})
+	if res == nil || res.IsError {
+		t.Fatalf("expected success, got: %+v", res)
+	}
+
+	var payload struct {
+		Kind     string `json:"kind"`
+		Query    string `json:"query"`
+		Sources  []any  `json:"sources"`
+		Evidence struct {
+			Enabled         bool `json:"enabled"`
+			MinDomains      int  `json:"min_domains"`
+			DistinctDomains int  `json:"distinct_domains"`
+			Satisfied       bool `json:"satisfied"`
+		} `json:"evidence"`
+	}
+	if err := json.Unmarshal([]byte(res.ForLLM), &payload); err != nil {
+		t.Fatalf("expected JSON ForLLM payload, got error: %v\npayload=%s", err, res.ForLLM)
+	}
+	if payload.Kind != "web_search_result" {
+		t.Fatalf("kind=%q, want %q", payload.Kind, "web_search_result")
+	}
+	if payload.Query != "test query" {
+		t.Fatalf("query=%q, want %q", payload.Query, "test query")
+	}
+	if !payload.Evidence.Enabled || payload.Evidence.MinDomains != 2 {
+		t.Fatalf("unexpected evidence config: %+v", payload.Evidence)
+	}
+	if payload.Evidence.DistinctDomains < 2 || !payload.Evidence.Satisfied {
+		t.Fatalf("expected satisfied evidence, got: %+v", payload.Evidence)
+	}
+	if len(payload.Sources) < 2 {
+		t.Fatalf("expected at least 2 sources, got %d", len(payload.Sources))
+	}
+	if !strings.Contains(res.ForUser, "evidence_mode=true") {
+		t.Fatalf("expected user summary to mention evidence_mode, got: %q", res.ForUser)
+	}
+}
+
+func TestWebSearchTool_EvidenceMode_UnsatisfiedWhenSingleDomain(t *testing.T) {
+	tool := &WebSearchTool{
+		provider:          stubSearchProvider{out: "1. A\n   https://only.example.com/x\n2. B\n   https://only.example.com/y\n"},
+		providerName:      "primary",
+		maxResults:        5,
+		evidenceMode:      true,
+		evidenceMinDomain: 2,
+	}
+
+	res := tool.Execute(context.Background(), map[string]any{"query": "test query"})
+	if res == nil || res.IsError {
+		t.Fatalf("expected success, got: %+v", res)
+	}
+
+	var payload struct {
+		Evidence struct {
+			DistinctDomains int  `json:"distinct_domains"`
+			Satisfied       bool `json:"satisfied"`
+		} `json:"evidence"`
+	}
+	if err := json.Unmarshal([]byte(res.ForLLM), &payload); err != nil {
+		t.Fatalf("expected JSON ForLLM payload, got error: %v\npayload=%s", err, res.ForLLM)
+	}
+	if payload.Evidence.DistinctDomains != 1 {
+		t.Fatalf("distinct_domains=%d, want 1", payload.Evidence.DistinctDomains)
+	}
+	if payload.Evidence.Satisfied {
+		t.Fatalf("expected evidence not satisfied, got satisfied=true")
+	}
+}

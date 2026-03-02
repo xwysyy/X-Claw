@@ -31,14 +31,13 @@ func newCronToolForTest(t *testing.T) *CronTool {
 	if err != nil {
 		t.Fatalf("failed to construct cron tool: %v", err)
 	}
-	tool.SetContext("cli", "direct")
 	return tool
 }
 
 func TestCronToolAddJob_UsesCronExprWhenZeroNumericFieldsPresent(t *testing.T) {
 	tool := newCronToolForTest(t)
 
-	result := tool.Execute(context.Background(), map[string]any{
+	result := tool.Execute(withExecutionContext(context.Background(), "cli", "direct", ""), map[string]any{
 		"action":        "add",
 		"message":       "daily check",
 		"at_seconds":    0,
@@ -65,7 +64,7 @@ func TestCronToolAddJob_UsesCronExprWhenZeroNumericFieldsPresent(t *testing.T) {
 func TestCronToolAddJob_UsesEveryWhenAtIsZero(t *testing.T) {
 	tool := newCronToolForTest(t)
 
-	result := tool.Execute(context.Background(), map[string]any{
+	result := tool.Execute(withExecutionContext(context.Background(), "cli", "direct", ""), map[string]any{
 		"action":        "add",
 		"message":       "hourly check",
 		"at_seconds":    0,
@@ -90,7 +89,7 @@ func TestCronToolAddJob_UsesEveryWhenAtIsZero(t *testing.T) {
 func TestCronToolAddJob_NegativeSecondsRejected(t *testing.T) {
 	tool := newCronToolForTest(t)
 
-	result := tool.Execute(context.Background(), map[string]any{
+	result := tool.Execute(withExecutionContext(context.Background(), "cli", "direct", ""), map[string]any{
 		"action":     "add",
 		"message":    "invalid",
 		"at_seconds": -1,

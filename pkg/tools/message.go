@@ -8,10 +8,7 @@ import (
 type SendCallback func(channel, chatID, content string) error
 
 type MessageTool struct {
-	sendCallback   SendCallback
-	defaultChannel string
-	defaultChatID  string
-	sentInRound    bool // Tracks whether a message was sent in the current processing round
+	sendCallback SendCallback
 }
 
 func NewMessageTool() *MessageTool {
@@ -51,17 +48,6 @@ func (t *MessageTool) Parameters() map[string]any {
 	}
 }
 
-func (t *MessageTool) SetContext(channel, chatID string) {
-	t.defaultChannel = channel
-	t.defaultChatID = chatID
-	t.sentInRound = false // Reset send tracking for new processing round
-}
-
-// HasSentInRound returns true if the message tool sent a message during the current round.
-func (t *MessageTool) HasSentInRound() bool {
-	return t.sentInRound
-}
-
 func (t *MessageTool) SetSendCallback(callback SendCallback) {
 	t.sendCallback = callback
 }
@@ -76,10 +62,10 @@ func (t *MessageTool) Execute(ctx context.Context, args map[string]any) *ToolRes
 	chatID, _ := args["chat_id"].(string)
 
 	if channel == "" {
-		channel = t.defaultChannel
+		channel = toolExecutionChannel(ctx)
 	}
 	if chatID == "" {
-		chatID = t.defaultChatID
+		chatID = toolExecutionChatID(ctx)
 	}
 
 	if channel == "" || chatID == "" {
@@ -98,7 +84,9 @@ func (t *MessageTool) Execute(ctx context.Context, args map[string]any) *ToolRes
 		}
 	}
 
-	t.sentInRound = true
+	if tracker := messageRoundTrackerFromContext(ctx); tracker != nil {
+		tracker.MarkSent()
+	}
 	// Silent: user already received the message directly
 	return &ToolResult{
 		ForLLM: fmt.Sprintf("Message sent to %s:%s", channel, chatID),

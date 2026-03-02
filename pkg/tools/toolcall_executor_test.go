@@ -4,10 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/providers"
 )
 
@@ -235,6 +237,53 @@ func TestExecuteToolCalls_ErrorTemplate_IncludesSchemaSummary(t *testing.T) {
 	}
 	if len(payload.ToolSchema.Keys) != 2 {
 		t.Fatalf("payload.ToolSchema.Keys = %#v, want 2 keys", payload.ToolSchema.Keys)
+	}
+}
+
+func TestExecuteToolCalls_EstopKillAllDeniesTools(t *testing.T) {
+	workspace := t.TempDir()
+	if _, err := SaveEstopState(workspace, EstopState{Mode: EstopModeKillAll}); err != nil {
+		t.Fatalf("failed to save estop state: %v", err)
+	}
+
+	registry := NewToolRegistry()
+	executed := atomic.Int32{}
+	registry.Register(&executorMockTool{
+		name:   "safe_read",
+		policy: ToolParallelReadOnly,
+		result: SilentResult("ok"),
+		onExecute: func() {
+			executed.Add(1)
+		},
+	})
+
+	calls := []providers.ToolCall{
+		{ID: "tc-1", Name: "safe_read", Arguments: map[string]any{}},
+	}
+
+	results := ExecuteToolCalls(context.Background(), registry, calls, ToolCallExecutionOptions{
+		Workspace:  workspace,
+		SessionKey: "s",
+		RunID:      "r",
+		Estop: config.EstopConfig{
+			Enabled:    true,
+			FailClosed: true,
+		},
+		Iteration: 1,
+		LogScope:  "test",
+	})
+
+	if executed.Load() != 0 {
+		t.Fatalf("expected tool not to execute under estop kill_all, executed=%d", executed.Load())
+	}
+	if len(results) != 1 || results[0].Result == nil {
+		t.Fatalf("unexpected results: %+v", results)
+	}
+	if !results[0].Result.IsError {
+		t.Fatalf("expected IsError=true, got %+v", results[0].Result)
+	}
+	if !strings.Contains(results[0].Result.ForLLM, "ESTOP_DENY") {
+		t.Fatalf("expected ESTOP_DENY message, got: %q", results[0].Result.ForLLM)
 	}
 }
 
@@ -491,6 +540,40 @@ func TestExecuteToolCalls_OverrideCannotBypassInstanceSafety(t *testing.T) {
 	}
 	if maxRunning.Load() > 1 {
 		t.Fatalf("maxRunning = %d, want <= 1 because instance safety should block parallel", maxRunning.Load())
+	}
+}
+
+func TestExecuteToolCalls_PlanModeDeniesRestrictedTools(t *testing.T) {
+	registry := NewToolRegistry()
+	registry.Register(&executorMockTool{
+		name:   "exec",
+		result: SilentResult("should-not-run"),
+	})
+
+	calls := []providers.ToolCall{
+		{ID: "tc-1", Name: "exec", Arguments: map[string]any{}},
+	}
+
+	results := ExecuteToolCalls(context.Background(), registry, calls, ToolCallExecutionOptions{
+		Iteration: 1,
+		LogScope:  "test",
+		PlanMode:  true,
+		PlanRestrictedTools: []string{
+			"exec",
+		},
+	})
+
+	if len(results) != 1 {
+		t.Fatalf("len(results) = %d, want 1", len(results))
+	}
+	if results[0].Result == nil {
+		t.Fatalf("nil ToolResult")
+	}
+	if !results[0].Result.IsError {
+		t.Fatalf("expected IsError=true, got false (%q)", results[0].Result.ForLLM)
+	}
+	if !strings.Contains(results[0].Result.ForLLM, "PLAN_MODE_DENY") {
+		t.Fatalf("expected PLAN_MODE_DENY, got %q", results[0].Result.ForLLM)
 	}
 }
 
