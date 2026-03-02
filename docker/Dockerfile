@@ -77,8 +77,10 @@ RUN addgroup -g 1000 picoclaw && \
 # Switch to non-root user
 USER picoclaw
 
-# Run onboard to create initial directories and config
-RUN /usr/local/bin/picoclaw onboard
+# NOTE: Do not run `picoclaw onboard` at build-time. In real deployments the
+# config/workspace are typically mounted as volumes, and running onboard here
+# bloats layers and can fail under low-disk CI environments. The entrypoint
+# performs best-effort first-run onboarding when needed.
 
 ENTRYPOINT ["/usr/local/bin/picoclaw-entrypoint.sh"]
 CMD ["gateway"]
