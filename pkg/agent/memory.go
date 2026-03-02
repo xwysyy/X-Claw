@@ -7,6 +7,7 @@
 package agent
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -215,25 +216,25 @@ func (ms *MemoryStore) SetVectorSettings(settings MemoryVectorSettings) {
 }
 
 // SearchRelevant runs semantic retrieval over MEMORY.md + recent daily notes.
-func (ms *MemoryStore) SearchRelevant(query string, topK int, minScore float64) ([]MemoryVectorHit, error) {
+func (ms *MemoryStore) SearchRelevant(ctx context.Context, query string, topK int, minScore float64) ([]MemoryVectorHit, error) {
 	if ms.vector == nil {
 		return nil, nil
 	}
-	return ms.vector.Search(query, topK, minScore)
+	return ms.vector.Search(ctx, query, topK, minScore)
 }
 
-func (ms *MemoryStore) GetBySource(source string) (MemoryVectorHit, bool, error) {
+func (ms *MemoryStore) GetBySource(ctx context.Context, source string) (MemoryVectorHit, bool, error) {
 	if ms.vector == nil {
 		return MemoryVectorHit{}, false, nil
 	}
-	return ms.vector.GetBySource(source)
+	return ms.vector.GetBySource(ctx, source)
 }
 
 func (ms *MemoryStore) refreshVectorIndex() {
 	if ms.vector == nil {
 		return
 	}
-	_ = ms.vector.Rebuild()
+	ms.vector.MarkDirty()
 }
 
 func parseMemorySections(content string) map[string][]string {

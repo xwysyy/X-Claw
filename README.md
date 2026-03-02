@@ -213,6 +213,34 @@ curl -sS -X POST http://127.0.0.1:18790/api/notify \
 
 这能显著降低 “模型看不懂纯文本结果 / 引用不稳定” 的概率。
 
+### 语义记忆 Embeddings（可选远程）
+
+PicoClaw 的语义记忆（`agents.defaults.memory_vector`）默认使用本地 `hashed` embedder：快、确定性强、无需额外 API / 网络。
+
+如果你希望更高质量的语义检索，可以让 PicoClaw 调用一个 OpenAI-compatible 的 embeddings 端点（`POST <api_base>/embeddings`），例如 SiliconFlow / OpenAI / 其他兼容服务。
+
+兼容方式（直接使用你现成的 `EMBEDDING_*` 环境变量，无需改 `config.json`）：
+
+```bash
+export EMBEDDING_API_KEY='sk-...'
+export EMBEDDING_BASE_URL='https://api.siliconflow.cn/v1'
+export EMBEDDING_MODEL='Qwen/Qwen3-Embedding-8B'
+export EMBEDDING_DIM='4096'
+```
+
+推荐方式（使用带命名空间的 `PICOCLAW_EMBEDDING_*`；与上面等价但更不容易撞名）：
+
+```bash
+export PICOCLAW_EMBEDDING_API_KEY='sk-...'
+export PICOCLAW_EMBEDDING_API_BASE='https://api.siliconflow.cn/v1'
+export PICOCLAW_EMBEDDING_MODEL='Qwen/Qwen3-Embedding-8B'
+```
+
+说明：
+- 首次触发语义检索/索引重建时会产生网络请求；索引会落盘缓存，并在源文件或 `api_base/model` 变化时自动重建
+- 常用调参：`(PICOCLAW_|)EMBEDDING_PROXY`、`(PICOCLAW_|)EMBEDDING_BATCH_SIZE`、`(PICOCLAW_|)EMBEDDING_REQUEST_TIMEOUT_SECONDS`
+- 如果你显式把 `embedding.kind` 设为 `openai_compat`，则 `api_base` 与 `model` 为必填（否则会报错）
+
 ### Cron 可运营任务状态（runHistory / lastStatus）
 
 Cron 的任务状态会持久化到工作区：

@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"crypto/sha1"
 	"encoding/hex"
 	"encoding/json"
@@ -33,6 +34,7 @@ type MemoryVectorSettings struct {
 	MinScore        float64
 	MaxContextChars int
 	RecentDailyDays int
+	Embedding       MemoryVectorEmbeddingSettings
 }
 
 type MemoryVectorHit struct {
@@ -52,6 +54,7 @@ type memoryVectorIndex struct {
 	Version     int                    `json:"version"`
 	BuiltAt     string                 `json:"built_at"`
 	Fingerprint string                 `json:"fingerprint"`
+	EmbedderSig string                 `json:"embedder_signature,omitempty"`
 	Dimensions  int                    `json:"dimensions"`
 	Documents   []memoryVectorDocument `json:"documents"`
 }
@@ -70,6 +73,7 @@ type memoryVectorStore struct {
 
 	mu       sync.Mutex
 	settings MemoryVectorSettings
+	embedder memoryVectorEmbedder
 	cache    *memoryVectorIndex
 }
 
@@ -100,16 +104,19 @@ func normalizeMemoryVectorSettings(settings MemoryVectorSettings) MemoryVectorSe
 	if settings.RecentDailyDays <= 0 {
 		settings.RecentDailyDays = defaultMemoryVectorRecentDailyDays
 	}
+	settings.Embedding = normalizeMemoryVectorEmbeddingSettings(settings.Embedding)
 	return settings
 }
 
 func newMemoryVectorStore(memoryDir, memoryFile string, settings MemoryVectorSettings) *memoryVectorStore {
 	settings = normalizeMemoryVectorSettings(settings)
+	embedder := buildMemoryVectorEmbedder(settings.Embedding, settings.Dimensions)
 	return &memoryVectorStore{
 		memoryDir:  memoryDir,
 		memoryFile: memoryFile,
 		indexPath:  filepath.Join(memoryDir, "vector", "index.json"),
 		settings:   settings,
+		embedder:   embedder,
 	}
 }
 
@@ -117,23 +124,49 @@ func (vs *memoryVectorStore) SetSettings(settings MemoryVectorSettings) {
 	vs.mu.Lock()
 	defer vs.mu.Unlock()
 
+	prevSettings := vs.settings
+	oldSig := ""
+	if vs.embedder != nil {
+		oldSig = vs.embedder.Signature()
+	}
+
 	normalized := normalizeMemoryVectorSettings(settings)
-	if vs.settings != normalized {
-		vs.settings = normalized
+	newEmbedder := buildMemoryVectorEmbedder(normalized.Embedding, normalized.Dimensions)
+	newSig := ""
+	if newEmbedder != nil {
+		newSig = newEmbedder.Signature()
+	}
+
+	if prevSettings != normalized || oldSig != newSig {
 		vs.cache = nil
 	}
+
+	vs.settings = normalized
+	vs.embedder = newEmbedder
 }
 
-func (vs *memoryVectorStore) Rebuild() error {
+func (vs *memoryVectorStore) MarkDirty() {
 	vs.mu.Lock()
 	defer vs.mu.Unlock()
-	return vs.rebuildLocked()
+	vs.cache = nil
 }
 
-func (vs *memoryVectorStore) Search(query string, topK int, minScore float64) ([]MemoryVectorHit, error) {
+func (vs *memoryVectorStore) Rebuild(ctx context.Context) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	vs.mu.Lock()
+	defer vs.mu.Unlock()
+	return vs.rebuildLocked(ctx)
+}
+
+func (vs *memoryVectorStore) Search(ctx context.Context, query string, topK int, minScore float64) ([]MemoryVectorHit, error) {
 	query = strings.TrimSpace(query)
 	if query == "" {
 		return nil, nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
 	}
 
 	vs.mu.Lock()
@@ -149,14 +182,24 @@ func (vs *memoryVectorStore) Search(query string, topK int, minScore float64) ([
 		minScore = 0
 	}
 
-	if err := vs.ensureIndexLocked(); err != nil {
+	if err := vs.ensureIndexLocked(ctx); err != nil {
 		return nil, err
 	}
 	if vs.cache == nil || len(vs.cache.Documents) == 0 {
 		return nil, nil
 	}
 
-	queryVec := embedHashedText(query, vs.settings.Dimensions)
+	if vs.embedder == nil {
+		return nil, fmt.Errorf("memory embedder not configured")
+	}
+	queryVecs, err := vs.embedder.Embed(ctx, []string{query})
+	if err != nil {
+		return nil, err
+	}
+	if len(queryVecs) == 0 {
+		return nil, nil
+	}
+	queryVec := queryVecs[0]
 	queryTerms := uniqueTokenSet(tokenizeForEmbedding(query))
 	if len(queryVec) == 0 {
 		return nil, nil
@@ -191,10 +234,13 @@ func (vs *memoryVectorStore) Search(query string, topK int, minScore float64) ([
 	return hits, nil
 }
 
-func (vs *memoryVectorStore) GetBySource(source string) (MemoryVectorHit, bool, error) {
+func (vs *memoryVectorStore) GetBySource(ctx context.Context, source string) (MemoryVectorHit, bool, error) {
 	source = strings.TrimSpace(source)
 	if source == "" {
 		return MemoryVectorHit{}, false, nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
 	}
 
 	vs.mu.Lock()
@@ -204,7 +250,7 @@ func (vs *memoryVectorStore) GetBySource(source string) (MemoryVectorHit, bool, 
 		return MemoryVectorHit{}, false, nil
 	}
 
-	if err := vs.ensureIndexLocked(); err != nil {
+	if err := vs.ensureIndexLocked(ctx); err != nil {
 		return MemoryVectorHit{}, false, err
 	}
 	if vs.cache == nil || len(vs.cache.Documents) == 0 {
@@ -225,50 +271,115 @@ func (vs *memoryVectorStore) GetBySource(source string) (MemoryVectorHit, bool, 
 	return MemoryVectorHit{}, false, nil
 }
 
-func (vs *memoryVectorStore) ensureIndexLocked() error {
+func (vs *memoryVectorStore) ensureIndexLocked(ctx context.Context) error {
 	sources, fingerprint, err := vs.collectSourceFilesLocked(time.Now())
 	if err != nil {
 		return err
 	}
 
-	if vs.cache != nil &&
-		vs.cache.Fingerprint == fingerprint &&
-		vs.cache.Dimensions == vs.settings.Dimensions {
+	if vs.cache != nil && vs.cache.Fingerprint == fingerprint {
 		return nil
 	}
 
 	if disk, loadErr := vs.loadIndexLocked(); loadErr == nil && disk != nil {
-		if disk.Fingerprint == fingerprint && disk.Dimensions == vs.settings.Dimensions {
+		if disk.Fingerprint == fingerprint {
 			vs.cache = disk
 			return nil
 		}
 	}
 
-	return vs.rebuildFromSourcesLocked(sources, fingerprint)
+	return vs.rebuildFromSourcesLocked(ctx, sources, fingerprint)
 }
 
-func (vs *memoryVectorStore) rebuildLocked() error {
+func (vs *memoryVectorStore) rebuildLocked(ctx context.Context) error {
 	sources, fingerprint, err := vs.collectSourceFilesLocked(time.Now())
 	if err != nil {
 		return err
 	}
-	return vs.rebuildFromSourcesLocked(sources, fingerprint)
+	return vs.rebuildFromSourcesLocked(ctx, sources, fingerprint)
 }
 
 func (vs *memoryVectorStore) rebuildFromSourcesLocked(
+	ctx context.Context,
 	sources []memoryVectorSourceFile,
 	fingerprint string,
 ) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
 	docs, err := vs.buildDocumentsLocked(sources)
 	if err != nil {
 		return err
 	}
 
+	// Attempt to reuse existing embeddings when the embedder signature matches.
+	var reuse map[string][]float32
+	if disk, loadErr := vs.loadIndexLocked(); loadErr == nil && disk != nil {
+		wantSig := ""
+		if vs.embedder != nil {
+			wantSig = vs.embedder.Signature()
+		}
+		if strings.TrimSpace(wantSig) != "" && disk.EmbedderSig == wantSig && len(disk.Documents) > 0 {
+			reuse = make(map[string][]float32, len(disk.Documents))
+			for _, doc := range disk.Documents {
+				if doc.ID == "" || len(doc.Vector) == 0 {
+					continue
+				}
+				reuse[doc.ID] = doc.Vector
+			}
+		}
+	}
+
+	if vs.embedder == nil {
+		return fmt.Errorf("memory embedder not configured")
+	}
+
+	toEmbed := make([]string, 0, len(docs))
+	embedIdx := make([]int, 0, len(docs))
+	for i := range docs {
+		if reuse != nil {
+			if vec, ok := reuse[docs[i].ID]; ok && len(vec) > 0 {
+				docs[i].Vector = vec
+				continue
+			}
+		}
+		toEmbed = append(toEmbed, docs[i].Text)
+		embedIdx = append(embedIdx, i)
+	}
+
+	if len(toEmbed) > 0 {
+		vecs, err := vs.embedder.Embed(ctx, toEmbed)
+		if err != nil {
+			return err
+		}
+		if len(vecs) != len(toEmbed) {
+			return fmt.Errorf("embedding backend returned %d vectors for %d inputs", len(vecs), len(toEmbed))
+		}
+		for j, vec := range vecs {
+			docs[embedIdx[j]].Vector = vec
+		}
+	}
+
+	dims := 0
+	for _, doc := range docs {
+		if len(doc.Vector) > 0 {
+			dims = len(doc.Vector)
+			break
+		}
+	}
+
+	embedderSig := ""
+	if vs.embedder != nil {
+		embedderSig = vs.embedder.Signature()
+	}
+
 	index := &memoryVectorIndex{
-		Version:     1,
+		Version:     2,
 		BuiltAt:     time.Now().Format(time.RFC3339),
 		Fingerprint: fingerprint,
-		Dimensions:  vs.settings.Dimensions,
+		EmbedderSig: embedderSig,
+		Dimensions:  dims,
 		Documents:   docs,
 	}
 	if err := vs.saveIndexLocked(index); err != nil {
@@ -319,13 +430,17 @@ func (vs *memoryVectorStore) collectSourceFilesLocked(now time.Time) ([]memoryVe
 		})
 	}
 
-	fingerprint := buildSourceFingerprint(sources, vs.settings.Dimensions)
+	embedderSig := ""
+	if vs.embedder != nil {
+		embedderSig = vs.embedder.Signature()
+	}
+	fingerprint := buildSourceFingerprint(sources, embedderSig)
 	return sources, fingerprint, nil
 }
 
-func buildSourceFingerprint(sources []memoryVectorSourceFile, dims int) string {
+func buildSourceFingerprint(sources []memoryVectorSourceFile, embedderSig string) string {
 	h := sha1.New()
-	fmt.Fprintf(h, "dims=%d\n", dims)
+	fmt.Fprintf(h, "embedder=%s\n", strings.TrimSpace(embedderSig))
 	for _, src := range sources {
 		fmt.Fprintf(h, "%s|%d|%d\n", src.RelPath, src.Size, src.ModUnix)
 	}
@@ -358,7 +473,6 @@ func (vs *memoryVectorStore) buildDocumentsLocked(sources []memoryVectorSourceFi
 						ID:     buildMemoryVectorID(src.RelPath, section, text),
 						Source: fmt.Sprintf("%s#%s", src.RelPath, section),
 						Text:   payload,
-						Vector: embedHashedText(payload, vs.settings.Dimensions),
 					})
 				}
 			}
@@ -374,7 +488,6 @@ func (vs *memoryVectorStore) buildDocumentsLocked(sources []memoryVectorSourceFi
 				ID:     buildMemoryVectorID(src.RelPath, fmt.Sprintf("%d", idx+1), chunk),
 				Source: fmt.Sprintf("%s#%d", src.RelPath, idx+1),
 				Text:   chunk,
-				Vector: embedHashedText(chunk, vs.settings.Dimensions),
 			})
 		}
 	}

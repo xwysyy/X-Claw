@@ -61,8 +61,6 @@ func (t *MemorySearchTool) Parameters() map[string]any {
 }
 
 func (t *MemorySearchTool) Execute(ctx context.Context, args map[string]any) *tools.ToolResult {
-	_ = ctx
-
 	if t.memory == nil {
 		return tools.ErrorResult("memory store unavailable")
 	}
@@ -97,7 +95,7 @@ func (t *MemorySearchTool) Execute(ctx context.Context, args map[string]any) *to
 		}
 	}
 
-	hits, err := t.memory.SearchRelevant(query, topK, minScore)
+	hits, err := t.memory.SearchRelevant(ctx, query, topK, minScore)
 	if err != nil {
 		return tools.ErrorResult(fmt.Sprintf("memory search failed: %v", err)).WithError(err)
 	}
@@ -197,8 +195,6 @@ func (t *MemoryGetTool) Parameters() map[string]any {
 }
 
 func (t *MemoryGetTool) Execute(ctx context.Context, args map[string]any) *tools.ToolResult {
-	_ = ctx
-
 	if t.memory == nil {
 		return tools.ErrorResult("memory store unavailable")
 	}
@@ -208,7 +204,7 @@ func (t *MemoryGetTool) Execute(ctx context.Context, args map[string]any) *tools
 		return tools.ErrorResult("source is required")
 	}
 
-	hit, found, err := t.memory.GetBySource(source)
+	hit, found, err := t.memory.GetBySource(ctx, source)
 	if err != nil {
 		return tools.ErrorResult(fmt.Sprintf("memory get failed: %v", err)).WithError(err)
 	}

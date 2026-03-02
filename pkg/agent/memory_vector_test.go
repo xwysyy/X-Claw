@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -45,7 +46,7 @@ func TestMemoryStore_SearchRelevant_BuildsVectorIndex(t *testing.T) {
 		t.Fatalf("write daily note: %v", err)
 	}
 
-	hits, err := ms.SearchRelevant("passport renewal", 3, 0.01)
+	hits, err := ms.SearchRelevant(context.Background(), "passport renewal", 3, 0.01)
 	if err != nil {
 		t.Fatalf("SearchRelevant failed: %v", err)
 	}
@@ -90,11 +91,11 @@ func TestMemoryStore_GetBySource(t *testing.T) {
 		t.Fatalf("write MEMORY.md: %v", err)
 	}
 
-	if _, err := ms.SearchRelevant("tax documents", 3, 0.01); err != nil {
+	if _, err := ms.SearchRelevant(context.Background(), "tax documents", 3, 0.01); err != nil {
 		t.Fatalf("SearchRelevant failed: %v", err)
 	}
 
-	hit, found, err := ms.GetBySource("MEMORY.md#Open Threads")
+	hit, found, err := ms.GetBySource(context.Background(), "MEMORY.md#Open Threads")
 	if err != nil {
 		t.Fatalf("GetBySource failed: %v", err)
 	}

@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -33,6 +34,7 @@ type ContextRuntimeSettings struct {
 	MemoryVectorMinScore     float64
 	MemoryVectorMaxChars     int
 	MemoryVectorRecentDays   int
+	MemoryVectorEmbedding    MemoryVectorEmbeddingSettings
 }
 
 type ContextBuilder struct {
@@ -95,6 +97,7 @@ func NewContextBuilder(workspace string) *ContextBuilder {
 		MinScore:        defaultSettings.MemoryVectorMinScore,
 		MaxContextChars: defaultSettings.MemoryVectorMaxChars,
 		RecentDailyDays: defaultSettings.MemoryVectorRecentDays,
+		Embedding:       defaultSettings.MemoryVectorEmbedding,
 	})
 
 	return &ContextBuilder{
@@ -148,6 +151,7 @@ func (cb *ContextBuilder) SetRuntimeSettings(settings ContextRuntimeSettings) {
 		MinScore:        settings.MemoryVectorMinScore,
 		MaxContextChars: settings.MemoryVectorMaxChars,
 		RecentDailyDays: settings.MemoryVectorRecentDays,
+		Embedding:       settings.MemoryVectorEmbedding,
 	})
 }
 
@@ -515,11 +519,9 @@ func (cb *ContextBuilder) BuildMessagesForSession(
 	}
 
 	if cb.settings.MemoryVectorEnabled && strings.TrimSpace(currentMessage) != "" {
-		hits, err := cb.memory.SearchRelevant(
-			currentMessage,
-			cb.settings.MemoryVectorTopK,
-			cb.settings.MemoryVectorMinScore,
-		)
+		retrievalCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		hits, err := cb.memory.SearchRelevant(retrievalCtx, currentMessage, cb.settings.MemoryVectorTopK, cb.settings.MemoryVectorMinScore)
 		if err != nil {
 			logger.WarnCF("agent", "Semantic memory retrieval failed", map[string]any{
 				"error": err.Error(),

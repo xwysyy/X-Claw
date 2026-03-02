@@ -218,6 +218,34 @@ Config example (enabled by default):
 
 This significantly improves second-pass consumption and reduces “model misreads plain text” issues.
 
+### Remote Embeddings for Semantic Memory (Optional)
+
+By default, PicoClaw semantic memory (`agents.defaults.memory_vector`) uses a local deterministic `hashed` embedder: fast, stable, and no extra network/API required.
+
+If you want higher-quality semantic retrieval, you can point PicoClaw to an OpenAI-compatible embeddings endpoint (`POST <api_base>/embeddings`), such as SiliconFlow / OpenAI / other compatible services.
+
+Compatibility mode (use your existing `EMBEDDING_*` env vars, no `config.json` changes needed):
+
+```bash
+export EMBEDDING_API_KEY='sk-...'
+export EMBEDDING_BASE_URL='https://api.siliconflow.cn/v1'
+export EMBEDDING_MODEL='Qwen/Qwen3-Embedding-8B'
+export EMBEDDING_DIM='4096'
+```
+
+Preferred mode (use namespaced `PICOCLAW_EMBEDDING_*` to avoid collisions; functionally equivalent):
+
+```bash
+export PICOCLAW_EMBEDDING_API_KEY='sk-...'
+export PICOCLAW_EMBEDDING_API_BASE='https://api.siliconflow.cn/v1'
+export PICOCLAW_EMBEDDING_MODEL='Qwen/Qwen3-Embedding-8B'
+```
+
+Notes:
+- The first semantic search / index rebuild will make network requests; the index is persisted and automatically rebuilt when sources or `api_base/model` changes
+- Common tuning knobs: `(PICOCLAW_|)EMBEDDING_PROXY`, `(PICOCLAW_|)EMBEDDING_BATCH_SIZE`, `(PICOCLAW_|)EMBEDDING_REQUEST_TIMEOUT_SECONDS`
+- If you explicitly set `embedding.kind` to `openai_compat`, then `api_base` and `model` are required (otherwise it errors)
+
 ### Operable Cron State (runHistory / lastStatus)
 
 Cron job state is persisted under your workspace:

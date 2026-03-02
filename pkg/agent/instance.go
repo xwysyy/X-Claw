@@ -105,6 +105,15 @@ func resolveMemoryVector(c config.AgentMemoryVectorConfig) MemoryVectorSettings 
 		MinScore:        floatRangeDefault(c.MinScore, 0, 1, defaultMemoryVectorMinScore),
 		MaxContextChars: intDefault(c.MaxContextChars, defaultMemoryVectorMaxContextChars),
 		RecentDailyDays: intDefault(c.RecentDailyDays, defaultMemoryVectorRecentDailyDays),
+		Embedding: MemoryVectorEmbeddingSettings{
+			Kind:                  c.Embedding.Kind,
+			APIKey:                c.Embedding.APIKey,
+			APIBase:               c.Embedding.APIBase,
+			Model:                 c.Embedding.Model,
+			Proxy:                 c.Embedding.Proxy,
+			BatchSize:             c.Embedding.BatchSize,
+			RequestTimeoutSeconds: c.Embedding.RequestTimeoutSeconds,
+		},
 	}
 }
 
@@ -173,6 +182,7 @@ func NewAgentInstance(
 		MemoryVectorMinScore:     memVec.MinScore,
 		MemoryVectorMaxChars:     memVec.MaxContextChars,
 		MemoryVectorRecentDays:   memVec.RecentDailyDays,
+		MemoryVectorEmbedding:    memVec.Embedding,
 	})
 
 	if memVec.Enabled {
