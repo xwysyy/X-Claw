@@ -163,15 +163,15 @@ clean:
 	@echo "Clean complete"
 
 ## vet: Run go vet for static analysis
-vet:
+vet: generate
 	@$(GO) vet ./...
 
 ## test: Test Go code
-test:
+test: generate
 	@CGO_ENABLED=0 ./scripts/test-unit.sh
 
 ## test-fast: Run `go test ./...` directly (faster, but may use more memory)
-test-fast:
+test-fast: generate
 	@$(GO) test ./...
 
 ## cover: Run unit tests with coverage and generate coverage.out + coverage.html
