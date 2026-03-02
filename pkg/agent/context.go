@@ -411,7 +411,7 @@ func (cb *ContextBuilder) sourceFilesChangedLocked() bool {
 		return true
 	}
 
-	// Check tracked source files (bootstrap + memory).
+	// Check tracked source files (bootstrap).
 	if slices.ContainsFunc(cb.sourcePaths(), cb.fileChangedSince) {
 		return true
 	}

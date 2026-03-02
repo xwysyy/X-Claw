@@ -201,18 +201,35 @@ func (ms *MemoryStore) GetMemoryContext() string {
 	return sb.String()
 }
 
-// OrganizeWriteback rewrites MEMORY.md using stable sections and deduplicated bullets.
-// It preserves existing content while integrating newly extracted memory notes.
+// OrganizeWriteback rewrites MEMORY.md using stable blocks with guardrails:
+// - persona/human/projects/facts
+// - read-only protection for core blocks
+// - hard character limits to prevent prompt bloat
 func (ms *MemoryStore) OrganizeWriteback(extracted string) error {
-	base := parseMemorySections(ms.ReadLongTerm())
-	incoming := parseMemorySections(extracted)
+	base := parseMemoryAsBlocks(ms.ReadLongTerm())
+	incoming := parseMemoryAsBlocks(extracted)
 
-	for section, entries := range incoming {
-		base[section] = append(base[section], entries...)
+	for _, spec := range memoryBlockSpecs {
+		label := spec.Label
+		base[label] = sanitizeMemoryText(base[label])
+		incoming[label] = sanitizeMemoryText(incoming[label])
 	}
-	normalizeMemorySections(base)
 
-	return ms.WriteLongTerm(renderMemorySections(base))
+	for _, spec := range memoryBlockSpecs {
+		label := spec.Label
+		if spec.ReadOnly {
+			if strings.TrimSpace(base[label]) != "" && spec.Limit > 0 {
+				base[label] = truncateRunes(strings.TrimSpace(base[label]), spec.Limit)
+			}
+			continue
+		}
+
+		entries := mergeBlockEntries(base[label], incoming[label])
+		entries = clipEntriesToLimit(entries, spec.Limit)
+		base[label] = renderEntries(entries)
+	}
+
+	return ms.WriteLongTerm(renderMemoryBlocks(base))
 }
 
 func (ms *MemoryStore) SetVectorSettings(settings MemoryVectorSettings) {
@@ -292,34 +309,32 @@ func (ms *MemoryStore) GetBySource(ctx context.Context, source string) (MemoryVe
 		if anchor == "" {
 			return MemoryVectorHit{Source: filePart, Text: content, Score: 1}, true, nil
 		}
-		section, ok := normalizeMemorySectionName(anchor)
-		if !ok {
-			return MemoryVectorHit{}, false, nil
-		}
-		sections := parseMemorySections(content)
-		entries := sections[section]
-		if len(entries) == 0 {
+
+		label := ""
+		if spec, ok := lookupMemoryBlockSpec(anchor); ok {
+			label = spec.Label
+		} else if section, ok := normalizeMemorySectionName(anchor); ok {
+			if mapped, ok := memoryBlockLabelForLegacySection(section); ok {
+				label = mapped
+			} else {
+				return MemoryVectorHit{}, false, nil
+			}
+		} else {
 			return MemoryVectorHit{}, false, nil
 		}
 
-		var sb strings.Builder
-		sb.WriteString("## ")
-		sb.WriteString(section)
-		sb.WriteString("\n")
-		for _, entry := range entries {
-			entry = strings.TrimSpace(entry)
-			if entry == "" {
-				continue
-			}
-			sb.WriteString("- ")
-			sb.WriteString(entry)
-			sb.WriteString("\n")
+		blocks := parseMemoryAsBlocks(content)
+		blockContent := strings.TrimSpace(blocks[label])
+		if blockContent == "" {
+			return MemoryVectorHit{}, false, nil
 		}
-		out := strings.TrimSpace(sb.String())
+
+		canonicalPath := filepath.ToSlash(rel)
+		out := strings.TrimSpace("## " + label + "\n" + blockContent)
 		if out == "" {
 			return MemoryVectorHit{}, false, nil
 		}
-		return MemoryVectorHit{Source: fmt.Sprintf("MEMORY.md#%s", section), Text: out, Score: 1}, true, nil
+		return MemoryVectorHit{Source: fmt.Sprintf("%s#%s", canonicalPath, label), Text: out, Score: 1}, true, nil
 	}
 
 	// Non-MEMORY.md sources use chunk indexes for stable retrieval.

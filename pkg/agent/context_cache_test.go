@@ -128,8 +128,8 @@ func TestSingleSystemMessage(t *testing.T) {
 
 // TestMtimeAutoInvalidation verifies that the cache detects source file changes
 // via mtime without requiring explicit InvalidateCache().
-// Fix: original implementation had no auto-invalidation — edits to bootstrap files,
-// memory, or skills were invisible until process restart.
+// Fix: original implementation had no auto-invalidation — edits to bootstrap files
+// or skills were invisible until process restart.
 func TestMtimeAutoInvalidation(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -144,13 +144,6 @@ func TestMtimeAutoInvalidation(t *testing.T) {
 			contentV1:  "# Original Identity",
 			contentV2:  "# Updated Identity",
 			checkField: "Updated Identity",
-		},
-		{
-			name:       "memory file change",
-			file:       "memory/MEMORY.md",
-			contentV1:  "# Memory\nUser likes Go.",
-			contentV2:  "# Memory\nUser likes Rust.",
-			checkField: "User likes Rust",
 		},
 	}
 
@@ -268,8 +261,8 @@ func TestCacheStability(t *testing.T) {
 	}
 }
 
-// TestNewFileCreationInvalidatesCache verifies that creating a source file that
-// did not exist when the cache was built triggers a cache rebuild.
+// TestNewFileCreationInvalidatesCache verifies that creating a tracked source file
+// that did not exist when the cache was built triggers a cache rebuild.
 // This catches the "from nothing to something" edge case that the old
 // modifiedSince (return false on stat error) would miss.
 func TestNewFileCreationInvalidatesCache(t *testing.T) {
@@ -284,12 +277,6 @@ func TestNewFileCreationInvalidatesCache(t *testing.T) {
 			file:       "SOUL.md",
 			content:    "# Soul\nBe kind and helpful.",
 			checkField: "Be kind and helpful",
-		},
-		{
-			name:       "new memory file",
-			file:       "memory/MEMORY.md",
-			content:    "# Memory\nUser prefers dark mode.",
-			checkField: "User prefers dark mode",
 		},
 	}
 

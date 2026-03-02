@@ -335,16 +335,16 @@ func (fs *memoryFTSStore) buildDocumentsLocked(sources []memoryVectorSourceFile)
 		}
 
 		if src.RelPath == "MEMORY.md" {
-			sections := parseMemorySections(content)
-			for _, section := range memorySectionOrder {
-				for _, entry := range sections[section] {
+			blocks := parseMemoryAsBlocks(content)
+			for _, label := range memoryBlockLabels() {
+				for _, entry := range extractBlockEntries(blocks[label]) {
 					text := compactWhitespace(entry)
 					if text == "" {
 						continue
 					}
-					payload := section + ": " + text
+					payload := label + ": " + text
 					docs = append(docs, memoryFTSDoc{
-						Source: fmt.Sprintf("%s#%s", src.RelPath, section),
+						Source: fmt.Sprintf("%s#%s", src.RelPath, label),
 						Text:   payload,
 					})
 				}

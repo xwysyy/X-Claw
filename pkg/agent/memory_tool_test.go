@@ -103,7 +103,7 @@ func TestMemoryGetTool_Execute(t *testing.T) {
 
 	get := NewMemoryGetTool(ms)
 	getResult := get.Execute(context.Background(), map[string]any{
-		"source": "MEMORY.md#Long-term Facts",
+		"source": "MEMORY.md#facts",
 	})
 	if getResult.IsError {
 		t.Fatalf("memory_get failed: %s", getResult.ForLLM)
@@ -127,7 +127,7 @@ func TestMemoryGetTool_Execute(t *testing.T) {
 	if !parsed.Found {
 		t.Fatalf("expected found=true")
 	}
-	if parsed.Hit.Source != "MEMORY.md#Long-term Facts" {
+	if parsed.Hit.Source != "MEMORY.md#facts" {
 		t.Fatalf("unexpected hit source: %q", parsed.Hit.Source)
 	}
 	if !strings.Contains(strings.ToLower(parsed.Hit.Content), "neovim") {

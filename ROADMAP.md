@@ -75,7 +75,7 @@
 ### Phase B — 结构化记忆（先输出稳定，再做更强检索）
 
 - B1：`memory_search` / `memory_get` 输出升级为 JSON hits（同时保留 ForUser 摘要）✅（done: 2026-03-01；落点：`pkg/agent/memory_tool.go`）
-- B2：Memory blocks（persona/human/projects/facts）+ 只读约束 + 长度上限
+- B2：Memory blocks（persona/human/projects/facts）+ 只读约束 + 长度上限 ✅（done: 2026-03-02；落点：`pkg/agent/memory_blocks.go` + `pkg/agent/memory.go` + `pkg/agent/memory_vector.go` + `pkg/agent/memory_fts.go`）
 - B3：Scope 化（user/session/agent）避免跨渠道污染 ✅（done: 2026-03-02；落点：`pkg/agent/memory_scope.go` + `pkg/agent/context.go` + `pkg/agent/memory_tool.go` + `pkg/agent/compaction.go` + `pkg/tools/toolcall_executor.go`）
 
 ### Phase C — 本地确定性检索（SQLite FTS）

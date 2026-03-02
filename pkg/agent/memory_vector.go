@@ -461,17 +461,17 @@ func (vs *memoryVectorStore) buildDocumentsLocked(sources []memoryVectorSourceFi
 		}
 
 		if src.RelPath == "MEMORY.md" {
-			sections := parseMemorySections(content)
-			for _, section := range memorySectionOrder {
-				for _, entry := range sections[section] {
+			blocks := parseMemoryAsBlocks(content)
+			for _, label := range memoryBlockLabels() {
+				for _, entry := range extractBlockEntries(blocks[label]) {
 					text := compactWhitespace(entry)
 					if text == "" {
 						continue
 					}
-					payload := section + ": " + text
+					payload := label + ": " + text
 					docs = append(docs, memoryVectorDocument{
-						ID:     buildMemoryVectorID(src.RelPath, section, text),
-						Source: fmt.Sprintf("%s#%s", src.RelPath, section),
+						ID:     buildMemoryVectorID(src.RelPath, label, text),
+						Source: fmt.Sprintf("%s#%s", src.RelPath, label),
 						Text:   payload,
 					})
 				}

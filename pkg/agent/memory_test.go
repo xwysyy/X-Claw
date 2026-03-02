@@ -39,8 +39,8 @@ func TestMemoryOrganizeWriteback_DedupesAndSections(t *testing.T) {
 	if strings.Count(got, "- Likes tea") != 1 {
 		t.Fatalf("expected deduped fact, got:\n%s", got)
 	}
-	if !strings.Contains(got, "## Active Goals") {
-		t.Fatalf("expected Active Goals section, got:\n%s", got)
+	if !strings.Contains(got, "## projects") {
+		t.Fatalf("expected projects block, got:\n%s", got)
 	}
 	if !strings.Contains(got, "- Finish migration") {
 		t.Fatalf("expected merged goal, got:\n%s", got)

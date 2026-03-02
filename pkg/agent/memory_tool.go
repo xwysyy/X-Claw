@@ -207,7 +207,7 @@ func (t *MemoryGetTool) Parameters() map[string]any {
 		"properties": map[string]any{
 			"source": map[string]any{
 				"type":        "string",
-				"description": "Citation source like MEMORY.md#Long-term Facts",
+				"description": "Citation source like MEMORY.md#facts (also accepts legacy sections like MEMORY.md#Long-term Facts)",
 			},
 		},
 		"required": []string{"source"},
