@@ -22,10 +22,10 @@ import (
 // - Long-term memory: memory/MEMORY.md
 // - Daily notes: memory/YYYYMM/YYYYMMDD.md
 type MemoryStore struct {
-	workspace  string
 	memoryDir  string
 	memoryFile string
 	vector     *memoryVectorStore
+	fts        *memoryFTSStore
 }
 
 var memorySectionOrder = []string{
@@ -54,19 +54,26 @@ var memorySectionAliases = map[string]string{
 // NewMemoryStore creates a new MemoryStore with the given workspace path.
 // It ensures the memory directory exists.
 func NewMemoryStore(workspace string) *MemoryStore {
-	memoryDir := filepath.Join(workspace, "memory")
+	return NewMemoryStoreAt(filepath.Join(workspace, "memory"))
+}
+
+// NewMemoryStoreAt creates a new MemoryStore rooted at memoryDir.
+//
+// memoryDir is expected to contain MEMORY.md and daily notes (YYYYMM/YYYYMMDD.md).
+// This is used for scoped memory (per-user/per-group/per-session) within an agent workspace.
+func NewMemoryStoreAt(memoryDir string) *MemoryStore {
 	memoryFile := filepath.Join(memoryDir, "MEMORY.md")
 
 	// Ensure memory directory exists
-	os.MkdirAll(memoryDir, 0o755)
+	_ = os.MkdirAll(memoryDir, 0o755)
 
 	vectorSettings := defaultMemoryVectorSettings()
 
 	return &MemoryStore{
-		workspace:  workspace,
 		memoryDir:  memoryDir,
 		memoryFile: memoryFile,
 		vector:     newMemoryVectorStore(memoryDir, memoryFile, vectorSettings),
+		fts:        newMemoryFTSStore(memoryDir, memoryFile, vectorSettings),
 	}
 }
 
@@ -210,31 +217,142 @@ func (ms *MemoryStore) OrganizeWriteback(extracted string) error {
 
 func (ms *MemoryStore) SetVectorSettings(settings MemoryVectorSettings) {
 	if ms.vector == nil {
-		return
+		// still allow FTS-only settings updates
+	} else {
+		ms.vector.SetSettings(settings)
 	}
-	ms.vector.SetSettings(settings)
+	if ms.fts != nil {
+		ms.fts.SetSettings(settings)
+	}
 }
 
 // SearchRelevant runs semantic retrieval over MEMORY.md + recent daily notes.
 func (ms *MemoryStore) SearchRelevant(ctx context.Context, query string, topK int, minScore float64) ([]MemoryVectorHit, error) {
-	if ms.vector == nil {
+	query = strings.TrimSpace(query)
+	if query == "" {
 		return nil, nil
 	}
-	return ms.vector.Search(ctx, query, topK, minScore)
+
+	var ftsHits []MemoryVectorHit
+	var ftsErr error
+	if ms.fts != nil {
+		ftsHits, ftsErr = ms.fts.Search(ctx, query, topK)
+	}
+
+	var vecHits []MemoryVectorHit
+	var vecErr error
+	if ms.vector != nil {
+		vecHits, vecErr = ms.vector.Search(ctx, query, topK, minScore)
+	}
+
+	hits := mergeMemoryHits(ftsHits, vecHits, topK)
+	if len(hits) == 0 && ftsErr != nil && vecErr != nil {
+		return nil, fmt.Errorf("memory search unavailable: fts=%v; vector=%v", ftsErr, vecErr)
+	}
+
+	// Best-effort: return whatever we have. Vector embedding failures should not
+	// take down deterministic keyword lookup (FTS), and vice versa.
+	return hits, nil
 }
 
 func (ms *MemoryStore) GetBySource(ctx context.Context, source string) (MemoryVectorHit, bool, error) {
-	if ms.vector == nil {
+	_ = ctx
+
+	src := strings.TrimSpace(source)
+	if src == "" {
 		return MemoryVectorHit{}, false, nil
 	}
-	return ms.vector.GetBySource(ctx, source)
+
+	filePart, anchor, _ := strings.Cut(src, "#")
+	filePart = strings.TrimSpace(filePart)
+	anchor = strings.TrimSpace(anchor)
+	if filePart == "" {
+		return MemoryVectorHit{}, false, nil
+	}
+
+	rel := filepath.Clean(filepath.FromSlash(filePart))
+	if rel == "." || strings.HasPrefix(rel, "..") || filepath.IsAbs(rel) {
+		return MemoryVectorHit{}, false, fmt.Errorf("invalid memory source path %q", filePart)
+	}
+
+	path := filepath.Join(ms.memoryDir, rel)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return MemoryVectorHit{}, false, nil
+		}
+		return MemoryVectorHit{}, false, err
+	}
+	content := string(data)
+	if strings.TrimSpace(content) == "" {
+		return MemoryVectorHit{}, false, nil
+	}
+
+	if strings.EqualFold(rel, "MEMORY.md") {
+		if anchor == "" {
+			return MemoryVectorHit{Source: filePart, Text: content, Score: 1}, true, nil
+		}
+		section, ok := normalizeMemorySectionName(anchor)
+		if !ok {
+			return MemoryVectorHit{}, false, nil
+		}
+		sections := parseMemorySections(content)
+		entries := sections[section]
+		if len(entries) == 0 {
+			return MemoryVectorHit{}, false, nil
+		}
+
+		var sb strings.Builder
+		sb.WriteString("## ")
+		sb.WriteString(section)
+		sb.WriteString("\n")
+		for _, entry := range entries {
+			entry = strings.TrimSpace(entry)
+			if entry == "" {
+				continue
+			}
+			sb.WriteString("- ")
+			sb.WriteString(entry)
+			sb.WriteString("\n")
+		}
+		out := strings.TrimSpace(sb.String())
+		if out == "" {
+			return MemoryVectorHit{}, false, nil
+		}
+		return MemoryVectorHit{Source: fmt.Sprintf("MEMORY.md#%s", section), Text: out, Score: 1}, true, nil
+	}
+
+	// Non-MEMORY.md sources use chunk indexes for stable retrieval.
+	if anchor == "" {
+		return MemoryVectorHit{Source: filePart, Text: content, Score: 1}, true, nil
+	}
+
+	chunkIdx, convErr := parsePositiveInt(anchor)
+	if convErr != nil || chunkIdx <= 0 {
+		return MemoryVectorHit{}, false, nil
+	}
+
+	chunks := chunkMarkdownForVectors(content, memoryVectorChunkChars)
+	if chunkIdx-1 >= len(chunks) {
+		return MemoryVectorHit{}, false, nil
+	}
+	chunk := strings.TrimSpace(chunks[chunkIdx-1])
+	if chunk == "" {
+		return MemoryVectorHit{}, false, nil
+	}
+
+	return MemoryVectorHit{Source: fmt.Sprintf("%s#%d", filePart, chunkIdx), Text: chunk, Score: 1}, true, nil
 }
 
 func (ms *MemoryStore) refreshVectorIndex() {
 	if ms.vector == nil {
-		return
+		// still allow FTS-only
+	} else {
+		ms.vector.MarkDirty()
 	}
-	ms.vector.MarkDirty()
+	if ms.fts != nil {
+		ms.fts.MarkDirty()
+	}
 }
 
 func parseMemorySections(content string) map[string][]string {

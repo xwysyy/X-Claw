@@ -97,7 +97,13 @@ func (al *AgentLoop) flushMemorySnapshot(ctx context.Context, agent *AgentInstan
 		return fmt.Errorf("empty memory flush response")
 	}
 
-	memory := NewMemoryStore(agent.Workspace)
+	memory := (*MemoryStore)(nil)
+	if agent.ContextBuilder != nil {
+		memory = agent.ContextBuilder.MemoryForSession(sessionKey, "", "")
+	}
+	if memory == nil {
+		memory = NewMemoryStore(agent.Workspace)
+	}
 	return memory.OrganizeWriteback(resp.Content)
 }
 

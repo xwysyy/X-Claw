@@ -11,6 +11,7 @@ const (
 	executionContextChannelKey  executionContextKey = "tool_execution_channel"
 	executionContextChatIDKey   executionContextKey = "tool_execution_chat_id"
 	executionContextSenderIDKey executionContextKey = "tool_execution_sender_id"
+	executionContextSessionKey  executionContextKey = "tool_execution_session_key"
 )
 
 func withExecutionContext(ctx context.Context, channel, chatID, senderID string) context.Context {
@@ -25,6 +26,16 @@ func withExecutionContext(ctx context.Context, channel, chatID, senderID string)
 	}
 	if strings.TrimSpace(senderID) != "" {
 		ctx = context.WithValue(ctx, executionContextSenderIDKey, strings.TrimSpace(senderID))
+	}
+	return ctx
+}
+
+func withExecutionSessionKey(ctx context.Context, sessionKey string) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if strings.TrimSpace(sessionKey) != "" {
+		ctx = context.WithValue(ctx, executionContextSessionKey, strings.TrimSpace(sessionKey))
 	}
 	return ctx
 }
@@ -51,4 +62,18 @@ func toolExecutionSenderID(ctx context.Context) string {
 	}
 	v, _ := ctx.Value(executionContextSenderIDKey).(string)
 	return strings.TrimSpace(v)
+}
+
+func toolExecutionSessionKey(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	v, _ := ctx.Value(executionContextSessionKey).(string)
+	return strings.TrimSpace(v)
+}
+
+// ExecutionSessionKey returns the session key associated with the current tool
+// execution, if provided by the agent loop / tool executor.
+func ExecutionSessionKey(ctx context.Context) string {
+	return toolExecutionSessionKey(ctx)
 }

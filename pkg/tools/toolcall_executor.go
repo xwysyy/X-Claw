@@ -138,8 +138,9 @@ func ExecuteToolCalls(
 
 		var toolResult *ToolResult
 		if registry != nil {
+			execCtx := withExecutionSessionKey(ctx, opts.SessionKey)
 			toolResult = registry.ExecuteWithContext(
-				ctx,
+				execCtx,
 				tc.Name,
 				tc.Arguments,
 				opts.Channel,

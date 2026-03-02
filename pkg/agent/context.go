@@ -41,6 +41,8 @@ type ContextBuilder struct {
 	workspace      string
 	skillsLoader   *skills.SkillsLoader
 	memory         *MemoryStore
+	memoryScopesMu sync.Mutex
+	memoryScopes   map[string]*MemoryStore
 	tools          *tools.ToolRegistry // Direct reference to tool registry
 	settings       ContextRuntimeSettings
 	bootstrapMu    sync.RWMutex
@@ -104,9 +106,60 @@ func NewContextBuilder(workspace string) *ContextBuilder {
 		workspace:      workspace,
 		skillsLoader:   skills.NewSkillsLoader(workspace, globalSkillsDir, builtinSkillsDir),
 		memory:         memoryStore,
+		memoryScopes:   map[string]*MemoryStore{},
 		bootstrapCache: map[string]string{},
 		settings:       defaultSettings,
 	}
+}
+
+func (cb *ContextBuilder) memoryVectorSettingsLocked() MemoryVectorSettings {
+	// Best-effort: read cb.settings without additional locking because it is
+	// treated as immutable during one agent loop iteration.
+	s := cb.settings
+	return MemoryVectorSettings{
+		Enabled:         s.MemoryVectorEnabled,
+		Dimensions:      s.MemoryVectorDimensions,
+		TopK:            s.MemoryVectorTopK,
+		MinScore:        s.MemoryVectorMinScore,
+		MaxContextChars: s.MemoryVectorMaxChars,
+		RecentDailyDays: s.MemoryVectorRecentDays,
+		Embedding:       s.MemoryVectorEmbedding,
+	}
+}
+
+// MemoryForSession returns the effective MemoryStore for the current session.
+//
+// This enables Phase B3 (scoped memory) by routing:
+// - direct DM sessions -> user-scoped memory
+// - group/channel sessions -> session-scoped memory
+// - everything else -> agent-scoped memory (workspace/memory)
+func (cb *ContextBuilder) MemoryForSession(sessionKey, channel, chatID string) *MemoryStore {
+	if cb == nil {
+		return nil
+	}
+
+	scope := deriveMemoryScope(sessionKey, channel, chatID)
+	if scope.Kind == memoryScopeAgent {
+		return cb.memory
+	}
+
+	token := memoryScopeToken(scope.RawID)
+	memoryDir := filepath.Join(cb.workspace, "memory", "scopes", string(scope.Kind), token)
+
+	cb.memoryScopesMu.Lock()
+	defer cb.memoryScopesMu.Unlock()
+
+	if cb.memoryScopes == nil {
+		cb.memoryScopes = map[string]*MemoryStore{}
+	}
+	if store, ok := cb.memoryScopes[memoryDir]; ok && store != nil {
+		return store
+	}
+
+	store := NewMemoryStoreAt(memoryDir)
+	store.SetVectorSettings(cb.memoryVectorSettingsLocked())
+	cb.memoryScopes[memoryDir] = store
+	return store
 }
 
 // SetToolsRegistry sets the tools registry for dynamic tool summary generation.
@@ -144,7 +197,8 @@ func (cb *ContextBuilder) SetRuntimeSettings(settings ContextRuntimeSettings) {
 		settings.MemoryVectorRecentDays = defaultMemoryVectorRecentDailyDays
 	}
 	cb.settings = settings
-	cb.memory.SetVectorSettings(MemoryVectorSettings{
+
+	vecSettings := MemoryVectorSettings{
 		Enabled:         settings.MemoryVectorEnabled,
 		Dimensions:      settings.MemoryVectorDimensions,
 		TopK:            settings.MemoryVectorTopK,
@@ -152,7 +206,16 @@ func (cb *ContextBuilder) SetRuntimeSettings(settings ContextRuntimeSettings) {
 		MaxContextChars: settings.MemoryVectorMaxChars,
 		RecentDailyDays: settings.MemoryVectorRecentDays,
 		Embedding:       settings.MemoryVectorEmbedding,
-	})
+	}
+	cb.memory.SetVectorSettings(vecSettings)
+
+	cb.memoryScopesMu.Lock()
+	for _, scoped := range cb.memoryScopes {
+		if scoped != nil {
+			scoped.SetVectorSettings(vecSettings)
+		}
+	}
+	cb.memoryScopesMu.Unlock()
 }
 
 func (cb *ContextBuilder) getIdentity() string {
@@ -167,8 +230,9 @@ You are picoclaw, a helpful AI assistant.
 
 ## Workspace
 Your workspace is at: %s
-- Memory: %s/memory/MEMORY.md
-- Daily Notes: %s/memory/YYYYMM/YYYYMMDD.md
+- Agent Memory (shared): %s/memory/MEMORY.md
+- Scoped Memory (per user/session): %s/memory/scopes/{user|session}/*/MEMORY.md
+- Daily Notes: %s/memory/** and %s/memory/scopes/** (YYYYMM/YYYYMMDD.md)
 - Skills: %s/skills/{skill-name}/SKILL.md
 
 %s
@@ -189,7 +253,7 @@ When you receive a task, follow these steps:
 
 2. **Be helpful and accurate** — When using tools, briefly explain what you're doing.
 
-3. **Memory** — When interacting with me if something seems memorable, update %s/memory/MEMORY.md
+3. **Memory** — Memory is scoped by session (DM -> user scope, group -> session scope) to avoid cross-channel contamination. Prefer the memory_search / memory_get tools; avoid editing memory files directly unless explicitly asked.
 
 4. **Context summaries** — Conversation summaries provided as context are approximate references only. They may be incomplete or outdated. Always defer to explicit user instructions over summary content.
 
@@ -198,7 +262,7 @@ When you receive a task, follow these steps:
 6. **Error recovery** — If a tool fails, read the error message and try an alternative approach. Do NOT repeat the same failed tool call with identical arguments. If you've tried 3+ approaches without progress, explain what you've tried and ask for help.
 
 7. **Avoid loops** — NEVER call the same tool with the same arguments more than twice. If you find yourself repeating actions, stop and reassess your approach.`,
-		workspacePath, workspacePath, workspacePath, workspacePath, toolsSection, workspacePath)
+		workspacePath, workspacePath, workspacePath, workspacePath, workspacePath, workspacePath, toolsSection)
 }
 
 func (cb *ContextBuilder) buildToolsSection() string {
@@ -251,12 +315,6 @@ The following skills extend your capabilities. To use a skill, read its SKILL.md
 %s`, skillsSummary))
 	}
 
-	// Memory context
-	memoryContext := cb.memory.GetMemoryContext()
-	if memoryContext != "" {
-		parts = append(parts, "# Memory\n\n"+memoryContext)
-	}
-
 	// Join with "---" separator
 	return strings.Join(parts, "\n\n---\n\n")
 }
@@ -306,7 +364,6 @@ func (cb *ContextBuilder) sourcePaths() []string {
 		filepath.Join(cb.workspace, "SOUL.md"),
 		filepath.Join(cb.workspace, "USER.md"),
 		filepath.Join(cb.workspace, "IDENTITY.md"),
-		filepath.Join(cb.workspace, "memory", "MEMORY.md"),
 	}
 }
 
@@ -497,7 +554,8 @@ func (cb *ContextBuilder) BuildMessagesForSession(
 	channel, chatID string,
 ) []providers.Message {
 	messages := []providers.Message{}
-	_ = sessionKey
+
+	memoryStore := cb.MemoryForSession(sessionKey, channel, chatID)
 
 	staticPrompt := cb.BuildSystemPromptWithCache()
 	dynamicCtx := cb.buildDynamicContext(channel, chatID)
@@ -518,10 +576,22 @@ func (cb *ContextBuilder) BuildMessagesForSession(
 		contentBlocks = append(contentBlocks, providers.ContentBlock{Type: "text", Text: summaryText})
 	}
 
+	if memoryStore != nil {
+		if memoryContext := memoryStore.GetMemoryContext(); memoryContext != "" {
+			section := "# Memory\n\n" + memoryContext
+			stringParts = append(stringParts, section)
+			contentBlocks = append(contentBlocks, providers.ContentBlock{Type: "text", Text: section})
+		}
+	}
+
 	if cb.settings.MemoryVectorEnabled && strings.TrimSpace(currentMessage) != "" {
 		retrievalCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
-		hits, err := cb.memory.SearchRelevant(retrievalCtx, currentMessage, cb.settings.MemoryVectorTopK, cb.settings.MemoryVectorMinScore)
+		var hits []MemoryVectorHit
+		var err error
+		if memoryStore != nil {
+			hits, err = memoryStore.SearchRelevant(retrievalCtx, currentMessage, cb.settings.MemoryVectorTopK, cb.settings.MemoryVectorMinScore)
+		}
 		if err != nil {
 			logger.WarnCF("agent", "Semantic memory retrieval failed", map[string]any{
 				"error": err.Error(),

@@ -12,12 +12,16 @@ import (
 
 // MemorySearchTool performs semantic lookup over persisted memory files.
 type MemorySearchTool struct {
-	memory          *MemoryStore
+	memoryProvider  func(ctx context.Context) *MemoryStore
 	defaultTopK     int
 	defaultMinScore float64
 }
 
 func NewMemorySearchTool(memory *MemoryStore, defaultTopK int, defaultMinScore float64) *MemorySearchTool {
+	return NewMemorySearchToolWithProvider(func(context.Context) *MemoryStore { return memory }, defaultTopK, defaultMinScore)
+}
+
+func NewMemorySearchToolWithProvider(provider func(ctx context.Context) *MemoryStore, defaultTopK int, defaultMinScore float64) *MemorySearchTool {
 	if defaultTopK <= 0 {
 		defaultTopK = defaultMemoryVectorTopK
 	}
@@ -25,7 +29,7 @@ func NewMemorySearchTool(memory *MemoryStore, defaultTopK int, defaultMinScore f
 		defaultMinScore = defaultMemoryVectorMinScore
 	}
 	return &MemorySearchTool{
-		memory:          memory,
+		memoryProvider:  provider,
 		defaultTopK:     defaultTopK,
 		defaultMinScore: defaultMinScore,
 	}
@@ -33,6 +37,10 @@ func NewMemorySearchTool(memory *MemoryStore, defaultTopK int, defaultMinScore f
 
 func (t *MemorySearchTool) Name() string {
 	return "memory_search"
+}
+
+func (t *MemorySearchTool) ParallelPolicy() tools.ToolParallelPolicy {
+	return tools.ToolParallelReadOnly
 }
 
 func (t *MemorySearchTool) Description() string {
@@ -61,7 +69,11 @@ func (t *MemorySearchTool) Parameters() map[string]any {
 }
 
 func (t *MemorySearchTool) Execute(ctx context.Context, args map[string]any) *tools.ToolResult {
-	if t.memory == nil {
+	memory := (*MemoryStore)(nil)
+	if t.memoryProvider != nil {
+		memory = t.memoryProvider(ctx)
+	}
+	if memory == nil {
 		return tools.ErrorResult("memory store unavailable")
 	}
 
@@ -95,7 +107,7 @@ func (t *MemorySearchTool) Execute(ctx context.Context, args map[string]any) *to
 		}
 	}
 
-	hits, err := t.memory.SearchRelevant(ctx, query, topK, minScore)
+	hits, err := memory.SearchRelevant(ctx, query, topK, minScore)
 	if err != nil {
 		return tools.ErrorResult(fmt.Sprintf("memory search failed: %v", err)).WithError(err)
 	}
@@ -166,15 +178,23 @@ func (t *MemorySearchTool) Execute(ctx context.Context, args map[string]any) *to
 
 // MemoryGetTool returns a specific memory item by its source citation.
 type MemoryGetTool struct {
-	memory *MemoryStore
+	memoryProvider func(ctx context.Context) *MemoryStore
 }
 
 func NewMemoryGetTool(memory *MemoryStore) *MemoryGetTool {
-	return &MemoryGetTool{memory: memory}
+	return NewMemoryGetToolWithProvider(func(context.Context) *MemoryStore { return memory })
+}
+
+func NewMemoryGetToolWithProvider(provider func(ctx context.Context) *MemoryStore) *MemoryGetTool {
+	return &MemoryGetTool{memoryProvider: provider}
 }
 
 func (t *MemoryGetTool) Name() string {
 	return "memory_get"
+}
+
+func (t *MemoryGetTool) ParallelPolicy() tools.ToolParallelPolicy {
+	return tools.ToolParallelReadOnly
 }
 
 func (t *MemoryGetTool) Description() string {
@@ -195,7 +215,11 @@ func (t *MemoryGetTool) Parameters() map[string]any {
 }
 
 func (t *MemoryGetTool) Execute(ctx context.Context, args map[string]any) *tools.ToolResult {
-	if t.memory == nil {
+	memory := (*MemoryStore)(nil)
+	if t.memoryProvider != nil {
+		memory = t.memoryProvider(ctx)
+	}
+	if memory == nil {
 		return tools.ErrorResult("memory store unavailable")
 	}
 
@@ -204,7 +228,7 @@ func (t *MemoryGetTool) Execute(ctx context.Context, args map[string]any) *tools
 		return tools.ErrorResult("source is required")
 	}
 
-	hit, found, err := t.memory.GetBySource(ctx, source)
+	hit, found, err := memory.GetBySource(ctx, source)
 	if err != nil {
 		return tools.ErrorResult(fmt.Sprintf("memory get failed: %v", err)).WithError(err)
 	}

@@ -760,6 +760,15 @@ func (al *AgentLoop) runAgentLoop(ctx context.Context, agent *AgentInstance, opt
 
 	// 4. Save user message to session
 	agent.Sessions.AddMessage(opts.SessionKey, "user", opts.UserMessage)
+	// WAL: persist user message before entering the LLM/tool loop to avoid losing
+	// inbound user input on crash/restart.
+	if err := agent.Sessions.Save(opts.SessionKey); err != nil {
+		// WAL failures should not block the conversation; warn and continue.
+		logger.WarnCF("agent", "Failed to WAL user message (best-effort)", map[string]any{
+			"session_key": opts.SessionKey,
+			"error":       err.Error(),
+		})
+	}
 
 	// 5. Run LLM iteration loop
 	finalContent, iteration, err := al.runLLMIteration(ctx, agent, messages, opts)

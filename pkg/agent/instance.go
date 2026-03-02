@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"log"
 	"os"
 	"path/filepath"
@@ -185,12 +186,14 @@ func NewAgentInstance(
 		MemoryVectorEmbedding:    memVec.Embedding,
 	})
 
-	if memVec.Enabled {
-		toolsRegistry.Register(NewMemorySearchTool(
-			contextBuilder.memory, memVec.TopK, memVec.MinScore,
-		))
-		toolsRegistry.Register(NewMemoryGetTool(contextBuilder.memory))
+	memoryProvider := func(ctx context.Context) *MemoryStore {
+		if contextBuilder == nil {
+			return nil
+		}
+		return contextBuilder.MemoryForSession(tools.ExecutionSessionKey(ctx), "", "")
 	}
+	toolsRegistry.Register(NewMemorySearchToolWithProvider(memoryProvider, memVec.TopK, memVec.MinScore))
+	toolsRegistry.Register(NewMemoryGetToolWithProvider(memoryProvider))
 
 	candidates := resolveFallbackCandidates(model, fallbacks, defaults.Provider, cfg)
 
