@@ -26,6 +26,7 @@ type MemoryStore struct {
 	memoryFile string
 	vector     *memoryVectorStore
 	fts        *memoryFTSStore
+	settings   MemoryVectorSettings
 }
 
 var memorySectionOrder = []string{
@@ -68,12 +69,14 @@ func NewMemoryStoreAt(memoryDir string) *MemoryStore {
 	_ = os.MkdirAll(memoryDir, 0o755)
 
 	vectorSettings := defaultMemoryVectorSettings()
+	vectorSettings = normalizeMemoryVectorSettings(vectorSettings)
 
 	return &MemoryStore{
 		memoryDir:  memoryDir,
 		memoryFile: memoryFile,
 		vector:     newMemoryVectorStore(memoryDir, memoryFile, vectorSettings),
 		fts:        newMemoryFTSStore(memoryDir, memoryFile, vectorSettings),
+		settings:   vectorSettings,
 	}
 }
 
@@ -233,6 +236,8 @@ func (ms *MemoryStore) OrganizeWriteback(extracted string) error {
 }
 
 func (ms *MemoryStore) SetVectorSettings(settings MemoryVectorSettings) {
+	settings = normalizeMemoryVectorSettings(settings)
+	ms.settings = settings
 	if ms.vector == nil {
 		// still allow FTS-only settings updates
 	} else {
@@ -262,7 +267,7 @@ func (ms *MemoryStore) SearchRelevant(ctx context.Context, query string, topK in
 		vecHits, vecErr = ms.vector.Search(ctx, query, topK, minScore)
 	}
 
-	hits := mergeMemoryHits(ftsHits, vecHits, topK)
+	hits := mergeHybridMemoryHits(ftsHits, vecHits, topK, ms.settings.Hybrid)
 	if len(hits) == 0 && ftsErr != nil && vecErr != nil {
 		return nil, fmt.Errorf("memory search unavailable: fts=%v; vector=%v", ftsErr, vecErr)
 	}

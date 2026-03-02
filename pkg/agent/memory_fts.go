@@ -117,9 +117,12 @@ func (fs *memoryFTSStore) Search(ctx context.Context, query string, topK int) ([
 		}
 
 		out = append(out, MemoryVectorHit{
-			Source: strings.TrimSpace(source),
-			Text:   strings.TrimSpace(text),
-			Score:  score,
+			Source:    strings.TrimSpace(source),
+			Text:      strings.TrimSpace(text),
+			Score:     score,
+			MatchKind: "fts",
+			HasFTS:    true,
+			FTSScore:  score,
 		})
 	}
 	if err := rows.Err(); err != nil {

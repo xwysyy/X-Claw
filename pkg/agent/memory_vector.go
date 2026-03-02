@@ -35,12 +35,29 @@ type MemoryVectorSettings struct {
 	MaxContextChars int
 	RecentDailyDays int
 	Embedding       MemoryVectorEmbeddingSettings
+	Hybrid          MemoryHybridSettings
 }
 
 type MemoryVectorHit struct {
 	Source string
 	Text   string
 	Score  float64
+
+	// MatchKind indicates which retriever produced this hit:
+	// - "fts": SQLite FTS keyword match
+	// - "vector": semantic vector search
+	// - "hybrid": both signals available
+	MatchKind string
+
+	HasFTS      bool
+	FTSScore    float64
+	HasVector   bool
+	VectorScore float64
+}
+
+type MemoryHybridSettings struct {
+	FTSWeight    float64
+	VectorWeight float64
 }
 
 type memoryVectorDocument struct {
@@ -85,6 +102,10 @@ func defaultMemoryVectorSettings() MemoryVectorSettings {
 		MinScore:        defaultMemoryVectorMinScore,
 		MaxContextChars: defaultMemoryVectorMaxContextChars,
 		RecentDailyDays: defaultMemoryVectorRecentDailyDays,
+		Hybrid: MemoryHybridSettings{
+			FTSWeight:    0.6,
+			VectorWeight: 0.4,
+		},
 	}
 }
 
@@ -105,6 +126,26 @@ func normalizeMemoryVectorSettings(settings MemoryVectorSettings) MemoryVectorSe
 		settings.RecentDailyDays = defaultMemoryVectorRecentDailyDays
 	}
 	settings.Embedding = normalizeMemoryVectorEmbeddingSettings(settings.Embedding)
+	settings.Hybrid = normalizeMemoryHybridSettings(settings.Hybrid)
+	return settings
+}
+
+func normalizeMemoryHybridSettings(settings MemoryHybridSettings) MemoryHybridSettings {
+	if settings.FTSWeight < 0 || settings.FTSWeight > 1 {
+		settings.FTSWeight = 0
+	}
+	if settings.VectorWeight < 0 || settings.VectorWeight > 1 {
+		settings.VectorWeight = 0
+	}
+	if settings.FTSWeight == 0 && settings.VectorWeight == 0 {
+		settings.FTSWeight = 0.6
+		settings.VectorWeight = 0.4
+	}
+	sum := settings.FTSWeight + settings.VectorWeight
+	if sum > 0 {
+		settings.FTSWeight /= sum
+		settings.VectorWeight /= sum
+	}
 	return settings
 }
 
@@ -215,9 +256,12 @@ func (vs *memoryVectorStore) Search(ctx context.Context, query string, topK int,
 			continue
 		}
 		hits = append(hits, MemoryVectorHit{
-			Source: doc.Source,
-			Text:   doc.Text,
-			Score:  score,
+			Source:      doc.Source,
+			Text:        doc.Text,
+			Score:       score,
+			MatchKind:   "vector",
+			HasVector:   true,
+			VectorScore: score,
 		})
 	}
 

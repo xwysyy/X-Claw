@@ -113,12 +113,14 @@ func (t *MemorySearchTool) Execute(ctx context.Context, args map[string]any) *to
 	}
 
 	type memoryHit struct {
-		ID         string   `json:"id"`
-		Score      float64  `json:"score"`
-		Snippet    string   `json:"snippet"`
-		Source     string   `json:"source"`
-		SourcePath string   `json:"source_path"`
-		Tags       []string `json:"tags"`
+		ID         string             `json:"id"`
+		Score      float64            `json:"score"`
+		MatchKind  string             `json:"match_kind,omitempty"`
+		Signals    map[string]float64 `json:"signals,omitempty"`
+		Snippet    string             `json:"snippet"`
+		Source     string             `json:"source"`
+		SourcePath string             `json:"source_path"`
+		Tags       []string           `json:"tags"`
 	}
 	type memorySearchResult struct {
 		Kind     string      `json:"kind"`
@@ -144,6 +146,8 @@ func (t *MemorySearchTool) Execute(ctx context.Context, args map[string]any) *to
 		result.Hits = append(result.Hits, memoryHit{
 			ID:         hit.Source,
 			Score:      hit.Score,
+			MatchKind:  strings.TrimSpace(hit.MatchKind),
+			Signals:    buildMemoryHitSignals(hit),
 			Snippet:    utils.Truncate(hit.Text, 240),
 			Source:     hit.Source,
 			SourcePath: sourcePath,
@@ -174,6 +178,20 @@ func (t *MemorySearchTool) Execute(ctx context.Context, args map[string]any) *to
 		IsError: false,
 		Async:   false,
 	}
+}
+
+func buildMemoryHitSignals(hit MemoryVectorHit) map[string]float64 {
+	signals := map[string]float64{}
+	if hit.HasFTS {
+		signals["fts_score"] = hit.FTSScore
+	}
+	if hit.HasVector {
+		signals["vector_score"] = hit.VectorScore
+	}
+	if len(signals) == 0 {
+		return nil
+	}
+	return signals
 }
 
 // MemoryGetTool returns a specific memory item by its source citation.

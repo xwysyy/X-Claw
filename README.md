@@ -167,9 +167,58 @@ curl -sS -X POST http://127.0.0.1:18790/api/notify \
 }
 ```
 
+### Run Trace（run 级 checkpoint 事件流）
+
+Tool Trace 解决的是“每次工具调用发生了什么”；Run Trace 解决的是“这一次用户请求（run）整体发生了什么”（LLM 回合、工具批次、最终输出）。
+
+当 `tools.trace.enabled=true` 时，PicoClaw 会额外为每个 session 维护一个 run 级 JSONL 事件流（append-only），用于：
+- 故障定位（某一轮为什么走偏 / 哪个 batch 出错）
+- 长任务可恢复（Phase E2 的地基）
+- 与 `picoclaw export` 一起形成“可回放执行”的最小证据链
+
+默认落盘位置：
+
+- ` <workspace>/.picoclaw/audit/runs/<session>/events.jsonl `
+
+### MCP Bridge（tools.mcp：挂载外部工具生态）
+
+PicoClaw 支持把 MCP（Model Context Protocol）服务器上的工具动态注册为原生工具（Phase D1）。
+
+核心特性：
+- 启动时（best-effort）发现 MCP server 工具并注册到 `ToolRegistry`
+- MCP tool call 统一走现有 tool executor：自动纳入 Tool Trace / Run Trace / 超时与错误模板
+- 工具命名隔离：默认前缀 `mcp_<server>_`，也可自定义 `tool_prefix`
+
+配置示例（stdio）：
+
+```json
+{
+  "tools": {
+    "mcp": {
+      "enabled": true,
+      "servers": [
+        {
+          "name": "local",
+          "transport": "stdio",
+          "command": "python",
+          "args": ["-m", "your_mcp_server"],
+          "include_tools": ["echo", "add"],
+          "tool_prefix": "mcp_local_",
+          "timeout_seconds": 30
+        }
+      ]
+    }
+  }
+}
+```
+
+命名说明：
+- 注册到 LLM 的工具名会做安全清洗（仅允许字母/数字/`_`/`-`），避免 provider 拒绝调用
+- 默认命名形如：`mcp_<server>_<tool>`（例如 `mcp_local_echo`）
+
 ### Run/Session 导出（picoclaw export）
 
-当你需要提交 bug / 复盘某次对话 / 把 “可回放执行” 资料打包给别人时，可以导出一个 zip bundle（默认会包含：session 快照 + tool traces + cron/state/config 脱敏快照 + manifest）。
+当你需要提交 bug / 复盘某次对话 / 把 “可回放执行” 资料打包给别人时，可以导出一个 zip bundle（默认会包含：session 快照 + tool traces + run traces + cron/state/config 脱敏快照 + manifest）。
 
 常用用法：
 
@@ -215,6 +264,8 @@ curl -sS -X POST http://127.0.0.1:18790/api/notify \
 
 这能显著降低 “模型看不懂纯文本结果 / 引用不稳定” 的概率。
 
+另外，`memory_search_result.hits[]` 会提供 `match_kind` 与 `signals` 字段（例如 `fts_score` / `vector_score`），便于你在排查召回漂移时快速判断“这条命中是靠关键词还是靠向量”。
+
 ### 语义记忆 Embeddings（可选远程）
 
 PicoClaw 的语义记忆（`agents.defaults.memory_vector`）默认使用本地 `hashed` embedder：快、确定性强、无需额外 API / 网络。
@@ -229,6 +280,10 @@ PicoClaw 的语义记忆（`agents.defaults.memory_vector`）默认使用本地 
     "defaults": {
       "memory_vector": {
         "dimensions": 4096,
+        "hybrid": {
+          "fts_weight": 0.6,
+          "vector_weight": 0.4
+        },
         "embedding": {
           "kind": "openai_compat",
           "api_base": "https://api.siliconflow.cn/v1",

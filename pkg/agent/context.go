@@ -35,6 +35,7 @@ type ContextRuntimeSettings struct {
 	MemoryVectorMaxChars     int
 	MemoryVectorRecentDays   int
 	MemoryVectorEmbedding    MemoryVectorEmbeddingSettings
+	MemoryHybrid             MemoryHybridSettings
 }
 
 type ContextBuilder struct {
@@ -89,6 +90,10 @@ func NewContextBuilder(workspace string) *ContextBuilder {
 		MemoryVectorMinScore:     defaultMemoryVectorMinScore,
 		MemoryVectorMaxChars:     defaultMemoryVectorMaxContextChars,
 		MemoryVectorRecentDays:   defaultMemoryVectorRecentDailyDays,
+		MemoryHybrid: MemoryHybridSettings{
+			FTSWeight:    0.6,
+			VectorWeight: 0.4,
+		},
 	}
 
 	memoryStore := NewMemoryStore(workspace)
@@ -100,6 +105,7 @@ func NewContextBuilder(workspace string) *ContextBuilder {
 		MaxContextChars: defaultSettings.MemoryVectorMaxChars,
 		RecentDailyDays: defaultSettings.MemoryVectorRecentDays,
 		Embedding:       defaultSettings.MemoryVectorEmbedding,
+		Hybrid:          defaultSettings.MemoryHybrid,
 	})
 
 	return &ContextBuilder{
@@ -124,6 +130,7 @@ func (cb *ContextBuilder) memoryVectorSettingsLocked() MemoryVectorSettings {
 		MaxContextChars: s.MemoryVectorMaxChars,
 		RecentDailyDays: s.MemoryVectorRecentDays,
 		Embedding:       s.MemoryVectorEmbedding,
+		Hybrid:          s.MemoryHybrid,
 	}
 }
 
@@ -234,6 +241,7 @@ func (cb *ContextBuilder) SetRuntimeSettings(settings ContextRuntimeSettings) {
 	if settings.MemoryVectorRecentDays <= 0 {
 		settings.MemoryVectorRecentDays = defaultMemoryVectorRecentDailyDays
 	}
+	settings.MemoryHybrid = normalizeMemoryHybridSettings(settings.MemoryHybrid)
 	cb.settings = settings
 
 	vecSettings := MemoryVectorSettings{
@@ -244,6 +252,7 @@ func (cb *ContextBuilder) SetRuntimeSettings(settings ContextRuntimeSettings) {
 		MaxContextChars: settings.MemoryVectorMaxChars,
 		RecentDailyDays: settings.MemoryVectorRecentDays,
 		Embedding:       settings.MemoryVectorEmbedding,
+		Hybrid:          settings.MemoryHybrid,
 	}
 	cb.memory.SetVectorSettings(vecSettings)
 

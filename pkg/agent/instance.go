@@ -117,6 +117,10 @@ func resolveMemoryVector(c config.AgentMemoryVectorConfig) MemoryVectorSettings 
 			BatchSize:             c.Embedding.BatchSize,
 			RequestTimeoutSeconds: c.Embedding.RequestTimeoutSeconds,
 		},
+		Hybrid: MemoryHybridSettings{
+			FTSWeight:    c.Hybrid.FTSWeight,
+			VectorWeight: c.Hybrid.VectorWeight,
+		},
 	}
 }
 
@@ -208,6 +212,7 @@ func NewAgentInstance(
 		MemoryVectorMaxChars:     memVec.MaxContextChars,
 		MemoryVectorRecentDays:   memVec.RecentDailyDays,
 		MemoryVectorEmbedding:    memVec.Embedding,
+		MemoryHybrid:             memVec.Hybrid,
 	})
 
 	memoryProvider := func(ctx context.Context) MemoryReader {

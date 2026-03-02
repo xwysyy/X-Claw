@@ -81,16 +81,16 @@
 ### Phase C — 本地确定性检索（SQLite FTS）
 
 - C1：workspace 级 SQLite FTS5 索引（无需向量也能明显提升可用性）✅（done: 2026-03-02；落点：`pkg/agent/memory_fts.go` + `pkg/agent/memory.go`）
-- C2：可选混合召回（FTS + 简单 rerank）
+- C2：可选混合召回（FTS + 简单 rerank + JSON signals）✅（done: 2026-03-02；落点：`pkg/agent/memory.go` + `pkg/agent/memory_helpers.go` + `pkg/agent/memory_tool.go` + `pkg/config/config.go`）
 
 ### Phase D — MCP Bridge（生态接入）
 
-- D1：`mcp_servers` 配置 + 动态工具发现/注册（命名空间隔离）
+- D1：`tools.mcp.servers[]` 配置 + 动态工具发现/注册（命名空间隔离）✅（done: 2026-03-02；落点：`pkg/mcp/*` + `pkg/agent/loop.go` + `pkg/config/config.go`）
 - D2：MCP 工具调用统一走策略层（allow/deny、超时、脱敏、审计）
 
 ### Phase E — Durable execution（checkpoint/resume）
 
-- E1：线性 checkpoint（每个 tool step 写一条 JSONL/SQLite 事件）
+- E1：线性 checkpoint（run 级 JSONL 事件；与 tool trace 互补）✅（done: 2026-03-02；落点：`pkg/agent/run_trace.go` + `cmd/picoclaw/internal/export/helpers.go`）
 - E2：`resume_last_task` + “副作用确认”机制（写操作两段提交 / 幂等键）
 
 ### Phase F — 多 Agent 协作（极简 handoff）

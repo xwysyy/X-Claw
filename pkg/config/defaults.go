@@ -60,6 +60,10 @@ func DefaultConfig() *Config {
 					MinScore:        0.15,
 					MaxContextChars: 1800,
 					RecentDailyDays: 14,
+					Hybrid: AgentMemoryHybridConfig{
+						FTSWeight:    0.6,
+						VectorWeight: 0.4,
+					},
 				},
 			},
 		},
@@ -358,6 +362,10 @@ func DefaultConfig() *Config {
 					DefaultModel: "grok-4",
 					MaxResults:   5,
 				},
+			},
+			MCP: MCPToolsConfig{
+				Enabled: false,
+				Servers: []MCPServerConfig{},
 			},
 			Trace: ToolTraceConfig{
 				Enabled:               false,

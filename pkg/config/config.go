@@ -240,6 +240,14 @@ type AgentMemoryVectorConfig struct {
 	// Embedding controls how semantic vectors are generated.
 	// When omitted, PicoClaw uses a fast local hashing embedder (no network).
 	Embedding EmbeddingConfig `json:"embedding,omitempty"`
+
+	// Hybrid controls how FTS vs vector signals are blended when both are available.
+	Hybrid AgentMemoryHybridConfig `json:"hybrid,omitempty"`
+}
+
+type AgentMemoryHybridConfig struct {
+	FTSWeight    float64 `json:"fts_weight,omitempty"`
+	VectorWeight float64 `json:"vector_weight,omitempty"`
 }
 
 // GetModelName returns the effective model name for the agent defaults.
@@ -668,10 +676,40 @@ type MediaCleanupConfig struct {
 	Interval int  `json:"interval_minutes" env:"PICOCLAW_MEDIA_CLEANUP_INTERVAL"`
 }
 
+// MCPToolsConfig configures MCP (Model Context Protocol) bridge servers.
+//
+// Phase D1 in ROADMAP.md: dynamically discover and register external tool ecosystems.
+type MCPToolsConfig struct {
+	Enabled bool              `json:"enabled"`
+	Servers []MCPServerConfig `json:"servers,omitempty"`
+}
+
+type MCPServerConfig struct {
+	Name      string `json:"name"`
+	Transport string `json:"transport"` // stdio | sse | streamable
+
+	// STDIO transport.
+	Command string            `json:"command,omitempty"`
+	Args    []string          `json:"args,omitempty"`
+	Env     map[string]string `json:"env,omitempty"`
+
+	// HTTP transports (SSE / streamable).
+	URL     string            `json:"url,omitempty"`
+	Headers map[string]string `json:"headers,omitempty"`
+
+	// Tool selection and naming.
+	IncludeTools []string `json:"include_tools,omitempty"`
+	ToolPrefix   string   `json:"tool_prefix,omitempty"`
+
+	// TimeoutSeconds applies to initialize/list_tools/call_tool unless caller already set a deadline.
+	TimeoutSeconds int `json:"timeout_seconds,omitempty"`
+}
+
 type ToolsConfig struct {
 	AllowReadPaths  []string                `json:"allow_read_paths"  env:"PICOCLAW_TOOLS_ALLOW_READ_PATHS"`
 	AllowWritePaths []string                `json:"allow_write_paths" env:"PICOCLAW_TOOLS_ALLOW_WRITE_PATHS"`
 	Web             WebToolsConfig          `json:"web"`
+	MCP             MCPToolsConfig          `json:"mcp,omitempty"`
 	Trace           ToolTraceConfig         `json:"trace,omitempty"`
 	ErrorTemplate   ToolErrorTemplateConfig `json:"error_template,omitempty"`
 	Cron            CronToolsConfig         `json:"cron"`

@@ -139,6 +139,7 @@ func TestAgentLoop_RunLLMIteration_ParallelToolCallsPreserveOrder(t *testing.T) 
 			SenderID:     "tester",
 			SendResponse: false,
 		},
+		nil,
 	)
 	if err != nil {
 		t.Fatalf("runLLMIteration() error = %v", err)

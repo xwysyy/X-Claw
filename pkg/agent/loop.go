@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -22,6 +23,7 @@ import (
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/constants"
 	"github.com/sipeed/picoclaw/pkg/logger"
+	"github.com/sipeed/picoclaw/pkg/mcp"
 	"github.com/sipeed/picoclaw/pkg/media"
 	"github.com/sipeed/picoclaw/pkg/providers"
 	"github.com/sipeed/picoclaw/pkg/routing"
@@ -130,6 +132,8 @@ func registerSharedTools(
 	sessionsExecutor tools.SessionsSendExecutor,
 	taskLedger *tools.TaskLedger,
 ) {
+	mcpMgr := mcp.NewManager(cfg.Tools.MCP)
+
 	for _, agentID := range registry.ListAgentIDs() {
 		agent, ok := registry.GetAgent(agentID)
 		if !ok {
@@ -236,6 +240,16 @@ func registerSharedTools(
 			logger.WarnCF("agent", "sessions_send tool disabled: executor unavailable", map[string]any{
 				"agent_id": currentAgentID,
 			})
+		}
+
+		// MCP Bridge (Phase D1): dynamically register external tool ecosystems.
+		if mcpMgr.Enabled() {
+			if err := mcpMgr.RegisterTools(context.Background(), agent.Tools); err != nil {
+				logger.WarnCF("agent", "MCP tools registration failed (best-effort)", map[string]any{
+					"agent_id": agentID,
+					"error":    err.Error(),
+				})
+			}
 		}
 
 		// Update context builder with the complete tools registry
@@ -758,6 +772,13 @@ func (al *AgentLoop) runAgentLoop(ctx context.Context, agent *AgentInstance, opt
 	agent.ContextBuilder.SetWorkingState(ws)
 	defer agent.ContextBuilder.SetWorkingState(nil) // clean up after processing
 
+	// Phase E1: durable run checkpoint (append-only JSONL event stream).
+	runTraceEnabled := al.cfg != nil && al.cfg.Tools.Trace.Enabled
+	runTrace := newRunTraceWriter(agent.Workspace, runTraceEnabled, opts, agent.ID, agent.Model)
+	if runTrace != nil {
+		runTrace.recordStart(opts.UserMessage, len(messages), len(agent.Tools.List()))
+	}
+
 	// 4. Save user message to session
 	agent.Sessions.AddMessage(opts.SessionKey, "user", opts.UserMessage)
 	// WAL: persist user message before entering the LLM/tool loop to avoid losing
@@ -771,8 +792,11 @@ func (al *AgentLoop) runAgentLoop(ctx context.Context, agent *AgentInstance, opt
 	}
 
 	// 5. Run LLM iteration loop
-	finalContent, iteration, err := al.runLLMIteration(ctx, agent, messages, opts)
+	finalContent, iteration, err := al.runLLMIteration(ctx, agent, messages, opts, runTrace)
 	if err != nil {
+		if runTrace != nil {
+			runTrace.recordError(iteration, err)
+		}
 		return "", err
 	}
 
@@ -811,6 +835,10 @@ func (al *AgentLoop) runAgentLoop(ctx context.Context, agent *AgentInstance, opt
 			"iterations":   iteration,
 			"final_length": len(finalContent),
 		})
+
+	if runTrace != nil {
+		runTrace.recordEnd(iteration, finalContent)
+	}
 
 	return finalContent, nil
 }
@@ -900,6 +928,7 @@ func (al *AgentLoop) runLLMIteration(
 	agent *AgentInstance,
 	messages []providers.Message,
 	opts processOptions,
+	trace *runTraceWriter,
 ) (string, int, error) {
 	iteration := 0
 	var finalContent string
@@ -918,6 +947,9 @@ func (al *AgentLoop) runLLMIteration(
 
 		// Build tool definitions
 		providerToolDefs := agent.Tools.ToProviderDefs()
+		if trace != nil {
+			trace.recordLLMRequest(iteration, len(messages), len(providerToolDefs))
+		}
 
 		// Log LLM request details
 		logger.DebugCF("agent", "LLM request",
@@ -1056,6 +1088,15 @@ func (al *AgentLoop) runLLMIteration(
 					"error":     err.Error(),
 				})
 			return "", iteration, fmt.Errorf("LLM call failed after retries: %w", err)
+		}
+
+		if trace != nil {
+			toolNames := make([]string, 0, len(response.ToolCalls))
+			for _, tc := range response.ToolCalls {
+				toolNames = append(toolNames, tc.Name)
+			}
+			sort.Strings(toolNames)
+			trace.recordLLMResponse(iteration, response.Content, toolNames, response.Usage)
 		}
 
 		// Log token usage if available
@@ -1268,6 +1309,9 @@ func (al *AgentLoop) runLLMIteration(
 				}
 			},
 		})
+		if trace != nil {
+			trace.recordToolBatch(iteration, toolExecutions)
+		}
 		for _, executed := range toolExecutions {
 			toolResult := executed.Result
 			tc := executed.ToolCall

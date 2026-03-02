@@ -51,7 +51,7 @@ type exportManifest struct {
 	} `json:"workspace"`
 
 	LastActive struct {
-		Raw    string `json:"raw,omitempty"`
+		Raw     string `json:"raw,omitempty"`
 		Channel string `json:"channel,omitempty"`
 		ChatID  string `json:"chat_id,omitempty"`
 	} `json:"last_active"`
@@ -146,7 +146,7 @@ func RunExport(opts ExportOptions) (*ExportResult, error) {
 
 	zw := zip.NewWriter(f)
 	builder := &zipBundleBuilder{
-		zw:        zw,
+		zw:         zw,
 		bundleRoot: bundleRoot,
 	}
 
@@ -190,6 +190,12 @@ func RunExport(opts ExportOptions) (*ExportResult, error) {
 	if opts.IncludeTrace {
 		traceDir := filepath.Join(workspace, ".picoclaw", "audit", "tools", tools.SafePathToken(sessionKey))
 		if err := builder.addDir(&manifest, "tool_trace", traceDir); err != nil {
+			return nil, err
+		}
+
+		// Phase E1: run-level checkpoint trace (append-only events).
+		runDir := filepath.Join(workspace, ".picoclaw", "audit", "runs", tools.SafePathToken(sessionKey))
+		if err := builder.addDir(&manifest, "run_trace", runDir); err != nil {
 			return nil, err
 		}
 	}
