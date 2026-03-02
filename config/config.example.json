@@ -35,7 +35,8 @@
         "max_context_chars": 1800,
         "recent_daily_days": 14,
         "embedding": {
-          "kind": "",
+          "_comment": "kind: hashed (local, deterministic) or openai_compat (/v1/embeddings)",
+          "kind": "hashed",
           "api_key": "",
           "api_base": "",
           "model": "",

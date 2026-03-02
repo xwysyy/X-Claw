@@ -54,6 +54,8 @@ Edit config:
 vim ~/.picoclaw/config.json
 ```
 
+Note: PicoClaw runtime configuration is **file-only** (`config.json`, default: `~/.picoclaw/config.json`; Docker deployments typically mount `config/config.json` to that path). Environment-variable overrides for config fields are intentionally not supported to keep behavior reproducible.
+
 Minimal example:
 
 ```json

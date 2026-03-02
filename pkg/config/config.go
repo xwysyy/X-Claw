@@ -6,8 +6,6 @@ import (
 	"os"
 	"sync/atomic"
 
-	"github.com/caarlos0/env/v11"
-
 	"github.com/sipeed/picoclaw/pkg/fileutil"
 )
 
@@ -731,10 +729,6 @@ func LoadConfig(path string) (*Config, error) {
 	}
 
 	if err := json.Unmarshal(data, cfg); err != nil {
-		return nil, err
-	}
-
-	if err := env.Parse(cfg); err != nil {
 		return nil, err
 	}
 

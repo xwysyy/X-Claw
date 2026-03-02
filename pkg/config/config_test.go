@@ -566,6 +566,32 @@ func TestLoadConfig_WebToolsProxy(t *testing.T) {
 	}
 }
 
+func TestLoadConfig_IgnoresEnvOverrides(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.json")
+	configJSON := `{
+  "agents": {"defaults":{"workspace":"./workspace","model":"gpt4","max_tokens":1234,"max_tool_iterations":20}},
+  "model_list": [{"model_name":"gpt4","model":"openai/gpt-5.2","api_key":"x"}]
+}`
+	if err := os.WriteFile(configPath, []byte(configJSON), 0o600); err != nil {
+		t.Fatalf("os.WriteFile() error: %v", err)
+	}
+
+	t.Setenv("PICOCLAW_AGENTS_DEFAULTS_MAX_TOKENS", "9999")
+	t.Setenv("PICOCLAW_CHANNELS_TELEGRAM_ENABLED", "true")
+
+	cfg, err := LoadConfig(configPath)
+	if err != nil {
+		t.Fatalf("LoadConfig() error: %v", err)
+	}
+	if cfg.Agents.Defaults.MaxTokens != 1234 {
+		t.Fatalf("Agents.Defaults.MaxTokens = %d, want %d", cfg.Agents.Defaults.MaxTokens, 1234)
+	}
+	if cfg.Channels.Telegram.Enabled {
+		t.Fatal("Channels.Telegram.Enabled should remain false when only enabled via env")
+	}
+}
+
 // TestDefaultConfig_DMScope verifies the default dm_scope value
 func TestDefaultConfig_DMScope(t *testing.T) {
 	cfg := DefaultConfig()

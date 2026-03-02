@@ -9,8 +9,7 @@ import (
 // MemoryVectorEmbeddingSettings configures how semantic vectors are generated for memory search.
 //
 // Default behavior is a fast local hashing embedder (no network). When Kind is set to
-// "openai_compat" (or when APIBase/Model is provided), PicoClaw will call an OpenAI-compatible
-// embeddings endpoint.
+// "openai_compat", PicoClaw will call an OpenAI-compatible embeddings endpoint.
 type MemoryVectorEmbeddingSettings struct {
 	Kind string
 
@@ -37,17 +36,8 @@ func normalizeMemoryVectorEmbeddingSettings(s MemoryVectorEmbeddingSettings) Mem
 		s.RequestTimeoutSeconds = 30
 	}
 
-	// Auto-select OpenAI-compatible embeddings when user provides endpoint/model but not kind.
 	if s.Kind == "" {
-		if s.APIBase != "" || s.Model != "" || s.APIKey != "" {
-			s.Kind = "openai_compat"
-		} else {
-			s.Kind = "hashed"
-		}
-	}
-
-	if s.Kind == "openai" {
-		s.Kind = "openai_compat"
+		s.Kind = "hashed"
 	}
 
 	return s

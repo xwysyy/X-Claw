@@ -54,6 +54,8 @@ make build
 vim ~/.picoclaw/config.json
 ```
 
+说明：PicoClaw 的运行时配置**只读取** `config.json`（默认路径 `~/.picoclaw/config.json`；Docker 部署通常将 `config/config.json` 挂载到该位置），不支持通过环境变量覆盖配置字段，以避免“同一份代码在不同环境变量下行为漂移”。
+
 最小配置示例：
 
 ```json
