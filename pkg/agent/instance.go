@@ -2,9 +2,11 @@ package agent
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"github.com/sipeed/picoclaw/pkg/config"
@@ -147,8 +149,30 @@ func NewAgentInstance(
 	model := resolveAgentModel(agentCfg, defaults)
 	fallbacks := resolveAgentFallbacks(agentCfg, defaults)
 
-	toolsRegistry := registerCoreTools(workspace, defaults.RestrictToWorkspace, cfg)
-	sessionsManager := session.NewSessionManager(filepath.Join(workspace, "sessions"))
+	restrict := defaults.RestrictToWorkspace
+	readRestrict := restrict && !defaults.AllowReadOutsideWorkspace
+
+	// Compile path whitelist patterns from config.
+	allowReadPaths := compilePatterns(cfg.Tools.AllowReadPaths)
+	allowWritePaths := compilePatterns(cfg.Tools.AllowWritePaths)
+
+	toolsRegistry := tools.NewToolRegistry()
+	toolsRegistry.Register(tools.NewReadFileTool(workspace, readRestrict, allowReadPaths))
+	toolsRegistry.Register(tools.NewDocumentTextTool(workspace, readRestrict))
+	toolsRegistry.Register(tools.NewWriteFileTool(workspace, restrict, allowWritePaths))
+	toolsRegistry.Register(tools.NewListDirTool(workspace, readRestrict, allowReadPaths))
+	execTool, err := tools.NewExecToolWithConfig(workspace, restrict, cfg)
+	if err != nil {
+		log.Fatalf("Critical error: unable to initialize exec tool: %v", err)
+	}
+	toolsRegistry.Register(execTool)
+	toolsRegistry.Register(tools.NewProcessTool(execTool.ProcessManager()))
+
+	toolsRegistry.Register(tools.NewEditFileTool(workspace, restrict, allowWritePaths))
+	toolsRegistry.Register(tools.NewAppendFileTool(workspace, restrict, allowWritePaths))
+
+	sessionsDir := filepath.Join(workspace, "sessions")
+	sessionsManager := session.NewSessionManager(sessionsDir)
 	toolsRegistry.Register(tools.NewSessionsListTool(sessionsManager))
 	toolsRegistry.Register(tools.NewSessionsHistoryTool(sessionsManager))
 
@@ -218,25 +242,6 @@ func NewAgentInstance(
 		ContextPruning: pruning,
 		MemoryVector:   memVec,
 	}
-}
-
-// registerCoreTools creates a ToolRegistry with all built-in tools.
-func registerCoreTools(workspace string, restrict bool, cfg *config.Config) *tools.ToolRegistry {
-	reg := tools.NewToolRegistry()
-	reg.Register(tools.NewReadFileTool(workspace, restrict))
-	reg.Register(tools.NewDocumentTextTool(workspace, restrict))
-	reg.Register(tools.NewWriteFileTool(workspace, restrict))
-	reg.Register(tools.NewListDirTool(workspace, restrict))
-
-	execTool, err := tools.NewExecToolWithConfig(workspace, restrict, cfg)
-	if err != nil {
-		log.Fatalf("Critical error: unable to initialize exec tool: %v", err)
-	}
-	reg.Register(execTool)
-	reg.Register(tools.NewProcessTool(execTool.ProcessManager()))
-	reg.Register(tools.NewEditFileTool(workspace, restrict))
-	reg.Register(tools.NewAppendFileTool(workspace, restrict))
-	return reg
 }
 
 // resolveAgentIdentity extracts identity fields from agent config.
@@ -314,6 +319,19 @@ func resolveAgentFallbacks(agentCfg *config.AgentConfig, defaults *config.AgentD
 		return agentCfg.Model.Fallbacks
 	}
 	return defaults.ModelFallbacks
+}
+
+func compilePatterns(patterns []string) []*regexp.Regexp {
+	compiled := make([]*regexp.Regexp, 0, len(patterns))
+	for _, p := range patterns {
+		re, err := regexp.Compile(p)
+		if err != nil {
+			fmt.Printf("Warning: invalid path pattern %q: %v\n", p, err)
+			continue
+		}
+		compiled = append(compiled, re)
+	}
+	return compiled
 }
 
 func expandHome(path string) string {

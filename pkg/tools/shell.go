@@ -23,6 +23,7 @@ type ExecTool struct {
 	timeout             time.Duration
 	denyPatterns        []*regexp.Regexp
 	allowPatterns       []*regexp.Regexp
+	customAllowPatterns []*regexp.Regexp
 	restrictToWorkspace bool
 	processes           *ProcessManager
 }
@@ -35,7 +36,10 @@ var (
 		// Match disk wiping commands (must be followed by space/args).
 		regexp.MustCompile(`\b(format|mkfs|diskpart)\b\s`),
 		regexp.MustCompile(`\bdd\s+if=`),
-		regexp.MustCompile(`>\s*/dev/sd[a-z]\b`), // Block writes to disk devices (but allow /dev/null)
+		// Block writes to block devices (all common naming schemes).
+		regexp.MustCompile(
+			`>\s*/dev/(sd[a-z]|hd[a-z]|vd[a-z]|xvd[a-z]|nvme\d|mmcblk\d|loop\d|dm-\d|md\d|sr\d|nbd\d)`,
+		),
 		regexp.MustCompile(`\b(shutdown|reboot|poweroff)\b`),
 		regexp.MustCompile(`:\(\)\s*\{.*\};\s*:`),
 		regexp.MustCompile(`\$\([^)]+\)`),
@@ -46,7 +50,6 @@ var (
 		regexp.MustCompile(`;\s*rm\s+-[rf]`),
 		regexp.MustCompile(`&&\s*rm\s+-[rf]`),
 		regexp.MustCompile(`\|\|\s*rm\s+-[rf]`),
-		regexp.MustCompile(`>\s*/dev/null\s*>&?\s*\d?`),
 		regexp.MustCompile(`<<\s*EOF`),
 		regexp.MustCompile(`\$\(\s*cat\s+`),
 		regexp.MustCompile(`\$\(\s*curl\s+`),
@@ -78,6 +81,19 @@ var (
 	absolutePathPattern = regexp.MustCompile(`[A-Za-z]:\\[^\\\"']+|/[^\s\"']+`)
 
 	envVarNamePattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+
+	// safePaths are kernel pseudo-devices that are always safe to reference in
+	// commands, regardless of workspace restriction. They contain no user data
+	// and cannot cause destructive writes.
+	safePaths = map[string]bool{
+		"/dev/null":    true,
+		"/dev/zero":    true,
+		"/dev/random":  true,
+		"/dev/urandom": true,
+		"/dev/stdin":   true,
+		"/dev/stdout":  true,
+		"/dev/stderr":  true,
+	}
 )
 
 func NewExecTool(workingDir string, restrict bool) (*ExecTool, error) {
@@ -86,6 +102,7 @@ func NewExecTool(workingDir string, restrict bool) (*ExecTool, error) {
 
 func NewExecToolWithConfig(workingDir string, restrict bool, config *config.Config) (*ExecTool, error) {
 	denyPatterns := make([]*regexp.Regexp, 0)
+	customAllowPatterns := make([]*regexp.Regexp, 0)
 
 	if config != nil {
 		execConfig := config.Tools.Exec
@@ -106,6 +123,13 @@ func NewExecToolWithConfig(workingDir string, restrict bool, config *config.Conf
 			// If deny patterns are disabled, we won't add any patterns, allowing all commands.
 			fmt.Println("Warning: deny patterns are disabled. All commands will be allowed.")
 		}
+		for _, pattern := range execConfig.CustomAllowPatterns {
+			re, err := regexp.Compile(pattern)
+			if err != nil {
+				return nil, fmt.Errorf("invalid custom allow pattern %q: %w", pattern, err)
+			}
+			customAllowPatterns = append(customAllowPatterns, re)
+		}
 	} else {
 		denyPatterns = append(denyPatterns, defaultDenyPatterns...)
 	}
@@ -115,6 +139,7 @@ func NewExecToolWithConfig(workingDir string, restrict bool, config *config.Conf
 		timeout:             60 * time.Second,
 		denyPatterns:        denyPatterns,
 		allowPatterns:       nil,
+		customAllowPatterns: customAllowPatterns,
 		restrictToWorkspace: restrict,
 		processes:           NewProcessManager(defaultProcessMaxOutputChars),
 	}, nil
@@ -541,13 +566,20 @@ func (t *ExecTool) guardCommand(command, cwd string) string {
 	cmd := strings.TrimSpace(command)
 	lower := strings.ToLower(cmd)
 
-	for _, pattern := range t.denyPatterns {
+	// Custom allow patterns exempt a command from deny checks.
+	explicitlyAllowed := false
+	for _, pattern := range t.customAllowPatterns {
 		if pattern.MatchString(lower) {
-			return "Command blocked by safety guard (dangerous pattern detected). " +
-				"Suggestion: Use safer alternatives — " +
-				"for file operations use read_file/write_file/edit_file tools, " +
-				"for directory listing use list_dir, " +
-				"or rephrase the command to avoid dangerous patterns (rm -rf, sudo, eval, etc.)."
+			explicitlyAllowed = true
+			break
+		}
+	}
+
+	if !explicitlyAllowed {
+		for _, pattern := range t.denyPatterns {
+			if pattern.MatchString(lower) {
+				return "Command blocked by safety guard (dangerous pattern detected)"
+			}
 		}
 	}
 
@@ -592,6 +624,10 @@ func (t *ExecTool) guardCommand(command, cwd string) string {
 
 			p, err := filepath.Abs(raw)
 			if err != nil {
+				continue
+			}
+
+			if safePaths[p] {
 				continue
 			}
 
