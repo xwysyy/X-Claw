@@ -4,8 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"strconv"
-	"strings"
 	"sync/atomic"
 
 	"github.com/caarlos0/env/v11"
@@ -221,15 +219,15 @@ type EmbeddingConfig struct {
 	// Kind selects the embedding backend:
 	// - "" / "hashed": local deterministic embedding (default)
 	// - "openai_compat": OpenAI-compatible /v1/embeddings endpoint
-	Kind string `json:"kind,omitempty" env:"PICOCLAW_EMBEDDING_KIND"`
+	Kind string `json:"kind,omitempty"`
 
-	APIKey  string `json:"api_key,omitempty"  env:"PICOCLAW_EMBEDDING_API_KEY"`
-	APIBase string `json:"api_base,omitempty" env:"PICOCLAW_EMBEDDING_API_BASE"`
-	Model   string `json:"model,omitempty"    env:"PICOCLAW_EMBEDDING_MODEL"`
-	Proxy   string `json:"proxy,omitempty"    env:"PICOCLAW_EMBEDDING_PROXY"`
+	APIKey  string `json:"api_key,omitempty"`
+	APIBase string `json:"api_base,omitempty"`
+	Model   string `json:"model,omitempty"`
+	Proxy   string `json:"proxy,omitempty"`
 
-	BatchSize             int `json:"batch_size,omitempty"              env:"PICOCLAW_EMBEDDING_BATCH_SIZE"`
-	RequestTimeoutSeconds int `json:"request_timeout_seconds,omitempty" env:"PICOCLAW_EMBEDDING_REQUEST_TIMEOUT_SECONDS"`
+	BatchSize             int `json:"batch_size,omitempty"`
+	RequestTimeoutSeconds int `json:"request_timeout_seconds,omitempty"`
 }
 
 type AgentMemoryVectorConfig struct {
@@ -740,8 +738,6 @@ func LoadConfig(path string) (*Config, error) {
 		return nil, err
 	}
 
-	cfg.applyLegacyEmbeddingEnvFallback()
-
 	// Migrate legacy channel config fields to new unified structures
 	cfg.migrateChannelConfigs()
 
@@ -756,56 +752,6 @@ func LoadConfig(path string) (*Config, error) {
 	}
 
 	return cfg, nil
-}
-
-// applyLegacyEmbeddingEnvFallback maps common un-namespaced embedding env vars to PicoClaw config.
-//
-// This is a convenience feature for users who already have EMBEDDING_* configured in their shell/CI.
-// Preferred env vars are the PICOCLAW_* names (see EmbeddingConfig).
-func (c *Config) applyLegacyEmbeddingEnvFallback() {
-	if c == nil {
-		return
-	}
-
-	mv := &c.Agents.Defaults.MemoryVector
-
-	applyString := func(dst *string, key string) {
-		if strings.TrimSpace(*dst) != "" {
-			return
-		}
-		if v := strings.TrimSpace(os.Getenv(key)); v != "" {
-			*dst = v
-		}
-	}
-
-	// Accept legacy/unprefixed env names.
-	applyString(&mv.Embedding.Kind, "EMBEDDING_KIND")
-	applyString(&mv.Embedding.APIKey, "EMBEDDING_API_KEY")
-	applyString(&mv.Embedding.APIBase, "EMBEDDING_BASE_URL")
-	applyString(&mv.Embedding.APIBase, "EMBEDDING_API_BASE")
-	applyString(&mv.Embedding.Model, "EMBEDDING_MODEL")
-	applyString(&mv.Embedding.Proxy, "EMBEDDING_PROXY")
-
-	if mv.Embedding.BatchSize <= 0 {
-		if raw := strings.TrimSpace(os.Getenv("EMBEDDING_BATCH_SIZE")); raw != "" {
-			if v, err := strconv.Atoi(raw); err == nil && v > 0 {
-				mv.Embedding.BatchSize = v
-			}
-		}
-	}
-	if mv.Embedding.RequestTimeoutSeconds <= 0 {
-		if raw := strings.TrimSpace(os.Getenv("EMBEDDING_REQUEST_TIMEOUT_SECONDS")); raw != "" {
-			if v, err := strconv.Atoi(raw); err == nil && v > 0 {
-				mv.Embedding.RequestTimeoutSeconds = v
-			}
-		}
-	}
-
-	if raw := strings.TrimSpace(os.Getenv("EMBEDDING_DIM")); raw != "" {
-		if v, err := strconv.Atoi(raw); err == nil && v > 0 {
-			mv.Dimensions = v
-		}
-	}
 }
 
 func (c *Config) migrateChannelConfigs() {

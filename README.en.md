@@ -224,26 +224,32 @@ By default, PicoClaw semantic memory (`agents.defaults.memory_vector`) uses a lo
 
 If you want higher-quality semantic retrieval, you can point PicoClaw to an OpenAI-compatible embeddings endpoint (`POST <api_base>/embeddings`), such as SiliconFlow / OpenAI / other compatible services.
 
-Compatibility mode (use your existing `EMBEDDING_*` env vars, no `config.json` changes needed):
+In this project, embeddings settings are read **only from `config.json`**. Example (place under `agents.defaults.memory_vector.embedding`):
 
-```bash
-export EMBEDDING_API_KEY='sk-...'
-export EMBEDDING_BASE_URL='https://api.siliconflow.cn/v1'
-export EMBEDDING_MODEL='Qwen/Qwen3-Embedding-8B'
-export EMBEDDING_DIM='4096'
-```
-
-Preferred mode (use namespaced `PICOCLAW_EMBEDDING_*` to avoid collisions; functionally equivalent):
-
-```bash
-export PICOCLAW_EMBEDDING_API_KEY='sk-...'
-export PICOCLAW_EMBEDDING_API_BASE='https://api.siliconflow.cn/v1'
-export PICOCLAW_EMBEDDING_MODEL='Qwen/Qwen3-Embedding-8B'
+```json
+{
+  "agents": {
+    "defaults": {
+      "memory_vector": {
+        "dimensions": 4096,
+        "embedding": {
+          "kind": "openai_compat",
+          "api_base": "https://api.siliconflow.cn/v1",
+          "api_key": "sk-...",
+          "model": "Qwen/Qwen3-Embedding-8B",
+          "proxy": "",
+          "batch_size": 64,
+          "request_timeout_seconds": 30
+        }
+      }
+    }
+  }
+}
 ```
 
 Notes:
+- If `embedding.kind` is empty or `hashed`, PicoClaw uses the local deterministic `hashed` embedder (no network)
 - The first semantic search / index rebuild will make network requests; the index is persisted and automatically rebuilt when sources or `api_base/model` changes
-- Common tuning knobs: `(PICOCLAW_|)EMBEDDING_PROXY`, `(PICOCLAW_|)EMBEDDING_BATCH_SIZE`, `(PICOCLAW_|)EMBEDDING_REQUEST_TIMEOUT_SECONDS`
 - If you explicitly set `embedding.kind` to `openai_compat`, then `api_base` and `model` are required (otherwise it errors)
 
 ### Operable Cron State (runHistory / lastStatus)
