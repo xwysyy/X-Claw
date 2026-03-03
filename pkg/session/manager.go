@@ -18,6 +18,7 @@ type Session struct {
 	Key                        string              `json:"key"`
 	Messages                   []providers.Message `json:"messages"`
 	Summary                    string              `json:"summary,omitempty"`
+	ActiveAgentID              string              `json:"active_agent_id,omitempty"`
 	CompactionCount            int                 `json:"compaction_count,omitempty"`
 	MemoryFlushAt              time.Time           `json:"memory_flush_at,omitempty"`
 	MemoryFlushCompactionCount int                 `json:"memory_flush_compaction_count,omitempty"`
@@ -149,6 +150,66 @@ func (sm *SessionManager) GetSummary(key string) string {
 		return ""
 	}
 	return session.Summary
+}
+
+// GetActiveAgentID returns the active agent id for this session, if any.
+func (sm *SessionManager) GetActiveAgentID(key string) string {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+
+	session, ok := sm.sessions[key]
+	if !ok || session == nil {
+		return ""
+	}
+	return strings.TrimSpace(session.ActiveAgentID)
+}
+
+// SetActiveAgentID updates the active agent id for this session.
+// It creates the session if it does not exist, and persists the change via JSONL/meta when storage is enabled.
+func (sm *SessionManager) SetActiveAgentID(key, agentID string) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return
+	}
+
+	session, ok := sm.sessions[key]
+	if !ok || session == nil {
+		session = &Session{
+			Key:      key,
+			Messages: []providers.Message{},
+			Created:  time.Now(),
+		}
+		sm.sessions[key] = session
+	}
+
+	now := time.Now()
+	session.ActiveAgentID = strings.TrimSpace(agentID)
+	session.Updated = now
+
+	if sm.storage == "" {
+		return
+	}
+
+	ev := SessionEvent{
+		Type:          EventSessionActiveAgent,
+		ID:            newEventID(),
+		ParentID:      strings.TrimSpace(session.LastEventID),
+		TS:            now.UTC().Format(time.RFC3339Nano),
+		TSMS:          now.UnixMilli(),
+		SessionKey:    key,
+		ActiveAgentID: session.ActiveAgentID,
+	}
+	if path := sm.eventsPath(key); path != "" {
+		if err := appendJSONLEvent(path, ev); err == nil {
+			session.LastEventID = ev.ID
+		}
+	}
+	if path := sm.metaPath(key); path != "" {
+		_ = writeMetaFile(path, buildSessionMeta(session))
+	}
 }
 
 func (sm *SessionManager) SetSummary(key string, summary string) {
@@ -374,6 +435,7 @@ func buildSessionMeta(s *Session) SessionMeta {
 	meta := SessionMeta{
 		Key:           s.Key,
 		Summary:       s.Summary,
+		ActiveAgentID: strings.TrimSpace(s.ActiveAgentID),
 		Created:       s.Created,
 		Updated:       s.Updated,
 		LastEventID:   strings.TrimSpace(s.LastEventID),
@@ -535,6 +597,10 @@ func (sm *SessionManager) loadSessions() error {
 				}
 			case EventSessionSummary:
 				sess.Summary = ev.Summary
+			case EventSessionActiveAgent:
+				if strings.TrimSpace(ev.ActiveAgentID) != "" {
+					sess.ActiveAgentID = strings.TrimSpace(ev.ActiveAgentID)
+				}
 			case EventSessionHistorySet:
 				if ev.History != nil {
 					msgs := make([]providers.Message, len(ev.History))
@@ -624,6 +690,7 @@ func (sm *SessionManager) loadSessions() error {
 			}
 			if meta != nil {
 				sess.Summary = strings.TrimSpace(meta.Summary)
+				sess.ActiveAgentID = strings.TrimSpace(meta.ActiveAgentID)
 				sess.Created = meta.Created
 				sess.Updated = meta.Updated
 				sess.LastEventID = strings.TrimSpace(meta.LastEventID)
@@ -770,6 +837,7 @@ func (sm *SessionManager) GetSessionSnapshot(key string) (*Session, bool) {
 	snapshot := Session{
 		Key:                        stored.Key,
 		Summary:                    stored.Summary,
+		ActiveAgentID:              stored.ActiveAgentID,
 		CompactionCount:            stored.CompactionCount,
 		MemoryFlushAt:              stored.MemoryFlushAt,
 		MemoryFlushCompactionCount: stored.MemoryFlushCompactionCount,
@@ -796,6 +864,7 @@ func (sm *SessionManager) ListSessionSnapshots() []Session {
 		snapshot := Session{
 			Key:                        stored.Key,
 			Summary:                    stored.Summary,
+			ActiveAgentID:              stored.ActiveAgentID,
 			CompactionCount:            stored.CompactionCount,
 			MemoryFlushAt:              stored.MemoryFlushAt,
 			MemoryFlushCompactionCount: stored.MemoryFlushCompactionCount,

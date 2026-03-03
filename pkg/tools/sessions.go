@@ -136,6 +136,9 @@ func (t *SessionsListTool) Execute(_ context.Context, args map[string]any) *Tool
 			UpdatedAt:    s.Updated.Format(time.RFC3339),
 			MessageCount: len(s.Messages),
 		}
+		if strings.TrimSpace(s.ActiveAgentID) != "" {
+			item.ActiveAgentID = strings.TrimSpace(s.ActiveAgentID)
+		}
 		if strings.TrimSpace(s.Summary) != "" {
 			item.Summary = s.Summary
 		}
@@ -242,6 +245,9 @@ func (t *SessionsHistoryTool) Execute(_ context.Context, args map[string]any) *T
 		MessageCount: len(messages),
 		Messages:     messages,
 	}
+	if strings.TrimSpace(snapshot.ActiveAgentID) != "" {
+		payload.ActiveAgentID = strings.TrimSpace(snapshot.ActiveAgentID)
+	}
 	if strings.TrimSpace(snapshot.Summary) != "" {
 		payload.Summary = snapshot.Summary
 	}
@@ -254,13 +260,14 @@ func (t *SessionsHistoryTool) Execute(_ context.Context, args map[string]any) *T
 }
 
 type sessionListItem struct {
-	Key          string              `json:"key"`
-	Kind         string              `json:"kind"`
-	CreatedAt    string              `json:"created_at"`
-	UpdatedAt    string              `json:"updated_at"`
-	MessageCount int                 `json:"message_count"`
-	Summary      string              `json:"summary,omitempty"`
-	Messages     []providers.Message `json:"messages,omitempty"`
+	Key           string              `json:"key"`
+	Kind          string              `json:"kind"`
+	ActiveAgentID string              `json:"active_agent_id,omitempty"`
+	CreatedAt     string              `json:"created_at"`
+	UpdatedAt     string              `json:"updated_at"`
+	MessageCount  int                 `json:"message_count"`
+	Summary       string              `json:"summary,omitempty"`
+	Messages      []providers.Message `json:"messages,omitempty"`
 }
 
 type sessionsListOutput struct {
@@ -269,13 +276,14 @@ type sessionsListOutput struct {
 }
 
 type sessionHistoryOutput struct {
-	SessionKey   string              `json:"session_key"`
-	Kind         string              `json:"kind"`
-	CreatedAt    string              `json:"created_at"`
-	UpdatedAt    string              `json:"updated_at"`
-	MessageCount int                 `json:"message_count"`
-	Summary      string              `json:"summary,omitempty"`
-	Messages     []providers.Message `json:"messages"`
+	SessionKey    string              `json:"session_key"`
+	Kind          string              `json:"kind"`
+	ActiveAgentID string              `json:"active_agent_id,omitempty"`
+	CreatedAt     string              `json:"created_at"`
+	UpdatedAt     string              `json:"updated_at"`
+	MessageCount  int                 `json:"message_count"`
+	Summary       string              `json:"summary,omitempty"`
+	Messages      []providers.Message `json:"messages"`
 }
 
 func classifySessionKind(key string) string {
@@ -283,9 +291,9 @@ func classifySessionKind(key string) string {
 	switch {
 	case k == "":
 		return "other"
-	case strings.HasPrefix(k, "agent:") && strings.HasSuffix(k, ":main"):
+	case (strings.HasPrefix(k, "agent:") && strings.HasSuffix(k, ":main")) || k == "conv:main":
 		return "main"
-	case strings.Contains(k, ":subagent:"):
+	case strings.HasPrefix(k, "subagent:") || strings.Contains(k, ":subagent:"):
 		return "subagent"
 	case strings.Contains(k, ":group:"):
 		return "group"

@@ -27,6 +27,7 @@ import (
 	"github.com/sipeed/picoclaw/pkg/media"
 	"github.com/sipeed/picoclaw/pkg/providers"
 	"github.com/sipeed/picoclaw/pkg/routing"
+	"github.com/sipeed/picoclaw/pkg/session"
 	"github.com/sipeed/picoclaw/pkg/skills"
 	"github.com/sipeed/picoclaw/pkg/state"
 	"github.com/sipeed/picoclaw/pkg/tools"
@@ -38,6 +39,7 @@ type AgentLoop struct {
 	cfgMu          sync.RWMutex
 	cfg            *config.Config
 	registry       *AgentRegistry
+	sessions       *session.SessionManager
 	state          *state.Manager
 	taskLedger     *tools.TaskLedger
 	running        atomic.Bool
@@ -129,16 +131,33 @@ func NewAgentLoop(cfg *config.Config, msgBus *bus.MessageBus, provider providers
 	defaultAgent := registry.GetDefaultAgent()
 	var stateManager *state.Manager
 	ledgerPath := filepath.Join(cfg.WorkspacePath(), "tasks", "ledger.json")
+	sessionsPath := filepath.Join(cfg.WorkspacePath(), "sessions")
 	if defaultAgent != nil {
 		stateManager = state.NewManager(defaultAgent.Workspace)
 		ledgerPath = filepath.Join(defaultAgent.Workspace, "tasks", "ledger.json")
+		sessionsPath = filepath.Join(defaultAgent.Workspace, "sessions")
 	}
 	taskLedger := tools.NewTaskLedger(ledgerPath)
+
+	// Phase F: shared sessions for Swarm-style multi-agent handoff.
+	// Conversation history is shared across agents; the session itself stores active_agent_id.
+	sharedSessions := session.NewSessionManager(sessionsPath)
+	for _, agentID := range registry.ListAgentIDs() {
+		agent, ok := registry.GetAgent(agentID)
+		if !ok || agent == nil {
+			continue
+		}
+		agent.Sessions = sharedSessions
+		// Re-register session tools against the shared session manager.
+		agent.Tools.Register(tools.NewSessionsListTool(sharedSessions))
+		agent.Tools.Register(tools.NewSessionsHistoryTool(sharedSessions))
+	}
 
 	al := &AgentLoop{
 		bus:         msgBus,
 		cfg:         cfg,
 		registry:    registry,
+		sessions:    sharedSessions,
 		state:       stateManager,
 		taskLedger:  taskLedger,
 		summarizing: sync.Map{},
@@ -283,11 +302,43 @@ func registerSharedTools(
 	sessionsExecutor tools.SessionsSendExecutor,
 	taskLedger *tools.TaskLedger,
 ) {
+	listAgents := func() []tools.AgentInfo {
+		ids := registry.ListAgentIDs()
+		sort.Strings(ids)
+		out := make([]tools.AgentInfo, 0, len(ids))
+		for _, id := range ids {
+			agent, ok := registry.GetAgent(id)
+			if !ok || agent == nil {
+				continue
+			}
+			out = append(out, tools.AgentInfo{
+				ID:        strings.TrimSpace(agent.ID),
+				Name:      strings.TrimSpace(agent.Name),
+				Model:     strings.TrimSpace(agent.Model),
+				Workspace: strings.TrimSpace(agent.Workspace),
+			})
+		}
+		return out
+	}
+	lookupAgent := func(agentID string) (tools.AgentInfo, bool) {
+		agent, ok := registry.GetAgent(agentID)
+		if !ok || agent == nil {
+			return tools.AgentInfo{}, false
+		}
+		return tools.AgentInfo{
+			ID:        strings.TrimSpace(agent.ID),
+			Name:      strings.TrimSpace(agent.Name),
+			Model:     strings.TrimSpace(agent.Model),
+			Workspace: strings.TrimSpace(agent.Workspace),
+		}, true
+	}
+
 	for _, agentID := range registry.ListAgentIDs() {
 		agent, ok := registry.GetAgent(agentID)
 		if !ok {
 			continue
 		}
+		currentAgentID := agentID
 
 		// Web tools
 		searchTool := tools.NewWebSearchTool(tools.WebSearchToolOptions{
@@ -354,6 +405,23 @@ func registerSharedTools(
 		agent.Tools.Register(tools.NewFindSkillsTool(registryMgr, searchCache))
 		agent.Tools.Register(tools.NewInstallSkillTool(registryMgr, agent.Workspace))
 
+		// Phase F: agent discovery + explicit handoff.
+		agent.Tools.Register(tools.NewAgentsListTool(listAgents))
+		handoffTool := tools.NewHandoffTool(agent.ID, agent.Sessions, lookupAgent)
+		parentSubagents := agent.Subagents
+		handoffTool.SetAllowlistChecker(func(_ string, targetAgentID string) bool {
+			// Default allow: if allow_agents is omitted (nil), allow handoff to any existing agent.
+			// Explicit empty allow_agents [] means "disallow all".
+			if parentSubagents == nil || parentSubagents.AllowAgents == nil {
+				return true
+			}
+			if len(parentSubagents.AllowAgents) == 0 {
+				return false
+			}
+			return registry.CanSpawnSubagent(currentAgentID, targetAgentID)
+		})
+		agent.Tools.Register(handoffTool)
+
 		// Spawn/session tools with allowlist checker.
 		subagentManager := tools.NewSubagentManager(provider, agent.Model, agent.Workspace, msgBus)
 		subagentManager.SetLLMOptions(agent.MaxTokens, agent.Temperature)
@@ -385,7 +453,6 @@ func registerSharedTools(
 		)
 		subagentManager.SetTools(agent.Tools)
 		agent.SubagentManager = subagentManager
-		currentAgentID := agentID
 		subagentManager.SetExecutionResolver(func(targetAgentID string) (tools.SubagentExecutionConfig, error) {
 			return resolveSubagentExecution(cfg, registry, provider, currentAgentID, targetAgentID)
 		})
@@ -596,33 +663,56 @@ func (al *AgentLoop) Run(ctx context.Context) error {
 	var bucketsMu sync.Mutex
 
 	getBucketKey := func(msg bus.InboundMessage) string {
-		// System messages are always bucketed to the main agent session to avoid
-		// concurrent writes to the shared agent:main:main session history.
-		if msg.Channel == "system" {
-			if da := al.registry.GetDefaultAgent(); da != nil {
-				return routing.BuildAgentMainSessionKey(da.ID)
+		// Prefer an explicit session key when it is known to be safe/stable.
+		explicit := strings.TrimSpace(msg.SessionKey)
+		if explicit != "" {
+			lower := strings.ToLower(explicit)
+			if strings.HasPrefix(lower, "agent:") || strings.HasPrefix(lower, "conv:") || constants.IsInternalChannel(msg.Channel) {
+				return explicit
 			}
-			return "system"
 		}
 
-		route := al.registry.ResolveRoute(routing.RouteInput{
-			Channel:    msg.Channel,
-			AccountID:  msg.Metadata["account_id"],
-			Peer:       extractPeer(msg),
-			ParentPeer: extractParentPeer(msg),
-			GuildID:    msg.Metadata["guild_id"],
-			TeamID:     msg.Metadata["team_id"],
-		})
+		cfg := al.Config()
+		dmScope := routing.DMScopeMain
+		identityLinks := map[string][]string(nil)
+		if cfg != nil {
+			if v := routing.DMScope(strings.TrimSpace(cfg.Session.DMScope)); v != "" {
+				dmScope = v
+			}
+			identityLinks = cfg.Session.IdentityLinks
+		}
 
-		sessionKey := route.SessionKey
-		if msg.SessionKey != "" && strings.HasPrefix(msg.SessionKey, "agent:") {
-			sessionKey = msg.SessionKey
+		// System messages (subagent completion) route back to the originating conversation.
+		// ChatID format: "origin_channel:origin_chat_id".
+		if msg.Channel == "system" {
+			originChannel, originChatID := "cli", strings.TrimSpace(msg.ChatID)
+			if idx := strings.Index(msg.ChatID, ":"); idx > 0 {
+				originChannel = strings.TrimSpace(msg.ChatID[:idx])
+				originChatID = strings.TrimSpace(msg.ChatID[idx+1:])
+			}
+			key := strings.ToLower(routing.BuildConversationPeerSessionKey(routing.SessionKeyParams{
+				Channel:       originChannel,
+				AccountID:     msg.Metadata["account_id"],
+				Peer:          &routing.RoutePeer{Kind: "direct", ID: originChatID},
+				DMScope:       dmScope,
+				IdentityLinks: identityLinks,
+			}))
+			if strings.TrimSpace(key) != "" {
+				return key
+			}
 		}
-		sessionKey = strings.TrimSpace(sessionKey)
-		if sessionKey == "" {
-			sessionKey = strings.TrimSpace(msg.Channel) + ":" + strings.TrimSpace(msg.ChatID)
+
+		key := strings.ToLower(routing.BuildConversationPeerSessionKey(routing.SessionKeyParams{
+			Channel:       msg.Channel,
+			AccountID:     msg.Metadata["account_id"],
+			Peer:          extractPeer(msg),
+			DMScope:       dmScope,
+			IdentityLinks: identityLinks,
+		}))
+		if strings.TrimSpace(key) == "" {
+			key = strings.TrimSpace(msg.Channel) + ":" + strings.TrimSpace(msg.ChatID)
 		}
-		return sessionKey
+		return key
 	}
 
 	enqueue := func(msg bus.InboundMessage) {
@@ -836,6 +926,12 @@ func (al *AgentLoop) ProcessSessionMessage(
 		if agent, ok := al.registry.GetAgent(parsed.AgentID); ok {
 			targetAgent = agent
 		}
+	} else if al.sessions != nil {
+		if active := al.sessions.GetActiveAgentID(key); active != "" {
+			if agent, ok := al.registry.GetAgent(active); ok {
+				targetAgent = agent
+			}
+		}
 	}
 	if targetAgent == nil {
 		return "", fmt.Errorf("no agent available for session %q", key)
@@ -905,7 +1001,9 @@ func (al *AgentLoop) processMessage(ctx context.Context, msg bus.InboundMessage)
 		return al.processSystemMessage(ctx, msg)
 	}
 
-	// Route to determine agent and session key
+	cfg := al.Config()
+
+	// Route to determine default agent for this peer/channel.
 	route := al.registry.ResolveRoute(routing.RouteInput{
 		Channel:    msg.Channel,
 		AccountID:  msg.Metadata["account_id"],
@@ -915,18 +1013,70 @@ func (al *AgentLoop) processMessage(ctx context.Context, msg bus.InboundMessage)
 		TeamID:     msg.Metadata["team_id"],
 	})
 
-	agent, ok := al.registry.GetAgent(route.AgentID)
-	if !ok {
-		agent = al.registry.GetDefaultAgent()
+	// Build the conversation session key (agent-independent) so that handoffs can keep
+	// one shared conversation history across agents (Phase F).
+	dmScope := routing.DMScopeMain
+	identityLinks := map[string][]string(nil)
+	if cfg != nil {
+		if v := routing.DMScope(strings.TrimSpace(cfg.Session.DMScope)); v != "" {
+			dmScope = v
+		}
+		identityLinks = cfg.Session.IdentityLinks
+	}
+	conversationSessionKey := strings.ToLower(routing.BuildConversationPeerSessionKey(routing.SessionKeyParams{
+		Channel:       msg.Channel,
+		AccountID:     msg.Metadata["account_id"],
+		Peer:          extractPeer(msg),
+		DMScope:       dmScope,
+		IdentityLinks: identityLinks,
+	}))
+	if strings.TrimSpace(conversationSessionKey) == "" {
+		conversationSessionKey = strings.TrimSpace(msg.Channel) + ":" + strings.TrimSpace(msg.ChatID)
+	}
+
+	// Use explicit session keys only when they are known to be safe/stable.
+	// - agent:* forces an agent (internal/control plane)
+	// - conv:* forces a specific conversation session (internal/control plane)
+	// - internal channels may inject arbitrary session keys for testing/ops
+	sessionKey := conversationSessionKey
+	if explicit := strings.TrimSpace(msg.SessionKey); explicit != "" {
+		lower := strings.ToLower(explicit)
+		if strings.HasPrefix(lower, "agent:") || strings.HasPrefix(lower, "conv:") || constants.IsInternalChannel(msg.Channel) {
+			sessionKey = explicit
+		}
+	}
+
+	// Determine the active agent:
+	// 1) Agent-scoped keys force the agent. Otherwise, prefer the session's active agent.
+	// 2) Fall back to routed agent (bindings) or default agent.
+	var agent *AgentInstance
+	if parsed := routing.ParseAgentSessionKey(strings.ToLower(sessionKey)); parsed != nil {
+		if a, ok := al.registry.GetAgent(parsed.AgentID); ok {
+			agent = a
+		}
+	} else if al.sessions != nil {
+		if active := al.sessions.GetActiveAgentID(sessionKey); active != "" {
+			if a, ok := al.registry.GetAgent(active); ok {
+				agent = a
+			}
+		}
+	}
+	if agent == nil {
+		if a, ok := al.registry.GetAgent(route.AgentID); ok {
+			agent = a
+		} else {
+			agent = al.registry.GetDefaultAgent()
+		}
 	}
 	if agent == nil {
 		return "", fmt.Errorf("no agent available for route (agent_id=%s)", route.AgentID)
 	}
 
-	// Use routed session key, but honor pre-set agent-scoped keys (for ProcessDirect/cron)
-	sessionKey := route.SessionKey
-	if msg.SessionKey != "" && strings.HasPrefix(msg.SessionKey, "agent:") {
-		sessionKey = msg.SessionKey
+	// Ensure the conversation session has an active agent recorded.
+	if al.sessions != nil && routing.ParseAgentSessionKey(strings.ToLower(sessionKey)) == nil {
+		if al.sessions.GetActiveAgentID(sessionKey) == "" {
+			al.sessions.SetActiveAgentID(sessionKey, agent.ID)
+		}
 	}
 
 	// Check for commands (after routing so commands can be scoped to session/agent).
@@ -938,6 +1088,7 @@ func (al *AgentLoop) processMessage(ctx context.Context, msg bus.InboundMessage)
 		map[string]any{
 			"agent_id":    agent.ID,
 			"session_key": sessionKey,
+			"conv_key":    conversationSessionKey,
 			"matched_by":  route.MatchedBy,
 		})
 
@@ -956,18 +1107,21 @@ func (al *AgentLoop) processMessage(ctx context.Context, msg bus.InboundMessage)
 	}
 
 	planMode := false
-	cfg := al.Config()
 	if cfg != nil && cfg.Tools.PlanMode.Enabled {
 		defaultMode := sessionPermissionModeRun
 		if strings.EqualFold(strings.TrimSpace(cfg.Tools.PlanMode.DefaultMode), "plan") {
 			defaultMode = sessionPermissionModePlan
 		}
-		perm := loadSessionPermissionStateWithDefault(agent.Workspace, sessionKey, defaultMode)
+		permWorkspace := agent.Workspace
+		if da := al.registry.GetDefaultAgent(); da != nil && strings.TrimSpace(da.Workspace) != "" {
+			permWorkspace = da.Workspace
+		}
+		perm := loadSessionPermissionStateWithDefault(permWorkspace, sessionKey, defaultMode)
 		if perm.isPlan() {
 			planMode = true
 			if strings.TrimSpace(userMessage) != "" {
 				perm.PendingTask = userMessage
-				if err := saveSessionPermissionState(agent.Workspace, sessionKey, perm); err != nil {
+				if err := saveSessionPermissionState(permWorkspace, sessionKey, perm); err != nil {
 					logger.WarnCF("agent", "Failed to persist plan-mode pending task (best-effort)", map[string]any{
 						"session_key": sessionKey,
 						"error":       err.Error(),
@@ -1037,19 +1191,54 @@ func (al *AgentLoop) processSystemMessage(
 		return "", nil
 	}
 
-	// Use default agent for system messages
-	agent := al.registry.GetDefaultAgent()
-	if agent == nil {
-		return "", fmt.Errorf("no default agent for system message")
+	// Prefer an explicit session key (propagated from tools such as spawn/subagent).
+	sessionKey := strings.TrimSpace(msg.SessionKey)
+	if sessionKey == "" {
+		cfg := al.Config()
+		dmScope := routing.DMScopeMain
+		identityLinks := map[string][]string(nil)
+		if cfg != nil {
+			if v := routing.DMScope(strings.TrimSpace(cfg.Session.DMScope)); v != "" {
+				dmScope = v
+			}
+			identityLinks = cfg.Session.IdentityLinks
+		}
+		sessionKey = strings.ToLower(routing.BuildConversationPeerSessionKey(routing.SessionKeyParams{
+			Channel:       originChannel,
+			AccountID:     msg.Metadata["account_id"],
+			Peer:          &routing.RoutePeer{Kind: "direct", ID: originChatID},
+			DMScope:       dmScope,
+			IdentityLinks: identityLinks,
+		}))
 	}
 
-	// Use the origin session for context
-	sessionKey := routing.BuildAgentMainSessionKey(agent.ID)
+	// Use the session's active agent if present; otherwise default agent.
+	agent := al.registry.GetDefaultAgent()
+	if parsed := routing.ParseAgentSessionKey(strings.ToLower(sessionKey)); parsed != nil {
+		if a, ok := al.registry.GetAgent(parsed.AgentID); ok && a != nil {
+			agent = a
+		}
+	} else if al.sessions != nil {
+		if active := al.sessions.GetActiveAgentID(sessionKey); active != "" {
+			if a, ok := al.registry.GetAgent(active); ok && a != nil {
+				agent = a
+			}
+		}
+	}
+	if agent == nil {
+		return "", fmt.Errorf("no agent available for system message (session_key=%s)", sessionKey)
+	}
+	if al.sessions != nil && routing.ParseAgentSessionKey(strings.ToLower(sessionKey)) == nil {
+		if al.sessions.GetActiveAgentID(sessionKey) == "" {
+			al.sessions.SetActiveAgentID(sessionKey, agent.ID)
+		}
+	}
 
 	return al.runAgentLoop(ctx, agent, processOptions{
 		SessionKey:      sessionKey,
 		Channel:         originChannel,
 		ChatID:          originChatID,
+		SenderID:        msg.SenderID,
 		UserMessage:     fmt.Sprintf("[System: %s] %s", msg.SenderID, msg.Content),
 		DefaultResponse: "Background task completed.",
 		EnableSummary:   false,
@@ -1147,13 +1336,16 @@ func (al *AgentLoop) runAgentLoop(
 		})
 	}
 
-	// 5. Run LLM iteration loop
-	finalContent, iteration, err := al.runLLMIteration(ctx, agent, messages, opts, runTrace)
+	// 5. Run LLM iteration loop (may switch active agent via handoff).
+	finalContent, iteration, activeAgent, err := al.runLLMIteration(ctx, agent, messages, opts, runTrace)
 	if err != nil {
 		if runTrace != nil {
 			runTrace.recordError(iteration, err)
 		}
 		return "", err
+	}
+	if activeAgent != nil {
+		agent = activeAgent
 	}
 
 	// If last tool had ForUser content and we already sent it, we might not need to send final response
@@ -1323,7 +1515,7 @@ func (al *AgentLoop) runLLMIteration(
 	messages []providers.Message,
 	opts processOptions,
 	trace *runTraceWriter,
-) (string, int, error) {
+) (string, int, *AgentInstance, error) {
 	iteration := 0
 	var finalContent string
 	recentToolCalls := make([]toolCallSignature, 0, 32) // for loop detection
@@ -1495,7 +1687,7 @@ func (al *AgentLoop) runLLMIteration(
 					"iteration": iteration,
 					"error":     err.Error(),
 				})
-			return "", iteration, fmt.Errorf("LLM call failed after retries: %w", err)
+			return "", iteration, agent, fmt.Errorf("LLM call failed after retries: %w", err)
 		}
 
 		if trace != nil {
@@ -1823,6 +2015,9 @@ func (al *AgentLoop) runLLMIteration(
 		if trace != nil {
 			trace.recordToolBatch(iteration, toolExecutions)
 		}
+
+		handoffTargetID := ""
+		handoffTakeover := false
 		for _, executed := range toolExecutions {
 			toolResult := executed.Result
 			tc := executed.ToolCall
@@ -1883,6 +2078,25 @@ func (al *AgentLoop) runLLMIteration(
 				contentForLLM = toolResult.Err.Error()
 			}
 
+			// Phase F: Swarm-style agent handoff. If the model calls `handoff`, switch the
+			// active agent for subsequent iterations while keeping the shared conversation history.
+			if strings.EqualFold(strings.TrimSpace(tc.Name), "handoff") && !toolResult.IsError {
+				if raw, ok := tc.Arguments["agent_id"].(string); ok {
+					handoffTargetID = strings.TrimSpace(raw)
+				}
+				if handoffTargetID == "" {
+					if raw, ok := tc.Arguments["agent_name"].(string); ok {
+						handoffTargetID = strings.TrimSpace(raw)
+					}
+				}
+				// Default takeover=true (matches tool default).
+				takeover := true
+				if v, ok := tc.Arguments["takeover"].(bool); ok {
+					takeover = v
+				}
+				handoffTakeover = takeover
+			}
+
 			toolResultMsg := providers.Message{
 				Role:       "tool",
 				Content:    contentForLLM,
@@ -1892,6 +2106,45 @@ func (al *AgentLoop) runLLMIteration(
 
 			// Save tool result message to session
 			agent.Sessions.AddFullMessage(opts.SessionKey, toolResultMsg)
+		}
+
+		// Apply handoff after all tool results are recorded, then rebuild the prompt with
+		// the new agent's system prompt and tool set, while preserving session history.
+		if strings.TrimSpace(handoffTargetID) != "" && handoffTakeover {
+			target, ok := al.registry.GetAgent(handoffTargetID)
+			if ok && target != nil {
+				logger.InfoCF("agent", "Handoff: switching active agent", map[string]any{
+					"from_agent_id": agent.ID,
+					"to_agent_id":   target.ID,
+					"session_key":   opts.SessionKey,
+					"iteration":     iteration,
+				})
+
+				agent = target
+				if trace != nil {
+					trace.agentID = strings.TrimSpace(agent.ID)
+					trace.model = strings.TrimSpace(agent.Model)
+				}
+
+				history := agent.Sessions.GetHistory(opts.SessionKey)
+				summary := agent.Sessions.GetSummary(opts.SessionKey)
+				messages = agent.ContextBuilder.BuildMessagesForSession(
+					opts.SessionKey,
+					history,
+					summary,
+					"",
+					nil,
+					opts.Channel,
+					opts.ChatID,
+					opts.WorkingState,
+				)
+			} else {
+				logger.WarnCF("agent", "Handoff target agent not found", map[string]any{
+					"target_agent_id": handoffTargetID,
+					"session_key":     opts.SessionKey,
+					"iteration":       iteration,
+				})
+			}
 		}
 	}
 
@@ -1908,7 +2161,7 @@ func (al *AgentLoop) runLLMIteration(
 			})
 	}
 
-	return finalContent, iteration, nil
+	return finalContent, iteration, agent, nil
 }
 
 // maybeSummarize triggers summarization if the session history exceeds thresholds.
@@ -2279,7 +2532,11 @@ func (al *AgentLoop) handleCommand(ctx context.Context, msg bus.InboundMessage, 
 		if strings.EqualFold(strings.TrimSpace(cfg.Tools.PlanMode.DefaultMode), "plan") {
 			defaultMode = sessionPermissionModePlan
 		}
-		perm := loadSessionPermissionStateWithDefault(agent.Workspace, sessionKey, defaultMode)
+		permWorkspace := agent.Workspace
+		if da := al.registry.GetDefaultAgent(); da != nil && strings.TrimSpace(da.Workspace) != "" {
+			permWorkspace = da.Workspace
+		}
+		perm := loadSessionPermissionStateWithDefault(permWorkspace, sessionKey, defaultMode)
 		perm.Mode = sessionPermissionModePlan
 
 		// If the user provided a task inline ("/plan <task>"), immediately run
@@ -2287,7 +2544,7 @@ func (al *AgentLoop) handleCommand(ctx context.Context, msg bus.InboundMessage, 
 		task := strings.TrimSpace(strings.Join(args, " "))
 		if task != "" {
 			perm.PendingTask = task
-			if err := saveSessionPermissionState(agent.Workspace, sessionKey, perm); err != nil {
+			if err := saveSessionPermissionState(permWorkspace, sessionKey, perm); err != nil {
 				logger.WarnCF("agent", "Failed to persist plan mode state (best-effort)", map[string]any{
 					"session_key": sessionKey,
 					"error":       err.Error(),
@@ -2310,7 +2567,7 @@ func (al *AgentLoop) handleCommand(ctx context.Context, msg bus.InboundMessage, 
 			return response, true
 		}
 
-		if err := saveSessionPermissionState(agent.Workspace, sessionKey, perm); err != nil {
+		if err := saveSessionPermissionState(permWorkspace, sessionKey, perm); err != nil {
 			logger.WarnCF("agent", "Failed to persist plan mode state (best-effort)", map[string]any{
 				"session_key": sessionKey,
 				"error":       err.Error(),
@@ -2336,7 +2593,11 @@ func (al *AgentLoop) handleCommand(ctx context.Context, msg bus.InboundMessage, 
 		if strings.EqualFold(strings.TrimSpace(cfg.Tools.PlanMode.DefaultMode), "plan") {
 			defaultMode = sessionPermissionModePlan
 		}
-		perm := loadSessionPermissionStateWithDefault(agent.Workspace, sessionKey, defaultMode)
+		permWorkspace := agent.Workspace
+		if da := al.registry.GetDefaultAgent(); da != nil && strings.TrimSpace(da.Workspace) != "" {
+			permWorkspace = da.Workspace
+		}
+		perm := loadSessionPermissionStateWithDefault(permWorkspace, sessionKey, defaultMode)
 		if !perm.isPlan() {
 			return "Plan mode is not active for this session. Use /plan first.", true
 		}
@@ -2344,13 +2605,13 @@ func (al *AgentLoop) handleCommand(ctx context.Context, msg bus.InboundMessage, 
 		if task == "" {
 			perm.Mode = sessionPermissionModeRun
 			perm.PendingTask = ""
-			_ = saveSessionPermissionState(agent.Workspace, sessionKey, perm)
+			_ = saveSessionPermissionState(permWorkspace, sessionKey, perm)
 			return "No pending task captured. Send a task while in plan mode, then /approve.", true
 		}
 
 		perm.Mode = sessionPermissionModeRun
 		perm.PendingTask = ""
-		if err := saveSessionPermissionState(agent.Workspace, sessionKey, perm); err != nil {
+		if err := saveSessionPermissionState(permWorkspace, sessionKey, perm); err != nil {
 			logger.WarnCF("agent", "Failed to persist plan mode state (best-effort)", map[string]any{
 				"session_key": sessionKey,
 				"error":       err.Error(),
@@ -2392,10 +2653,14 @@ func (al *AgentLoop) handleCommand(ctx context.Context, msg bus.InboundMessage, 
 		if strings.EqualFold(strings.TrimSpace(cfg.Tools.PlanMode.DefaultMode), "plan") {
 			defaultMode = sessionPermissionModePlan
 		}
-		perm := loadSessionPermissionStateWithDefault(agent.Workspace, sessionKey, defaultMode)
+		permWorkspace := agent.Workspace
+		if da := al.registry.GetDefaultAgent(); da != nil && strings.TrimSpace(da.Workspace) != "" {
+			permWorkspace = da.Workspace
+		}
+		perm := loadSessionPermissionStateWithDefault(permWorkspace, sessionKey, defaultMode)
 		perm.Mode = sessionPermissionModeRun
 		perm.PendingTask = ""
-		if err := saveSessionPermissionState(agent.Workspace, sessionKey, perm); err != nil {
+		if err := saveSessionPermissionState(permWorkspace, sessionKey, perm); err != nil {
 			logger.WarnCF("agent", "Failed to persist plan mode state (best-effort)", map[string]any{
 				"session_key": sessionKey,
 				"error":       err.Error(),
@@ -2421,7 +2686,11 @@ func (al *AgentLoop) handleCommand(ctx context.Context, msg bus.InboundMessage, 
 		if strings.EqualFold(strings.TrimSpace(cfg.Tools.PlanMode.DefaultMode), "plan") {
 			defaultMode = sessionPermissionModePlan
 		}
-		perm := loadSessionPermissionStateWithDefault(agent.Workspace, sessionKey, defaultMode)
+		permWorkspace := agent.Workspace
+		if da := al.registry.GetDefaultAgent(); da != nil && strings.TrimSpace(da.Workspace) != "" {
+			permWorkspace = da.Workspace
+		}
+		perm := loadSessionPermissionStateWithDefault(permWorkspace, sessionKey, defaultMode)
 
 		pendingPreview := utils.Truncate(strings.TrimSpace(perm.PendingTask), 120)
 		if pendingPreview == "" {

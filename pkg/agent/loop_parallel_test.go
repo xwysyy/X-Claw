@@ -125,7 +125,7 @@ func TestAgentLoop_RunLLMIteration_ParallelToolCallsPreserveOrder(t *testing.T) 
 		t.Fatal("default agent not found")
 	}
 
-	finalContent, iterations, err := al.runLLMIteration(
+	finalContent, iterations, _, err := al.runLLMIteration(
 		context.Background(),
 		agent,
 		[]providers.Message{

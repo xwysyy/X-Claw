@@ -547,8 +547,9 @@ func (sm *SubagentManager) publishTaskAnnouncement(task SubagentTask, status str
 		Channel:  "system",
 		SenderID: fmt.Sprintf("subagent:%s", task.ID),
 		// Format: "original_channel:original_chat_id" for routing back
-		ChatID:  fmt.Sprintf("%s:%s", task.OriginChannel, task.OriginChatID),
-		Content: announceContent,
+		ChatID:     fmt.Sprintf("%s:%s", task.OriginChannel, task.OriginChatID),
+		Content:    announceContent,
+		SessionKey: task.SessionKey,
 	})
 }
 

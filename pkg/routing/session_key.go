@@ -42,6 +42,15 @@ func BuildAgentMainSessionKey(agentID string) string {
 	return fmt.Sprintf("agent:%s:%s", NormalizeAgentID(agentID), DefaultMainKey)
 }
 
+// BuildConversationMainSessionKey returns "conv:main".
+//
+// Conversation-scoped session keys intentionally do NOT embed an agent identifier.
+// This enables Swarm-style agent handoffs while keeping a single shared conversation
+// history across agents.
+func BuildConversationMainSessionKey() string {
+	return fmt.Sprintf("conv:%s", DefaultMainKey)
+}
+
 // BuildAgentPeerSessionKey constructs a session key based on agent, channel, peer, and DM scope.
 func BuildAgentPeerSessionKey(params SessionKeyParams) string {
 	agentID := NormalizeAgentID(params.AgentID)
@@ -97,6 +106,71 @@ func BuildAgentPeerSessionKey(params SessionKeyParams) string {
 		peerID = "unknown"
 	}
 	return fmt.Sprintf("agent:%s:%s:%s:%s", agentID, channel, peerKind, peerID)
+}
+
+// BuildConversationPeerSessionKey constructs a session key based on channel, peer, and DM scope,
+// without embedding any agent identifier. This enables Swarm-style agent handoffs while keeping
+// a single shared conversation history across agents.
+//
+// Key format (examples):
+// - Direct + dm_scope=main:         "conv:main"
+// - Direct + per-peer:             "conv:direct:<peer>"
+// - Direct + per-channel-peer:     "conv:<channel>:direct:<peer>"
+// - Direct + per-account-channel:  "conv:<channel>:<account>:direct:<peer>"
+// - Group / channel peers:         "conv:<channel>:group:<id>" / "conv:<channel>:channel:<id>"
+func BuildConversationPeerSessionKey(params SessionKeyParams) string {
+	peer := params.Peer
+	if peer == nil {
+		peer = &RoutePeer{Kind: "direct"}
+	}
+	peerKind := strings.TrimSpace(peer.Kind)
+	if peerKind == "" {
+		peerKind = "direct"
+	}
+
+	if peerKind == "direct" {
+		dmScope := params.DMScope
+		if dmScope == "" {
+			dmScope = DMScopeMain
+		}
+		peerID := strings.TrimSpace(peer.ID)
+
+		// Resolve identity links (cross-platform collapse)
+		if dmScope != DMScopeMain && peerID != "" {
+			if linked := resolveLinkedPeerID(params.IdentityLinks, params.Channel, peerID); linked != "" {
+				peerID = linked
+			}
+		}
+		peerID = strings.ToLower(peerID)
+
+		switch dmScope {
+		case DMScopePerAccountChannelPeer:
+			if peerID != "" {
+				channel := normalizeChannel(params.Channel)
+				accountID := NormalizeAccountID(params.AccountID)
+				return fmt.Sprintf("conv:%s:%s:direct:%s", channel, accountID, peerID)
+			}
+		case DMScopePerChannelPeer:
+			if peerID != "" {
+				channel := normalizeChannel(params.Channel)
+				return fmt.Sprintf("conv:%s:direct:%s", channel, peerID)
+			}
+		case DMScopePerPeer:
+			if peerID != "" {
+				return fmt.Sprintf("conv:direct:%s", peerID)
+			}
+		}
+
+		return BuildConversationMainSessionKey()
+	}
+
+	// Group/channel peers always get per-peer sessions
+	channel := normalizeChannel(params.Channel)
+	peerID := strings.ToLower(strings.TrimSpace(peer.ID))
+	if peerID == "" {
+		peerID = "unknown"
+	}
+	return fmt.Sprintf("conv:%s:%s:%s", channel, peerKind, peerID)
 }
 
 // ParseAgentSessionKey extracts agentId and rest from "agent:<agentId>:<rest>".
