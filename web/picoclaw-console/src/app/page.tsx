@@ -144,6 +144,7 @@ export default function Home() {
 
   const [status, setStatus] = useState<any>(null);
   const [cron, setCron] = useState<any>(null);
+  const [tokens, setTokens] = useState<any>(null);
   const [runs, setRuns] = useState<{ items?: ConsoleTraceItem[] } | null>(null);
   const [tools, setTools] = useState<{ items?: ConsoleTraceItem[] } | null>(null);
   const [sessions, setSessions] = useState<{ items?: ConsoleSessionsItem[] } | null>(null);
@@ -231,15 +232,17 @@ export default function Home() {
     }
 
     try {
-      const [st, cr, ru, to, se] = await Promise.all([
+      const [st, cr, tk, ru, to, se] = await Promise.all([
         apiJSON<any>("/api/console/status", k),
         apiJSON<any>("/api/console/cron", k),
+        apiJSON<any>("/api/console/tokens", k),
         apiJSON<any>("/api/console/runs", k),
         apiJSON<any>("/api/console/tools", k),
         apiJSON<any>("/api/console/sessions", k),
       ]);
       setStatus(st);
       setCron(cr);
+      setTokens(tk);
       setRuns(ru);
       setTools(to);
       setSessions(se);
@@ -348,6 +351,9 @@ export default function Home() {
 
   const headerInfo = status?.info || {};
   const lastActive = status?.last_active || {};
+  const tokenData = tokens?.data || {};
+  const tokenTotals = tokenData?.totals || {};
+  const tokenByModel = tokenData?.by_model || {};
 
   const filteredJobs = useMemo(() => {
     const list = Array.isArray(cron?.jobs) ? cron.jobs : [];
@@ -571,6 +577,7 @@ export default function Home() {
           <TabsList>
             <TabsTrigger value="overview">Overview</TabsTrigger>
             <TabsTrigger value="cron">Cron</TabsTrigger>
+            <TabsTrigger value="tokens">Tokens</TabsTrigger>
             <TabsTrigger value="sessions">Sessions</TabsTrigger>
             <TabsTrigger value="traces">Traces</TabsTrigger>
             <TabsTrigger value="raw">Raw</TabsTrigger>
@@ -686,11 +693,22 @@ export default function Home() {
                         <span className="text-muted-foreground">inbound queue</span>
                         <code>{headerInfo?.inbound_queue_enabled ? `on (${headerInfo?.inbound_queue_max_concurrency || 1})` : "off"}</code>
                       </div>
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-muted-foreground">token total</span>
+                        <code>{tokenTotals?.total_tokens ?? 0}</code>
+                      </div>
                     </div>
                   </div>
                 </div>
               </CardContent>
             </Card>
+          </TabsContent>
+
+          <TabsContent value="tokens" className="mt-4 space-y-4">
+            <TokensView
+              tokenData={tokenData}
+              onDownload={() => download("state/token_usage.json")}
+            />
           </TabsContent>
 
           <TabsContent value="cron" className="mt-4 space-y-4">
@@ -1018,7 +1036,7 @@ export default function Home() {
               </CardHeader>
               <CardContent>
                 <ScrollArea className="h-[520px] rounded-md border p-3">
-                  <pre className="text-xs">{pretty({ health, ready, status, cron, runs, tools, sessions })}</pre>
+                  <pre className="text-xs">{pretty({ health, ready, status, cron, tokens, runs, tools, sessions })}</pre>
                 </ScrollArea>
               </CardContent>
             </Card>
@@ -1384,6 +1402,142 @@ export default function Home() {
         </DialogContent>
       </Dialog>
     </div>
+  );
+}
+
+function TokensView({
+  tokenData,
+  onDownload,
+}: {
+  tokenData: any;
+  onDownload: () => void;
+}) {
+  const [q, setQ] = useState("");
+
+  const totals = tokenData?.totals || {};
+  const byModel = tokenData?.by_model || {};
+
+  const rows = useMemo(() => {
+    const entries = Object.entries(byModel || {}) as [string, any][];
+    const query = q.trim().toLowerCase();
+    const filtered = query
+      ? entries.filter(([name]) => String(name).toLowerCase().includes(query))
+      : entries;
+    return filtered
+      .map(([model, v]) => {
+        const obj = v || {};
+        return {
+          model,
+          requests: Number(obj.requests || 0),
+          prompt: Number(obj.prompt_tokens || 0),
+          completion: Number(obj.completion_tokens || 0),
+          total: Number(obj.total_tokens || 0),
+          lastSeen: String(obj.last_seen || ""),
+        };
+      })
+      .sort((a, b) => b.total - a.total);
+  }, [byModel, q]);
+
+  return (
+    <Card>
+      <CardHeader className="pb-2">
+        <CardTitle className="text-sm">Token usage</CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        <div className="grid gap-3 md:grid-cols-3">
+          <div className="rounded-md border p-3">
+            <div className="text-xs font-medium text-muted-foreground">Totals</div>
+            <div className="mt-2 flex flex-col gap-1 text-sm">
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-muted-foreground">requests</span>
+                <code>{totals?.requests ?? 0}</code>
+              </div>
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-muted-foreground">prompt</span>
+                <code>{totals?.prompt_tokens ?? 0}</code>
+              </div>
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-muted-foreground">completion</span>
+                <code>{totals?.completion_tokens ?? 0}</code>
+              </div>
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-muted-foreground">total</span>
+                <code>{totals?.total_tokens ?? 0}</code>
+              </div>
+            </div>
+          </div>
+
+          <div className="rounded-md border p-3 md:col-span-2">
+            <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
+              <div className="text-xs font-medium text-muted-foreground">By model</div>
+              <div className="flex flex-wrap items-center gap-2">
+                <div className="relative">
+                  <Search className="pointer-events-none absolute left-2 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+                  <Input
+                    value={q}
+                    onChange={(e) => setQ(e.target.value)}
+                    placeholder="Filter models…"
+                    className="h-9 w-[220px] pl-8"
+                  />
+                </div>
+                <Button variant="outline" onClick={onDownload}>
+                  <Download className="mr-2 h-4 w-4" />
+                  token_usage.json
+                </Button>
+              </div>
+            </div>
+            <ScrollArea className="mt-3 h-[360px] rounded-md border">
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>Model</TableHead>
+                    <TableHead className="text-right">Requests</TableHead>
+                    <TableHead className="text-right">Prompt</TableHead>
+                    <TableHead className="text-right">Completion</TableHead>
+                    <TableHead className="text-right">Total</TableHead>
+                    <TableHead>Last seen</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {rows.map((r) => (
+                    <TableRow key={r.model}>
+                      <TableCell className="align-top">
+                        <code className="break-all">{r.model}</code>
+                      </TableCell>
+                      <TableCell className="align-top text-right text-xs">
+                        <code>{r.requests}</code>
+                      </TableCell>
+                      <TableCell className="align-top text-right text-xs">
+                        <code>{r.prompt}</code>
+                      </TableCell>
+                      <TableCell className="align-top text-right text-xs">
+                        <code>{r.completion}</code>
+                      </TableCell>
+                      <TableCell className="align-top text-right text-xs">
+                        <code>{r.total}</code>
+                      </TableCell>
+                      <TableCell className="align-top text-xs text-muted-foreground">
+                        <code>{fmtISO(r.lastSeen)}</code>
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                  {!rows.length ? (
+                    <TableRow>
+                      <TableCell colSpan={6} className="text-sm text-muted-foreground">
+                        No models matched.
+                      </TableCell>
+                    </TableRow>
+                  ) : null}
+                </TableBody>
+              </Table>
+            </ScrollArea>
+            <div className="mt-2 text-xs text-muted-foreground">
+              persisted in <code>state/token_usage.json</code> (workspace)
+            </div>
+          </div>
+        </div>
+      </CardContent>
+    </Card>
   );
 }
 

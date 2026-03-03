@@ -176,6 +176,7 @@ func (h *ConsoleHandler) serveAPI(w http.ResponseWriter, r *http.Request) {
 				"/api/console/status",
 				"/api/console/state",
 				"/api/console/cron",
+				"/api/console/tokens",
 				"/api/console/sessions",
 				"/api/console/runs",
 				"/api/console/tools",
@@ -195,6 +196,10 @@ func (h *ConsoleHandler) serveAPI(w http.ResponseWriter, r *http.Request) {
 
 	case "cron":
 		h.handleCron(w, r)
+		return
+
+	case "tokens":
+		h.handleTokens(w, r)
 		return
 
 	case "sessions":
@@ -307,6 +312,40 @@ func (h *ConsoleHandler) handleCron(w http.ResponseWriter, _ *http.Request) {
 		"path":    filepath.ToSlash(filepath.Join("cron", "jobs.json")),
 		"version": store.Version,
 		"jobs":    store.Jobs,
+	})
+}
+
+func (h *ConsoleHandler) handleTokens(w http.ResponseWriter, _ *http.Request) {
+	storePath := filepath.Join(h.workspace, "state", "token_usage.json")
+
+	data, err := os.ReadFile(storePath)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			h.writeJSON(w, http.StatusOK, map[string]any{
+				"ok":   true,
+				"path": filepath.ToSlash(filepath.Join("state", "token_usage.json")),
+				"data": map[string]any{
+					"version":  1,
+					"totals":   map[string]any{"requests": 0, "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+					"by_model": map[string]any{},
+				},
+			})
+			return
+		}
+		h.writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+
+	var payload any
+	if err := json.Unmarshal(data, &payload); err != nil {
+		h.writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": "invalid token usage json"})
+		return
+	}
+
+	h.writeJSON(w, http.StatusOK, map[string]any{
+		"ok":   true,
+		"path": filepath.ToSlash(filepath.Join("state", "token_usage.json")),
+		"data": payload,
 	})
 }
 

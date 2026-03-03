@@ -137,6 +137,7 @@ curl -sS http://127.0.0.1:18790/health
 Gateway 内置一个**只读 Console**（Web UI，Next.js + shadcn/ui），用于自助查看：
 - `last_active` / 基础状态
 - cron jobs（`cron/jobs.json`）
+- token usage（`state/token_usage.json`，按模型统计累计 tokens）
 - sessions 列表（`sessions/*.json`）
 - run trace / tool trace（`<workspace>/.picoclaw/audit/**/events.jsonl`）
 - 健康检查链接（`/health` / `/ready`）
@@ -158,6 +159,7 @@ Console 对应的 JSON API（便于脚本化）：
 ```bash
 curl -sS http://127.0.0.1:18790/api/console/status
 curl -sS http://127.0.0.1:18790/api/console/cron
+curl -sS http://127.0.0.1:18790/api/console/tokens
 curl -sS http://127.0.0.1:18790/api/console/sessions
 curl -sS http://127.0.0.1:18790/api/console/runs
 curl -sS http://127.0.0.1:18790/api/console/tools

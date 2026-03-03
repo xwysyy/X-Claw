@@ -44,6 +44,9 @@ type AgentLoop struct {
 	fallback       *providers.FallbackChain
 	channelManager *channels.Manager
 	mediaStore     media.MediaStore
+
+	tokenUsageMu     sync.Mutex
+	tokenUsageStores map[string]*tokenUsageStore // workspace → store
 }
 
 // processOptions configures how a message is processed
@@ -128,12 +131,37 @@ func NewAgentLoop(cfg *config.Config, msgBus *bus.MessageBus, provider providers
 		taskLedger:  taskLedger,
 		summarizing: sync.Map{},
 		fallback:    fallbackChain,
+
+		tokenUsageStores: make(map[string]*tokenUsageStore),
 	}
 
 	// Register shared tools to all agents.
 	registerSharedTools(cfg, msgBus, registry, provider, al, taskLedger)
 
 	return al
+}
+
+func (al *AgentLoop) tokenUsageStore(workspace string) *tokenUsageStore {
+	if al == nil {
+		return nil
+	}
+	workspace = strings.TrimSpace(workspace)
+	if workspace == "" {
+		return nil
+	}
+
+	al.tokenUsageMu.Lock()
+	defer al.tokenUsageMu.Unlock()
+
+	if al.tokenUsageStores == nil {
+		al.tokenUsageStores = make(map[string]*tokenUsageStore)
+	}
+	if s, ok := al.tokenUsageStores[workspace]; ok && s != nil {
+		return s
+	}
+	s := newTokenUsageStore(workspace)
+	al.tokenUsageStores[workspace] = s
+	return s
 }
 
 // registerSharedTools registers tools that are shared across all agents (web, message, spawn).
@@ -988,23 +1016,23 @@ func (al *AgentLoop) runAgentLoop(ctx context.Context, agent *AgentInstance, opt
 		runTrace.recordEnd(iteration, finalContent)
 	}
 
-		// Optional notification hook (ROADMAP.md:1226): when a run completes in an
-		// internal channel (system/cli/subagent), notify the last active external chat.
-		if al.cfg != nil && al.cfg.Notify.OnTaskComplete && constants.IsInternalChannel(opts.Channel) {
-			trimmedResult := strings.TrimSpace(finalContent)
-			// Quiet-by-default: allow background tasks (cron/heartbeat/etc.) to opt out
-			// by returning a deterministic sentinel.
-			if trimmedResult == "" ||
-				strings.EqualFold(trimmedResult, "NO_UPDATE") ||
-				strings.EqualFold(trimmedResult, "HEARTBEAT_OK") {
-				return finalContent, nil
-			}
+	// Optional notification hook (ROADMAP.md:1226): when a run completes in an
+	// internal channel (system/cli/subagent), notify the last active external chat.
+	if al.cfg != nil && al.cfg.Notify.OnTaskComplete && constants.IsInternalChannel(opts.Channel) {
+		trimmedResult := strings.TrimSpace(finalContent)
+		// Quiet-by-default: allow background tasks (cron/heartbeat/etc.) to opt out
+		// by returning a deterministic sentinel.
+		if trimmedResult == "" ||
+			strings.EqualFold(trimmedResult, "NO_UPDATE") ||
+			strings.EqualFold(trimmedResult, "HEARTBEAT_OK") {
+			return finalContent, nil
+		}
 
-			targetCh, targetChat := al.LastActive()
-			if strings.TrimSpace(targetCh) != "" && strings.TrimSpace(targetChat) != "" && !constants.IsInternalChannel(targetCh) {
-				notifyText := fmt.Sprintf(
-					"✅ Task complete\n\nTask:\n%s\n\nResult:\n%s",
-					utils.Truncate(strings.TrimSpace(opts.UserMessage), 240),
+		targetCh, targetChat := al.LastActive()
+		if strings.TrimSpace(targetCh) != "" && strings.TrimSpace(targetChat) != "" && !constants.IsInternalChannel(targetCh) {
+			notifyText := fmt.Sprintf(
+				"✅ Task complete\n\nTask:\n%s\n\nResult:\n%s",
+				utils.Truncate(strings.TrimSpace(opts.UserMessage), 240),
 				utils.Truncate(strings.TrimSpace(finalContent), 1200),
 			)
 			if tool, ok := agent.Tools.Get("message"); ok && tool != nil {
@@ -1157,9 +1185,10 @@ func (al *AgentLoop) runLLMIteration(
 
 		// Call LLM with fallback chain if candidates are configured.
 		var response *providers.LLMResponse
+		var usedModel string
 		var err error
 
-		callLLM := func() (*providers.LLMResponse, error) {
+		callLLM := func() (*providers.LLMResponse, string, error) {
 			if len(agent.Candidates) > 1 && al.fallback != nil {
 				fbResult, fbErr := al.fallback.Execute(ctx, agent.Candidates,
 					func(ctx context.Context, provider, model string) (*providers.LLMResponse, error) {
@@ -1171,26 +1200,27 @@ func (al *AgentLoop) runLLMIteration(
 					},
 				)
 				if fbErr != nil {
-					return nil, fbErr
+					return nil, "", fbErr
 				}
 				if fbResult.Provider != "" && len(fbResult.Attempts) > 0 {
 					logger.InfoCF("agent", fmt.Sprintf("Fallback: succeeded with %s/%s after %d attempts",
 						fbResult.Provider, fbResult.Model, len(fbResult.Attempts)+1),
 						map[string]any{"agent_id": agent.ID, "iteration": iteration})
 				}
-				return fbResult.Response, nil
+				return fbResult.Response, strings.TrimSpace(fbResult.Model), nil
 			}
-			return agent.Provider.Chat(ctx, messages, providerToolDefs, agent.Model, map[string]any{
+			resp, err := agent.Provider.Chat(ctx, messages, providerToolDefs, agent.Model, map[string]any{
 				"max_tokens":       agent.MaxTokens,
 				"temperature":      agent.Temperature,
 				"prompt_cache_key": agent.ID,
 			})
+			return resp, strings.TrimSpace(agent.Model), err
 		}
 
 		// Retry loop for context/token errors
 		maxRetries := 2
 		for retry := 0; retry <= maxRetries; retry++ {
-			response, err = callLLM()
+			response, usedModel, err = callLLM()
 			if err == nil {
 				break
 			}
@@ -1275,6 +1305,9 @@ func (al *AgentLoop) runLLMIteration(
 		}
 
 		if trace != nil {
+			if strings.TrimSpace(usedModel) != "" {
+				trace.model = strings.TrimSpace(usedModel)
+			}
 			toolNames := make([]string, 0, len(response.ToolCalls))
 			for _, tc := range response.ToolCalls {
 				toolNames = append(toolNames, tc.Name)
@@ -1285,11 +1318,20 @@ func (al *AgentLoop) runLLMIteration(
 
 		// Log token usage if available
 		if response.Usage != nil {
+			if strings.TrimSpace(usedModel) == "" {
+				usedModel = agent.Model
+			}
+
+			// Persist token usage counters (best-effort, durable).
+			if store := al.tokenUsageStore(agent.Workspace); store != nil {
+				store.Record(usedModel, response.Usage)
+			}
+
 			logger.InfoCF("agent", "Token usage",
 				map[string]any{
 					"agent_id":          agent.ID,
 					"iteration":         iteration,
-					"model":             agent.Model,
+					"model":             usedModel,
 					"prompt_tokens":     response.Usage.PromptTokens,
 					"completion_tokens": response.Usage.CompletionTokens,
 					"total_tokens":      response.Usage.TotalTokens,
@@ -1630,12 +1672,12 @@ func (al *AgentLoop) maybeSummarize(agent *AgentInstance, sessionKey, channel, c
 				ctx, cancel := al.safeCompactionContext()
 				defer cancel()
 
-					if agent != nil && agent.Compaction.NotifyUser && al.bus != nil && channel != "" && chatID != "" && !constants.IsInternalChannel(channel) {
-						if err := al.bus.PublishOutbound(ctx, bus.OutboundMessage{
-							Channel: channel,
-							ChatID:  chatID,
-							Content: "Memory threshold reached. Optimizing conversation history...",
-						}); err != nil {
+				if agent != nil && agent.Compaction.NotifyUser && al.bus != nil && channel != "" && chatID != "" && !constants.IsInternalChannel(channel) {
+					if err := al.bus.PublishOutbound(ctx, bus.OutboundMessage{
+						Channel: channel,
+						ChatID:  chatID,
+						Content: "Memory threshold reached. Optimizing conversation history...",
+					}); err != nil {
 						logger.WarnCF("agent", "Failed to publish compaction notice (best-effort)", map[string]any{
 							"channel": channel,
 							"chat_id": chatID,
