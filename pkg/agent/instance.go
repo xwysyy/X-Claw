@@ -163,7 +163,11 @@ func NewAgentInstance(
 	allowWritePaths := compilePatterns(cfg.Tools.AllowWritePaths)
 
 	toolsRegistry := tools.NewToolRegistry()
-	toolsRegistry.Register(tools.NewReadFileTool(workspace, readRestrict, allowReadPaths))
+	readFileTool := tools.NewReadFileTool(workspace, readRestrict, allowReadPaths)
+	if cfg != nil && cfg.Limits.Enabled && cfg.Limits.MaxReadFileBytes > 0 {
+		readFileTool.SetMaxReadBytes(cfg.Limits.MaxReadFileBytes)
+	}
+	toolsRegistry.Register(readFileTool)
 	toolsRegistry.Register(tools.NewDocumentTextTool(workspace, readRestrict))
 	toolsRegistry.Register(tools.NewWriteFileTool(workspace, restrict, allowWritePaths))
 	toolsRegistry.Register(tools.NewListDirTool(workspace, readRestrict, allowReadPaths))

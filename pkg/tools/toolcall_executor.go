@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/sipeed/picoclaw/pkg/auditlog"
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/providers"
@@ -71,6 +72,10 @@ type ToolCallExecutionOptions struct {
 	Parallel ToolCallParallelConfig
 
 	Trace ToolTraceOptions
+
+	// MaxResultChars truncates ToolResult.ForLLM/ForUser to cap memory usage.
+	// 0 disables truncation.
+	MaxResultChars int
 
 	// ErrorTemplate optionally wraps tool errors into a structured, self-recoverable
 	// template for the LLM (A3 in ROADMAP.md).
@@ -310,6 +315,12 @@ func ExecuteToolCalls(
 			returnedResult = policy.redactToolResultForReturn(toolResult)
 		}
 
+		// Resource budget: cap result sizes to keep history/trace memory stable.
+		if opts.MaxResultChars > 0 {
+			truncateToolResult(auditResult, opts.MaxResultChars)
+			truncateToolResult(returnedResult, opts.MaxResultChars)
+		}
+
 		// Phase E2: record idempotent execution output for replay on resume.
 		if executed && policy != nil && !policy.policyDisabled() && policy.store != nil && policy.shouldBeIdempotent(tc.Name) && strings.TrimSpace(opts.RunID) != "" && idempotencyKey != "" && policyDecision != string(toolPolicyDecisionIdempotentReplay) {
 			if err := policy.store.RecordExecution(opts.RunID, opts.SessionKey, tc.Name, tc.ID, idempotencyKey, argsPreview, auditResult); err != nil {
@@ -323,6 +334,47 @@ func ExecuteToolCalls(
 		duration := time.Since(start)
 		if traceWriter != nil {
 			traceWriter.RecordEnd(start.Add(duration), opts.Iteration, tc, redactedArgsJSON, auditResult, duration, policyDecision, policyReason, policyTimeoutMS, idempotencyKey)
+		}
+
+		// Phase H3 (ROADMAP_V2.md): append-only operational audit log (best-effort).
+		if strings.TrimSpace(opts.Workspace) != "" {
+			errText := ""
+			if auditResult != nil && auditResult.Err != nil {
+				errText = auditResult.Err.Error()
+			}
+			resultPreview := ""
+			if auditResult != nil {
+				resultPreview = utils.Truncate(strings.TrimSpace(auditResult.ForLLM), 400)
+			}
+			if errText == "" && auditResult != nil && auditResult.IsError {
+				errText = resultPreview
+			}
+			auditlog.Record(opts.Workspace, auditlog.Event{
+				Type: "tool.executed",
+
+				Source: strings.TrimSpace(scope),
+
+				RunID:      strings.TrimSpace(opts.RunID),
+				SessionKey: strings.TrimSpace(opts.SessionKey),
+				Channel:    strings.TrimSpace(opts.Channel),
+				ChatID:     strings.TrimSpace(opts.ChatID),
+				SenderID:   strings.TrimSpace(opts.SenderID),
+				Iteration:  opts.Iteration,
+
+				Tool:       strings.TrimSpace(tc.Name),
+				ToolCallID: strings.TrimSpace(tc.ID),
+
+				PolicyDecision:  strings.TrimSpace(policyDecision),
+				PolicyReason:    utils.Truncate(strings.TrimSpace(policyReason), 400),
+				PolicyTimeoutMS: policyTimeoutMS,
+				IdempotencyKey:  strings.TrimSpace(idempotencyKey),
+
+				DurationMS:    duration.Milliseconds(),
+				IsError:       auditResult != nil && auditResult.IsError,
+				Error:         utils.Truncate(strings.TrimSpace(errText), 1200),
+				ArgsPreview:   utils.Truncate(strings.TrimSpace(argsPreview), 500),
+				ResultPreview: resultPreview,
+			})
 		}
 
 		results[idx] = ToolCallExecution{
@@ -422,6 +474,18 @@ func ExecuteToolCalls(
 	})
 
 	return results
+}
+
+func truncateToolResult(result *ToolResult, maxChars int) {
+	if result == nil || maxChars <= 0 {
+		return
+	}
+	if strings.TrimSpace(result.ForLLM) != "" {
+		result.ForLLM = utils.Truncate(result.ForLLM, maxChars)
+	}
+	if strings.TrimSpace(result.ForUser) != "" {
+		result.ForUser = utils.Truncate(result.ForUser, maxChars)
+	}
 }
 
 func normalizeParallelMode(mode string) string {

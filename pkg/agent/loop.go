@@ -18,6 +18,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/sipeed/picoclaw/pkg/auditlog"
 	"github.com/sipeed/picoclaw/pkg/bus"
 	"github.com/sipeed/picoclaw/pkg/channels"
 	"github.com/sipeed/picoclaw/pkg/config"
@@ -170,6 +171,9 @@ func NewAgentLoop(cfg *config.Config, msgBus *bus.MessageBus, provider providers
 	// Register shared tools to all agents.
 	registerSharedTools(cfg, msgBus, registry, provider, al, taskLedger)
 
+	// Phase H3: append-only operational audit log.
+	al.configureAuditLog(cfg)
+
 	return al
 }
 
@@ -192,6 +196,29 @@ func (al *AgentLoop) SetConfig(cfg *config.Config) {
 	al.cfgMu.Lock()
 	al.cfg = cfg
 	al.cfgMu.Unlock()
+
+	// Keep audit log writers in sync with hot-reloaded config.
+	al.configureAuditLog(cfg)
+}
+
+func (al *AgentLoop) configureAuditLog(cfg *config.Config) {
+	if al == nil || cfg == nil {
+		return
+	}
+
+	// Configure for the "main" workspace path as well as each agent workspace
+	// (multi-agent setups may use per-agent workspaces).
+	auditlog.Configure(cfg.WorkspacePath(), cfg.AuditLog)
+	if al.registry == nil {
+		return
+	}
+	for _, agentID := range al.registry.ListAgentIDs() {
+		agent, ok := al.registry.GetAgent(agentID)
+		if !ok || agent == nil {
+			continue
+		}
+		auditlog.Configure(agent.Workspace, cfg.AuditLog)
+	}
 }
 
 // ReloadMCPTools refreshes MCP servers and re-registers tools into each agent registry.
@@ -451,6 +478,9 @@ func registerSharedTools(
 				IncludeAvailableTools: true,
 			},
 		)
+		if cfg != nil {
+			subagentManager.SetResourceBudgets(cfg.Limits)
+		}
 		subagentManager.SetTools(agent.Tools)
 		agent.SubagentManager = subagentManager
 		subagentManager.SetExecutionResolver(func(targetAgentID string) (tools.SubagentExecutionConfig, error) {
@@ -1520,6 +1550,19 @@ func (al *AgentLoop) runLLMIteration(
 	var finalContent string
 	recentToolCalls := make([]toolCallSignature, 0, 32) // for loop detection
 	totalPromptTokens, totalCompletionTokens := 0, 0    // cumulative token tracking
+	runStart := time.Now()
+	toolCallsUsed := 0
+
+	cfg := al.Config()
+	limitsEnabled := cfg != nil && cfg.Limits.Enabled
+	maxWallTimeSeconds := 0
+	maxToolCallsPerRun := 0
+	maxToolResultChars := 0
+	if limitsEnabled {
+		maxWallTimeSeconds = cfg.Limits.MaxRunWallTimeSeconds
+		maxToolCallsPerRun = cfg.Limits.MaxToolCallsPerRun
+		maxToolResultChars = cfg.Limits.MaxToolResultChars
+	}
 
 	for iteration < agent.MaxIterations {
 		iteration++
@@ -1530,6 +1573,23 @@ func (al *AgentLoop) runLLMIteration(
 				"iteration": iteration,
 				"max":       agent.MaxIterations,
 			})
+
+		// Resource budgets (soft limits): stop runaway runs before they trigger OOM kills.
+		if maxWallTimeSeconds > 0 && time.Since(runStart) > time.Duration(maxWallTimeSeconds)*time.Second {
+			finalContent = fmt.Sprintf(
+				"RESOURCE_BUDGET_EXCEEDED: run wall time exceeded (%ds). "+
+					"Please narrow the task or split it into smaller steps.",
+				maxWallTimeSeconds,
+			)
+			logger.WarnCF("agent", "Resource budget exceeded (wall time)", map[string]any{
+				"agent_id":          agent.ID,
+				"iteration":         iteration,
+				"wall_time_seconds": int(time.Since(runStart).Seconds()),
+				"tool_calls_used":   toolCallsUsed,
+				"session_key":       opts.SessionKey,
+			})
+			break
+		}
 
 		// Build tool definitions
 		providerToolDefs := agent.Tools.ToProviderDefs()
@@ -1816,6 +1876,24 @@ func (al *AgentLoop) runLLMIteration(
 			normalizedToolCalls = append(normalizedToolCalls, providers.NormalizeToolCall(tc))
 		}
 
+		// Resource budget: cap total executed tool calls (soft limit).
+		if maxToolCallsPerRun > 0 && toolCallsUsed+len(normalizedToolCalls) > maxToolCallsPerRun {
+			finalContent = fmt.Sprintf(
+				"RESOURCE_BUDGET_EXCEEDED: tool call budget exceeded (%d). "+
+					"Please narrow the request or reduce the number of tools used.",
+				maxToolCallsPerRun,
+			)
+			logger.WarnCF("agent", "Resource budget exceeded (tool calls)", map[string]any{
+				"agent_id":           agent.ID,
+				"iteration":          iteration,
+				"tool_calls_used":    toolCallsUsed,
+				"tool_calls_pending": len(normalizedToolCalls),
+				"tool_calls_budget":  maxToolCallsPerRun,
+				"session_key":        opts.SessionKey,
+			})
+			break
+		}
+
 		// Update working state with LLM's reasoning as next-action hint
 		if reasoning := strings.TrimSpace(response.Content); reasoning != "" {
 			if ws := opts.WorkingState; ws != nil {
@@ -1993,6 +2071,7 @@ func (al *AgentLoop) runLLMIteration(
 			LogScope:               "agent",
 			Parallel:               parallelCfg,
 			Trace:                  traceOpts,
+			MaxResultChars:         maxToolResultChars,
 			ErrorTemplate:          errorTemplateOpts,
 			// Create async callback for tools that implement AsyncTool.
 			// Following openclaw's design, async tools do not send results directly
@@ -2012,6 +2091,7 @@ func (al *AgentLoop) runLLMIteration(
 				}
 			},
 		})
+		toolCallsUsed += len(toolExecutions)
 		if trace != nil {
 			trace.recordToolBatch(iteration, toolExecutions)
 		}

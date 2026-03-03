@@ -57,6 +57,8 @@ type Config struct {
 	Tools         ToolsConfig         `json:"tools"`
 	Heartbeat     HeartbeatConfig     `json:"heartbeat"`
 	Orchestration OrchestrationConfig `json:"orchestration,omitempty"`
+	Limits        LimitsConfig        `json:"limits,omitempty"`
+	AuditLog      AuditLogConfig      `json:"audit_log,omitempty"`
 	Audit         AuditConfig         `json:"audit,omitempty"`
 }
 
@@ -529,6 +531,58 @@ type AuditSupervisorConfig struct {
 	MaxTokens   int               `json:"max_tokens,omitempty"  env:"PICOCLAW_AUDIT_SUPERVISOR_MAX_TOKENS"`
 }
 
+// LimitsConfig defines soft resource budgets enforced by the agent/runtime.
+//
+// Phase H1 in ROADMAP_V2.md:
+// - Per-run budgets: tool calls, wall time, output size.
+// - Per-tool guards: file read limits, tool output truncation.
+//
+// These limits are intended to prevent runaway memory growth / OOM kills while
+// keeping behavior predictable. They are "soft" in the sense that exceeding a
+// limit results in a controlled, user-visible stop rather than a hard crash.
+type LimitsConfig struct {
+	Enabled bool `json:"enabled,omitempty" env:"PICOCLAW_LIMITS_ENABLED"`
+
+	// MaxRunWallTimeSeconds caps a single agent run (one inbound message -> one response).
+	// 0 disables the wall-time budget.
+	MaxRunWallTimeSeconds int `json:"max_run_wall_time_seconds,omitempty" env:"PICOCLAW_LIMITS_MAX_RUN_WALL_TIME_SECONDS"`
+
+	// MaxToolCallsPerRun caps the total number of tool calls executed in one run.
+	// 0 disables the budget.
+	MaxToolCallsPerRun int `json:"max_tool_calls_per_run,omitempty" env:"PICOCLAW_LIMITS_MAX_TOOL_CALLS_PER_RUN"`
+
+	// MaxToolResultChars truncates ToolResult.ForLLM/ForUser to control memory usage.
+	// 0 disables truncation.
+	MaxToolResultChars int `json:"max_tool_result_chars,omitempty" env:"PICOCLAW_LIMITS_MAX_TOOL_RESULT_CHARS"`
+
+	// MaxReadFileBytes limits how many bytes the read_file tool reads from disk by default.
+	// 0 means use the built-in default.
+	MaxReadFileBytes int `json:"max_read_file_bytes,omitempty" env:"PICOCLAW_LIMITS_MAX_READ_FILE_BYTES"`
+}
+
+// AuditLogConfig controls the append-only operational audit log (JSONL).
+//
+// Phase H3 in ROADMAP_V2.md:
+// - Record major runtime events (tool executions, config reload, estop changes, etc.)
+// - Support rotation to cap disk usage
+//
+// This is intentionally separate from `audit` (task auditing / supervisor checks).
+type AuditLogConfig struct {
+	Enabled bool `json:"enabled,omitempty" env:"PICOCLAW_AUDIT_LOG_ENABLED"`
+
+	// Dir overrides the default audit log directory.
+	// When empty, defaults to: <workspace>/.picoclaw/audit
+	Dir string `json:"dir,omitempty" env:"PICOCLAW_AUDIT_LOG_DIR"`
+
+	// MaxBytes rotates the log when it grows beyond this size.
+	// 0 disables size-based rotation.
+	MaxBytes int `json:"max_bytes,omitempty" env:"PICOCLAW_AUDIT_LOG_MAX_BYTES"`
+
+	// MaxBackups controls how many rotated files to keep (best-effort).
+	// 0 means keep all rotated files.
+	MaxBackups int `json:"max_backups,omitempty" env:"PICOCLAW_AUDIT_LOG_MAX_BACKUPS"`
+}
+
 type ProvidersConfig struct {
 	Anthropic     ProviderConfig       `json:"anthropic"`
 	OpenAI        OpenAIProviderConfig `json:"openai"`
@@ -822,19 +876,19 @@ type MediaCleanupConfig struct {
 }
 
 type ToolsConfig struct {
-	AllowReadPaths  []string           `json:"allow_read_paths"  env:"PICOCLAW_TOOLS_ALLOW_READ_PATHS"`
-	AllowWritePaths []string           `json:"allow_write_paths" env:"PICOCLAW_TOOLS_ALLOW_WRITE_PATHS"`
-	Web             WebToolsConfig     `json:"web"`
-	MCP             MCPConfig          `json:"mcp,omitempty"`
-	Policy          ToolPolicyConfig   `json:"policy,omitempty"`
-	PlanMode        PlanModeConfig     `json:"plan_mode,omitempty"`
-	Estop           EstopConfig        `json:"estop,omitempty"`
-	Trace           ToolTraceConfig    `json:"trace,omitempty"`
+	AllowReadPaths  []string                `json:"allow_read_paths"  env:"PICOCLAW_TOOLS_ALLOW_READ_PATHS"`
+	AllowWritePaths []string                `json:"allow_write_paths" env:"PICOCLAW_TOOLS_ALLOW_WRITE_PATHS"`
+	Web             WebToolsConfig          `json:"web"`
+	MCP             MCPConfig               `json:"mcp,omitempty"`
+	Policy          ToolPolicyConfig        `json:"policy,omitempty"`
+	PlanMode        PlanModeConfig          `json:"plan_mode,omitempty"`
+	Estop           EstopConfig             `json:"estop,omitempty"`
+	Trace           ToolTraceConfig         `json:"trace,omitempty"`
 	ErrorTemplate   ToolErrorTemplateConfig `json:"error_template,omitempty"`
-	Cron            CronToolsConfig    `json:"cron"`
-	Exec            ExecConfig         `json:"exec"`
-	Skills          SkillsToolsConfig  `json:"skills"`
-	MediaCleanup    MediaCleanupConfig `json:"media_cleanup"`
+	Cron            CronToolsConfig         `json:"cron"`
+	Exec            ExecConfig              `json:"exec"`
+	Skills          SkillsToolsConfig       `json:"skills"`
+	MediaCleanup    MediaCleanupConfig      `json:"media_cleanup"`
 }
 
 // ToolPolicyConfig defines a centralized policy/middleware for all tool calls.

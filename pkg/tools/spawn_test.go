@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"testing"
@@ -34,17 +35,13 @@ func (p *blockingProvider) GetDefaultModel() string {
 }
 
 func extractSpawnTaskID(msg string) (string, error) {
-	marker := "(id: "
-	idx := strings.LastIndex(msg, marker)
-	if idx < 0 {
-		return "", fmt.Errorf("task id marker not found")
+	var payload struct {
+		TaskID string `json:"task_id"`
 	}
-	rest := msg[idx+len(marker):]
-	end := strings.Index(rest, ")")
-	if end < 0 {
-		return "", fmt.Errorf("task id closing bracket not found")
+	if err := json.Unmarshal([]byte(msg), &payload); err != nil {
+		return "", fmt.Errorf("decode spawn payload: %w", err)
 	}
-	id := strings.TrimSpace(rest[:end])
+	id := strings.TrimSpace(payload.TaskID)
 	if id == "" {
 		return "", fmt.Errorf("empty task id")
 	}
@@ -105,6 +102,16 @@ func TestSpawnTool_Execute_ValidTask(t *testing.T) {
 	}
 	if !result.Async {
 		t.Error("SpawnTool should return async result")
+	}
+	if strings.TrimSpace(result.ForLLM) == "" {
+		t.Fatal("SpawnTool should return structured JSON payload")
+	}
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(result.ForLLM), &payload); err != nil {
+		t.Fatalf("spawn payload is not JSON: %v", err)
+	}
+	if payload["status"] != "accepted" {
+		t.Fatalf("spawn status = %v, want %q", payload["status"], "accepted")
 	}
 }
 

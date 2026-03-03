@@ -2,10 +2,12 @@ package httpapi
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
 
+	"github.com/sipeed/picoclaw/pkg/auditlog"
 	"github.com/sipeed/picoclaw/pkg/tools"
 )
 
@@ -167,6 +169,19 @@ func (h *EstopHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			_ = json.NewEncoder(w).Encode(estopResponse{OK: false, Error: err.Error(), Workspace: h.workspace})
 			return
 		}
+
+		auditlog.Record(h.workspace, auditlog.Event{
+			Type:   "estop.set",
+			Source: "httpapi",
+			Note: fmt.Sprintf(
+				"mode=%s blocked_domains=%d frozen_tools=%d frozen_prefixes=%d note=%q",
+				saved.Mode,
+				len(saved.BlockedDomains),
+				len(saved.FrozenTools),
+				len(saved.FrozenPrefixes),
+				strings.TrimSpace(saved.Note),
+			),
+		})
 
 		w.WriteHeader(http.StatusOK)
 		_ = json.NewEncoder(w).Encode(estopResponse{

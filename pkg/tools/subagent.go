@@ -2,7 +2,9 @@ package tools
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -27,6 +29,52 @@ type SubagentTask struct {
 	Result        string
 	Created       int64
 	Depth         int
+}
+
+type SubagentToolCallArtifact struct {
+	Iteration  int    `json:"iteration,omitempty"`
+	ToolName   string `json:"tool_name,omitempty"`
+	ToolCallID string `json:"tool_call_id,omitempty"`
+	IsError    bool   `json:"is_error,omitempty"`
+	DurationMS int64  `json:"duration_ms,omitempty"`
+}
+
+type SubagentArtifacts struct {
+	ToolsUsed       []string                   `json:"tools_used,omitempty"`
+	Files           []string                   `json:"files,omitempty"`
+	ToolCalls       []SubagentToolCallArtifact `json:"tool_calls,omitempty"`
+	Errors          int                        `json:"errors,omitempty"`
+	DurationMSTotal int64                      `json:"duration_ms_total,omitempty"`
+	EvidenceDropped int                        `json:"evidence_dropped,omitempty"`
+}
+
+// SubagentResultPayload is the stable JSON contract returned by subagent/spawn results
+// and used for system announcements (Phase F2 in ROADMAP_V2.md).
+type SubagentResultPayload struct {
+	Kind   string `json:"kind"`
+	Status string `json:"status"`
+	Mode   string `json:"mode,omitempty"`
+
+	TaskID       string `json:"task_id,omitempty"`
+	ParentTaskID string `json:"parent_task_id,omitempty"`
+	Label        string `json:"label,omitempty"`
+	Task         string `json:"task,omitempty"`
+	AgentID      string `json:"agent_id,omitempty"`
+
+	SessionKey string `json:"session_key,omitempty"`
+	RunID      string `json:"run_id,omitempty"`
+
+	OriginChannel string `json:"origin_channel,omitempty"`
+	OriginChatID  string `json:"origin_chat_id,omitempty"`
+
+	Depth      int `json:"depth,omitempty"`
+	Iterations int `json:"iterations,omitempty"`
+
+	Summary string `json:"summary,omitempty"`
+	Error   string `json:"error,omitempty"`
+
+	Artifacts SubagentArtifacts `json:"artifacts,omitempty"`
+	Warnings  []string          `json:"warnings,omitempty"`
 }
 
 type SubagentExecutionConfig struct {
@@ -87,6 +135,11 @@ type SubagentManager struct {
 	toolPolicyTags    map[string]string
 	toolTrace         ToolTraceOptions
 	toolErrorTemplate ToolErrorTemplateOptions
+
+	// Resource budgets (soft limits).
+	maxToolCallsPerRun int
+	maxWallTimeSeconds int
+	maxToolResultChars int
 }
 
 func NewSubagentManager(
@@ -159,6 +212,24 @@ func (sm *SubagentManager) SetLimits(maxConcurrent, maxTasks, maxDepth int) {
 	sm.maxDepth = maxDepth
 }
 
+// SetResourceBudgets configures soft resource limits for subagent runs.
+// Passing a disabled limits config clears all budgets.
+func (sm *SubagentManager) SetResourceBudgets(limits config.LimitsConfig) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
+	if !limits.Enabled {
+		sm.maxToolCallsPerRun = 0
+		sm.maxWallTimeSeconds = 0
+		sm.maxToolResultChars = 0
+		return
+	}
+
+	sm.maxToolCallsPerRun = limits.MaxToolCallsPerRun
+	sm.maxWallTimeSeconds = limits.MaxRunWallTimeSeconds
+	sm.maxToolResultChars = limits.MaxToolResultChars
+}
+
 // SetToolCallParallelism configures in-batch parallel tool execution for
 // subagent tool loops.
 func (sm *SubagentManager) SetToolCallParallelism(
@@ -201,6 +272,108 @@ func clonePolicyOverrides(src map[string]string) map[string]string {
 		dst[k] = v
 	}
 	return dst
+}
+
+const (
+	defaultSubagentMaxSummaryChars = 12000
+	defaultSubagentMaxTaskChars    = 2000
+
+	defaultSubagentMaxEvidenceItems = 40
+	defaultSubagentMaxArtifactFiles = 60
+)
+
+func truncateText(value string, maxChars int) string {
+	value = strings.TrimSpace(value)
+	if maxChars <= 0 || len(value) <= maxChars {
+		return value
+	}
+	if maxChars <= 3 {
+		return value[:maxChars]
+	}
+	return value[:maxChars] + "..."
+}
+
+func buildSubagentArtifacts(trace []ToolExecutionTrace) SubagentArtifacts {
+	toolSet := make(map[string]struct{})
+	fileSet := make(map[string]struct{})
+
+	artifacts := SubagentArtifacts{
+		ToolCalls: make([]SubagentToolCallArtifact, 0, min(len(trace), defaultSubagentMaxEvidenceItems)),
+	}
+
+	for _, tr := range trace {
+		name := strings.TrimSpace(tr.ToolName)
+		if name != "" {
+			toolSet[name] = struct{}{}
+		}
+
+		if tr.IsError {
+			artifacts.Errors++
+		}
+		if tr.DurationMS > 0 {
+			artifacts.DurationMSTotal += tr.DurationMS
+		}
+
+		// Best-effort artifact extraction: common "path" argument for file tools.
+		if tr.Arguments != nil {
+			if raw, ok := tr.Arguments["path"].(string); ok {
+				path := strings.TrimSpace(raw)
+				if path != "" {
+					fileSet[path] = struct{}{}
+				}
+			}
+		}
+
+		if len(artifacts.ToolCalls) < defaultSubagentMaxEvidenceItems {
+			artifacts.ToolCalls = append(artifacts.ToolCalls, SubagentToolCallArtifact{
+				Iteration:  tr.Iteration,
+				ToolName:   name,
+				ToolCallID: strings.TrimSpace(tr.ToolCallID),
+				IsError:    tr.IsError,
+				DurationMS: tr.DurationMS,
+			})
+		} else {
+			artifacts.EvidenceDropped++
+		}
+	}
+
+	if len(toolSet) > 0 {
+		toolsUsed := make([]string, 0, len(toolSet))
+		for name := range toolSet {
+			toolsUsed = append(toolsUsed, name)
+		}
+		sort.Strings(toolsUsed)
+		artifacts.ToolsUsed = toolsUsed
+	}
+
+	if len(fileSet) > 0 {
+		files := make([]string, 0, len(fileSet))
+		for path := range fileSet {
+			files = append(files, path)
+		}
+		sort.Strings(files)
+		if len(files) > defaultSubagentMaxArtifactFiles {
+			files = files[:defaultSubagentMaxArtifactFiles]
+		}
+		artifacts.Files = files
+	}
+
+	return artifacts
+}
+
+func marshalSubagentPayload(payload SubagentResultPayload) (string, error) {
+	data, err := json.MarshalIndent(payload, "", "  ")
+	if err != nil {
+		return "", err
+	}
+	return string(data), nil
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 func (sm *SubagentManager) Spawn(
@@ -368,6 +541,9 @@ Working directory: %s`, sm.workspace)
 	policyTags := copyStringMap(sm.toolPolicyTags)
 	traceOpts := sm.toolTrace
 	errorTemplateOpts := sm.toolErrorTemplate
+	maxToolCallsPerRun := sm.maxToolCallsPerRun
+	maxWallTimeSeconds := sm.maxWallTimeSeconds
+	maxToolResultChars := sm.maxToolResultChars
 	sm.mu.RUnlock()
 
 	execution := SubagentExecutionConfig{
@@ -378,16 +554,49 @@ Working directory: %s`, sm.workspace)
 	if resolver != nil {
 		resolved, err := resolver(task.AgentID)
 		if err != nil {
-			snapshot := sm.updateTaskAndEmit(task, SubagentTaskFailed, "failed", fmt.Sprintf("Error: %v", err), err.Error())
+			summary := truncateText(fmt.Sprintf("Error: %v", err), defaultSubagentMaxSummaryChars)
+			snapshot := sm.updateTaskAndEmit(task, SubagentTaskFailed, "failed", summary, err.Error())
+
+			payload := SubagentResultPayload{
+				Kind:   "subagent_result",
+				Status: "failed",
+				Mode:   "async",
+
+				TaskID:       snapshot.ID,
+				ParentTaskID: snapshot.ParentTaskID,
+				Label:        snapshot.Label,
+				Task:         truncateText(snapshot.Task, defaultSubagentMaxTaskChars),
+				AgentID:      snapshot.AgentID,
+
+				SessionKey: snapshot.SessionKey,
+				RunID:      snapshot.RunID,
+
+				OriginChannel: snapshot.OriginChannel,
+				OriginChatID:  snapshot.OriginChatID,
+				Depth:         snapshot.Depth,
+
+				Summary:   summary,
+				Error:     truncateText(err.Error(), 1200),
+				Artifacts: buildSubagentArtifacts(nil),
+			}
+
+			payloadJSON, marshalErr := marshalSubagentPayload(payload)
+			if marshalErr != nil {
+				payloadJSON = summary
+			}
+
 			if callback != nil {
 				callback(ctx, &ToolResult{
-					ForLLM:  task.Result,
+					ForLLM:  payloadJSON,
+					ForUser: summary,
+					Silent:  true,
 					IsError: true,
+					Async:   true,
 					Err:     err,
 				})
 			}
 			if sm.bus != nil {
-				sm.publishTaskAnnouncement(snapshot, task.Status)
+				sm.publishTaskAnnouncement(snapshot, task.Status, payloadJSON)
 			}
 			sm.cancelTaskTree(task.ID)
 			return
@@ -422,6 +631,9 @@ Working directory: %s`, sm.workspace)
 		Model:                    execution.Model,
 		Tools:                    execution.Tools,
 		MaxIterations:            maxIter,
+		MaxToolCallsPerRun:       maxToolCallsPerRun,
+		MaxWallTimeSeconds:       maxWallTimeSeconds,
+		MaxToolResultChars:       maxToolResultChars,
 		LLMOptions:               llmOptions,
 		SenderID:                 fmt.Sprintf("subagent:%s", task.ID),
 		Workspace:                sm.workspace,
@@ -441,26 +653,103 @@ Working directory: %s`, sm.workspace)
 	var result *ToolResult
 	var snapshot SubagentTask
 	var trace []ToolExecutionTrace
+	iterations := 0
 	if loopResult != nil {
 		trace = loopResult.Trace
+		iterations = loopResult.Iterations
 	}
 
 	if err != nil {
 		status, eventType := "failed", SubagentTaskFailed
 		errResult := fmt.Sprintf("Error: %v", err)
+		errText := err.Error()
 		if ctx.Err() != nil {
 			status, eventType = "cancelled", SubagentTaskCancelled
 			errResult = "Task cancelled during execution"
+			errText = strings.TrimSpace(errResult)
 		}
-		snapshot = sm.updateTaskAndEmit(task, eventType, status, errResult, err.Error(), trace)
-		result = &ToolResult{ForLLM: task.Result, IsError: true, Err: err}
+		summary := truncateText(errResult, defaultSubagentMaxSummaryChars)
+		snapshot = sm.updateTaskAndEmit(task, eventType, status, summary, errText, trace)
+
+		payload := SubagentResultPayload{
+			Kind:   "subagent_result",
+			Status: status,
+			Mode:   "async",
+
+			TaskID:       snapshot.ID,
+			ParentTaskID: snapshot.ParentTaskID,
+			Label:        snapshot.Label,
+			Task:         truncateText(snapshot.Task, defaultSubagentMaxTaskChars),
+			AgentID:      snapshot.AgentID,
+
+			SessionKey: snapshot.SessionKey,
+			RunID:      snapshot.RunID,
+
+			OriginChannel: snapshot.OriginChannel,
+			OriginChatID:  snapshot.OriginChatID,
+			Depth:         snapshot.Depth,
+			Iterations:    iterations,
+
+			Summary:   summary,
+			Error:     truncateText(errText, 1200),
+			Artifacts: buildSubagentArtifacts(trace),
+		}
+		payloadJSON, marshalErr := marshalSubagentPayload(payload)
+		if marshalErr != nil {
+			payloadJSON = summary
+		}
+
+		result = &ToolResult{
+			ForLLM:  payloadJSON,
+			ForUser: summary,
+			Silent:  true,
+			IsError: true,
+			Async:   true,
+			Err:     err,
+		}
 		sm.cancelTaskTree(task.ID)
 	} else {
-		snapshot = sm.updateTaskAndEmit(task, SubagentTaskCompleted, "completed", loopResult.Content, "", trace)
+		summary := ""
+		if loopResult != nil {
+			summary = loopResult.Content
+		}
+		summary = truncateText(summary, defaultSubagentMaxSummaryChars)
+
+		snapshot = sm.updateTaskAndEmit(task, SubagentTaskCompleted, "completed", summary, "", trace)
+
+		payload := SubagentResultPayload{
+			Kind:   "subagent_result",
+			Status: "completed",
+			Mode:   "async",
+
+			TaskID:       snapshot.ID,
+			ParentTaskID: snapshot.ParentTaskID,
+			Label:        snapshot.Label,
+			Task:         truncateText(snapshot.Task, defaultSubagentMaxTaskChars),
+			AgentID:      snapshot.AgentID,
+
+			SessionKey: snapshot.SessionKey,
+			RunID:      snapshot.RunID,
+
+			OriginChannel: snapshot.OriginChannel,
+			OriginChatID:  snapshot.OriginChatID,
+			Depth:         snapshot.Depth,
+			Iterations:    iterations,
+
+			Summary:   summary,
+			Artifacts: buildSubagentArtifacts(trace),
+		}
+		payloadJSON, marshalErr := marshalSubagentPayload(payload)
+		if marshalErr != nil {
+			payloadJSON = summary
+		}
+
 		result = &ToolResult{
-			ForLLM: fmt.Sprintf("Subagent '%s' completed (iterations: %d): %s",
-				task.Label, loopResult.Iterations, loopResult.Content),
-			ForUser: loopResult.Content,
+			ForLLM:  payloadJSON,
+			ForUser: summary,
+			Silent:  true,
+			IsError: false,
+			Async:   true,
 		}
 	}
 
@@ -471,7 +760,11 @@ Working directory: %s`, sm.workspace)
 
 	// Send announce message back to main agent
 	if sm.bus != nil {
-		sm.publishTaskAnnouncement(snapshot, task.Status)
+		announceBody := snapshot.Result
+		if result != nil && strings.TrimSpace(result.ForLLM) != "" {
+			announceBody = result.ForLLM
+		}
+		sm.publishTaskAnnouncement(snapshot, task.Status, announceBody)
 	}
 }
 
@@ -530,7 +823,7 @@ func (sm *SubagentManager) updateTaskAndEmit(task *SubagentTask, eventType Subag
 	return snapshot
 }
 
-func (sm *SubagentManager) publishTaskAnnouncement(task SubagentTask, status string) {
+func (sm *SubagentManager) publishTaskAnnouncement(task SubagentTask, status string, result string) {
 	if sm.bus == nil {
 		return
 	}
@@ -540,7 +833,11 @@ func (sm *SubagentManager) publishTaskAnnouncement(task SubagentTask, status str
 	} else if status == "cancelled" {
 		state = "cancelled"
 	}
-	announceContent := fmt.Sprintf("Task '%s' %s.\n\nResult:\n%s", task.Label, state, task.Result)
+	label := strings.TrimSpace(task.Label)
+	if label == "" {
+		label = strings.TrimSpace(task.ID)
+	}
+	announceContent := fmt.Sprintf("Task '%s' %s.\n\nResult:\n%s", label, state, strings.TrimSpace(result))
 	pubCtx, pubCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer pubCancel()
 	_ = sm.bus.PublishInbound(pubCtx, bus.InboundMessage{
@@ -616,7 +913,7 @@ func (t *SubagentTool) Name() string {
 func (t *SubagentTool) Description() string {
 	return "Execute a subagent task synchronously and wait for the result. " +
 		"Input: task (string, required) — clear description of what the subagent should do. " +
-		"Output: full execution result with iteration count and content. " +
+		"Output: structured JSON (summary + artifacts + iteration count). " +
 		"Use this when you need the subagent's result before continuing your own work. " +
 		"The subagent runs with its own tools and context. " +
 		"For background tasks where you don't need to wait, use the 'spawn' tool instead."
@@ -688,6 +985,9 @@ func (t *SubagentTool) Execute(ctx context.Context, args map[string]any) *ToolRe
 	policyTags := copyStringMap(sm.toolPolicyTags)
 	traceOpts := sm.toolTrace
 	errorTemplateOpts := sm.toolErrorTemplate
+	maxToolCallsPerRun := sm.maxToolCallsPerRun
+	maxWallTimeSeconds := sm.maxWallTimeSeconds
+	maxToolResultChars := sm.maxToolResultChars
 	execution := SubagentExecutionConfig{
 		Provider: sm.provider,
 		Model:    sm.defaultModel,
@@ -739,6 +1039,9 @@ func (t *SubagentTool) Execute(ctx context.Context, args map[string]any) *ToolRe
 		Model:                    execution.Model,
 		Tools:                    execution.Tools,
 		MaxIterations:            maxIter,
+		MaxToolCallsPerRun:       maxToolCallsPerRun,
+		MaxWallTimeSeconds:       maxWallTimeSeconds,
+		MaxToolResultChars:       maxToolResultChars,
 		LLMOptions:               llmOptions,
 		SenderID:                 fmt.Sprintf("subagent:sync:%s", toolExecutionSenderID(ctx)),
 		Workspace:                sm.workspace,
@@ -754,30 +1057,65 @@ func (t *SubagentTool) Execute(ctx context.Context, args map[string]any) *ToolRe
 		ParallelToolsMode:        parallelToolsMode,
 		ToolPolicyOverrides:      toolPolicyOverrides,
 	}, messages, originChannel, originChatID)
+	status := "completed"
+	errText := ""
+	content := ""
+	iterations := 0
+	trace := []ToolExecutionTrace(nil)
+	if loopResult != nil {
+		content = loopResult.Content
+		iterations = loopResult.Iterations
+		trace = loopResult.Trace
+	}
 	if err != nil {
-		return ErrorResult(fmt.Sprintf("Subagent execution failed: %v", err)).WithError(err)
+		status = "failed"
+		errText = err.Error()
+		if strings.TrimSpace(content) == "" {
+			content = fmt.Sprintf("Error: %v", err)
+		}
 	}
 
-	// ForUser: Brief summary for user (truncated if too long)
-	userContent := loopResult.Content
+	// ForUser: brief summary for user (truncated if too long)
+	userContent := content
 	maxUserLen := 500
 	if len(userContent) > maxUserLen {
 		userContent = userContent[:maxUserLen] + "..."
 	}
 
-	// ForLLM: Full execution details
 	labelStr := label
 	if labelStr == "" {
 		labelStr = "(unnamed)"
 	}
-	llmContent := fmt.Sprintf("Subagent task completed:\nLabel: %s\nIterations: %d\nResult: %s",
-		labelStr, loopResult.Iterations, loopResult.Content)
+
+	payload := SubagentResultPayload{
+		Kind:   "subagent_result",
+		Status: status,
+		Mode:   "sync",
+
+		Label:   labelStr,
+		Task:    truncateText(task, defaultSubagentMaxTaskChars),
+		AgentID: strings.TrimSpace(agentID),
+
+		Iterations: iterations,
+		Summary:    truncateText(content, defaultSubagentMaxSummaryChars),
+		Error:      truncateText(errText, 1200),
+		Artifacts:  buildSubagentArtifacts(trace),
+	}
+
+	payloadJSON, marshalErr := marshalSubagentPayload(payload)
+	if marshalErr != nil {
+		if status == "failed" {
+			return ErrorResult(fmt.Sprintf("Subagent execution failed: %v", err)).WithError(err)
+		}
+		return ErrorResult(fmt.Sprintf("failed to encode subagent payload: %v", marshalErr)).WithError(marshalErr)
+	}
 
 	return &ToolResult{
-		ForLLM:  llmContent,
+		ForLLM:  payloadJSON,
 		ForUser: userContent,
 		Silent:  false,
-		IsError: false,
+		IsError: status != "completed",
 		Async:   false,
+		Err:     err,
 	}
 }

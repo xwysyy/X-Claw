@@ -14,6 +14,7 @@ import (
 
 	"github.com/sipeed/picoclaw/cmd/picoclaw/internal"
 	"github.com/sipeed/picoclaw/pkg/agent"
+	"github.com/sipeed/picoclaw/pkg/auditlog"
 	"github.com/sipeed/picoclaw/pkg/bus"
 	"github.com/sipeed/picoclaw/pkg/channels"
 	_ "github.com/sipeed/picoclaw/pkg/channels/dingtalk"
@@ -299,6 +300,18 @@ func (svc *gatewayServices) reload(ctx context.Context, reason string) error {
 		"config_path":      path,
 		"enabled_channels": svc.channelManager.GetEnabledChannels(),
 		"listen":           addr,
+	})
+
+	auditlog.Record(newCfg.WorkspacePath(), auditlog.Event{
+		Type:   "config.reload",
+		Source: "gateway",
+		Note: fmt.Sprintf(
+			"reason=%s path=%s listen=%s channels=%v",
+			strings.TrimSpace(reason),
+			strings.TrimSpace(path),
+			strings.TrimSpace(addr),
+			svc.channelManager.GetEnabledChannels(),
+		),
 	})
 
 	return nil

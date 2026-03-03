@@ -10,6 +10,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"time"
 
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/logger"
@@ -22,8 +23,14 @@ type ToolLoopConfig struct {
 	Model         string
 	Tools         *ToolRegistry
 	MaxIterations int
-	LLMOptions    map[string]any
-	SenderID      string
+
+	// Resource budgets (soft limits). 0 disables each budget.
+	MaxToolCallsPerRun int
+	MaxWallTimeSeconds int
+	MaxToolResultChars int
+
+	LLMOptions map[string]any
+	SenderID   string
 
 	// Workspace/session/run metadata are used for tool trace + tool policy features.
 	Workspace  string
@@ -77,6 +84,8 @@ func RunToolLoop(
 	var finalContent string
 	trace := make([]ToolExecutionTrace, 0)
 	precedingTools := make([]string, 0, 16) // accumulates tool names across iterations
+	runStart := time.Now()
+	toolCallsUsed := 0
 
 	// Loop detection state
 	type toolloopCallSig struct{ name, args string }
@@ -91,6 +100,21 @@ func RunToolLoop(
 				"iteration": iteration,
 				"max":       config.MaxIterations,
 			})
+
+		// Resource budget: wall-time guard (soft limit).
+		if config.MaxWallTimeSeconds > 0 && time.Since(runStart) > time.Duration(config.MaxWallTimeSeconds)*time.Second {
+			finalContent = fmt.Sprintf(
+				"RESOURCE_BUDGET_EXCEEDED: run wall time exceeded (%ds). "+
+					"Please narrow the task or split it into smaller steps.",
+				config.MaxWallTimeSeconds,
+			)
+			logger.WarnCF("toolloop", "Resource budget exceeded (wall time)", map[string]any{
+				"iteration":         iteration,
+				"wall_time_seconds": int(time.Since(runStart).Seconds()),
+				"tool_calls_used":   toolCallsUsed,
+			})
+			break
+		}
 
 		// 1. Build tool definitions
 		var providerToolDefs []providers.ToolDefinition
@@ -128,6 +152,22 @@ func RunToolLoop(
 		normalizedToolCalls := make([]providers.ToolCall, 0, len(response.ToolCalls))
 		for _, tc := range response.ToolCalls {
 			normalizedToolCalls = append(normalizedToolCalls, providers.NormalizeToolCall(tc))
+		}
+
+		// Resource budget: cap total executed tool calls (soft limit).
+		if config.MaxToolCallsPerRun > 0 && toolCallsUsed+len(normalizedToolCalls) > config.MaxToolCallsPerRun {
+			finalContent = fmt.Sprintf(
+				"RESOURCE_BUDGET_EXCEEDED: tool call budget exceeded (%d). "+
+					"Please narrow the request or reduce the number of tools used.",
+				config.MaxToolCallsPerRun,
+			)
+			logger.WarnCF("toolloop", "Resource budget exceeded (tool calls)", map[string]any{
+				"iteration":          iteration,
+				"tool_calls_used":    toolCallsUsed,
+				"tool_calls_pending": len(normalizedToolCalls),
+				"tool_calls_budget":  config.MaxToolCallsPerRun,
+			})
+			break
 		}
 
 		// 5. Log tool calls
@@ -220,19 +260,20 @@ func RunToolLoop(
 		}
 
 		toolExecutions := ExecuteToolCalls(ctx, config.Tools, normalizedToolCalls, ToolCallExecutionOptions{
-			Channel:       channel,
-			ChatID:        chatID,
-			SenderID:      config.SenderID,
-			Workspace:     config.Workspace,
-			SessionKey:    config.SessionKey,
-			RunID:         config.RunID,
-			IsResume:      config.IsResume,
-			Policy:        config.Policy,
-			PolicyTags:    config.PolicyTags,
-			Iteration:     iteration,
-			LogScope:      "toolloop",
-			Trace:         config.Trace,
-			ErrorTemplate: config.ErrorTemplate,
+			Channel:        channel,
+			ChatID:         chatID,
+			SenderID:       config.SenderID,
+			Workspace:      config.Workspace,
+			SessionKey:     config.SessionKey,
+			RunID:          config.RunID,
+			IsResume:       config.IsResume,
+			Policy:         config.Policy,
+			PolicyTags:     config.PolicyTags,
+			Iteration:      iteration,
+			LogScope:       "toolloop",
+			Trace:          config.Trace,
+			MaxResultChars: config.MaxToolResultChars,
+			ErrorTemplate:  config.ErrorTemplate,
 			Parallel: ToolCallParallelConfig{
 				Enabled:             config.ToolCallsParallelEnabled,
 				MaxConcurrency:      config.MaxToolCallConcurrency,
@@ -240,6 +281,7 @@ func RunToolLoop(
 				ToolPolicyOverrides: config.ToolPolicyOverrides,
 			},
 		})
+		toolCallsUsed += len(toolExecutions)
 
 		for _, executed := range toolExecutions {
 			toolResult := executed.Result

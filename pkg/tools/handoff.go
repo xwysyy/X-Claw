@@ -58,6 +58,11 @@ func (t *HandoffTool) Parameters() map[string]any {
 			},
 		},
 		"required": []string{"reason"},
+		// Either agent_name or agent_id is required.
+		"anyOf": []any{
+			map[string]any{"required": []string{"agent_name"}},
+			map[string]any{"required": []string{"agent_id"}},
+		},
 	}
 }
 
@@ -114,23 +119,41 @@ func (t *HandoffTool) Execute(ctx context.Context, args map[string]any) *ToolRes
 		return ErrorResult("handoff failed: session manager not configured")
 	}
 
+	warnings := make([]string, 0, 2)
+	if strings.EqualFold(strings.TrimSpace(agentID), strings.TrimSpace(t.currentAgentID)) {
+		warnings = append(warnings, "handoff target is the same as current agent (no-op)")
+	}
+
 	t.sessions.SetActiveAgentID(sessionKey, agentID)
 	if err := t.sessions.Save(sessionKey); err != nil {
 		return ErrorResult(fmt.Sprintf("handoff failed: cannot persist session state: %v", err)).WithError(err)
 	}
 
+	effectiveAt := "next_turn"
+	if takeover {
+		effectiveAt = "this_run"
+	}
+
 	payload := map[string]any{
-		"status":      "ok",
-		"from":        t.currentAgentID,
-		"to":          agentID,
-		"reason":      reason,
-		"takeover":    takeover,
-		"session_key": sessionKey,
+		"status":       "ok",
+		"from_agent":   t.currentAgentID,
+		"to_agent":     agentID,
+		"reason":       reason,
+		"takeover":     takeover,
+		"effective_at": effectiveAt,
+		"session_key":  sessionKey,
+		"warnings":     warnings,
 	}
 
 	data, err := json.MarshalIndent(payload, "", "  ")
 	if err != nil {
 		return ErrorResult(fmt.Sprintf("failed to encode handoff payload: %v", err))
 	}
-	return SilentResult(string(data))
+	return &ToolResult{
+		ForLLM:  string(data),
+		ForUser: fmt.Sprintf("Handoff: %s → %s (%s).", strings.TrimSpace(t.currentAgentID), agentID, effectiveAt),
+		Silent:  true,
+		IsError: false,
+		Async:   false,
+	}
 }

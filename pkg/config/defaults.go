@@ -512,6 +512,19 @@ func DefaultConfig() *Config {
 			ParallelToolsMode:         "read_only_only",
 			ToolParallelOverrides:     map[string]string{},
 		},
+		Limits: LimitsConfig{
+			Enabled:               true,
+			MaxRunWallTimeSeconds: 300,
+			MaxToolCallsPerRun:    80,
+			MaxToolResultChars:    30000,
+			MaxReadFileBytes:      30000,
+		},
+		AuditLog: AuditLogConfig{
+			Enabled:    true,
+			Dir:        "",
+			MaxBytes:   5 * 1024 * 1024,
+			MaxBackups: 10,
+		},
 		Audit: AuditConfig{
 			Enabled:                     false,
 			IntervalMinutes:             30,

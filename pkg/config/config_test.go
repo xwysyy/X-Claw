@@ -417,6 +417,29 @@ func TestDefaultConfig_OrchestrationAndAuditDefaults(t *testing.T) {
 	if cfg.Audit.Supervisor.Model == nil || cfg.Audit.Supervisor.Model.Primary == "" {
 		t.Fatal("Audit supervisor model should be initialized in defaults")
 	}
+
+	if !cfg.Limits.Enabled {
+		t.Fatal("limits.enabled should be true by default")
+	}
+	if cfg.Limits.MaxRunWallTimeSeconds <= 0 {
+		t.Fatalf("limits.max_run_wall_time_seconds = %d, want > 0", cfg.Limits.MaxRunWallTimeSeconds)
+	}
+	if cfg.Limits.MaxToolCallsPerRun <= 0 {
+		t.Fatalf("limits.max_tool_calls_per_run = %d, want > 0", cfg.Limits.MaxToolCallsPerRun)
+	}
+	if cfg.Limits.MaxToolResultChars <= 0 {
+		t.Fatalf("limits.max_tool_result_chars = %d, want > 0", cfg.Limits.MaxToolResultChars)
+	}
+	if cfg.Limits.MaxReadFileBytes <= 0 {
+		t.Fatalf("limits.max_read_file_bytes = %d, want > 0", cfg.Limits.MaxReadFileBytes)
+	}
+
+	if !cfg.AuditLog.Enabled {
+		t.Fatal("audit_log.enabled should be true by default")
+	}
+	if cfg.AuditLog.MaxBytes <= 0 {
+		t.Fatalf("audit_log.max_bytes = %d, want > 0", cfg.AuditLog.MaxBytes)
+	}
 }
 
 func TestConfig_UnmarshalAuditAndOrchestration(t *testing.T) {

@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"sync"
 	"testing"
@@ -209,15 +210,28 @@ func TestSubagentTool_Execute_Success(t *testing.T) {
 		t.Errorf("ForUser should contain task completion, got: %s", result.ForUser)
 	}
 
-	// Verify ForLLM contains full details
+	// Verify ForLLM is structured JSON payload
 	if result.ForLLM == "" {
 		t.Error("ForLLM should contain full details")
 	}
-	if !strings.Contains(result.ForLLM, "haiku-task") {
-		t.Errorf("ForLLM should contain label 'haiku-task', got: %s", result.ForLLM)
+	var payload SubagentResultPayload
+	if err := json.Unmarshal([]byte(result.ForLLM), &payload); err != nil {
+		t.Fatalf("ForLLM should be JSON payload, decode failed: %v\npayload=%s", err, result.ForLLM)
 	}
-	if !strings.Contains(result.ForLLM, "Task completed:") {
-		t.Errorf("ForLLM should contain task result, got: %s", result.ForLLM)
+	if payload.Kind != "subagent_result" {
+		t.Fatalf("payload.kind = %q, want %q", payload.Kind, "subagent_result")
+	}
+	if payload.Status != "completed" {
+		t.Fatalf("payload.status = %q, want %q", payload.Status, "completed")
+	}
+	if payload.Mode != "sync" {
+		t.Fatalf("payload.mode = %q, want %q", payload.Mode, "sync")
+	}
+	if payload.Label != "haiku-task" {
+		t.Fatalf("payload.label = %q, want %q", payload.Label, "haiku-task")
+	}
+	if !strings.Contains(payload.Summary, "Task completed:") {
+		t.Fatalf("payload.summary should contain task result, got: %q", payload.Summary)
 	}
 }
 
@@ -239,9 +253,12 @@ func TestSubagentTool_Execute_NoLabel(t *testing.T) {
 		t.Errorf("Expected success without label, got error: %s", result.ForLLM)
 	}
 
-	// ForLLM should show (unnamed) for missing label
-	if !strings.Contains(result.ForLLM, "(unnamed)") {
-		t.Errorf("ForLLM should show '(unnamed)' for missing label, got: %s", result.ForLLM)
+	var payload SubagentResultPayload
+	if err := json.Unmarshal([]byte(result.ForLLM), &payload); err != nil {
+		t.Fatalf("decode subagent payload: %v", err)
+	}
+	if payload.Label != "(unnamed)" {
+		t.Fatalf("payload.label = %q, want %q", payload.Label, "(unnamed)")
 	}
 }
 

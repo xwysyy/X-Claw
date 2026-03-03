@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -85,7 +86,8 @@ func isWithinWorkspace(candidate, workspace string) bool {
 }
 
 type ReadFileTool struct {
-	fs fileSystem
+	fs           fileSystem
+	maxReadBytes int
 }
 
 func NewReadFileTool(workspace string, restrict bool, allowPaths ...[]*regexp.Regexp) *ReadFileTool {
@@ -93,7 +95,26 @@ func NewReadFileTool(workspace string, restrict bool, allowPaths ...[]*regexp.Re
 	if len(allowPaths) > 0 {
 		patterns = allowPaths[0]
 	}
-	return &ReadFileTool{fs: buildFs(workspace, restrict, patterns)}
+	return &ReadFileTool{
+		fs:           buildFs(workspace, restrict, patterns),
+		maxReadBytes: 30_000,
+	}
+}
+
+// SetMaxReadBytes overrides the default read cap for the read_file tool.
+// It is a safety guard to prevent OOM when reading unexpectedly large files.
+func (t *ReadFileTool) SetMaxReadBytes(maxBytes int) {
+	if t == nil {
+		return
+	}
+	if maxBytes <= 0 {
+		return
+	}
+	// Hard cap to avoid foot-guns.
+	if maxBytes > 5*1024*1024 {
+		maxBytes = 5 * 1024 * 1024
+	}
+	t.maxReadBytes = maxBytes
 }
 
 func (t *ReadFileTool) Name() string {
@@ -119,6 +140,14 @@ func (t *ReadFileTool) Parameters() map[string]any {
 				"type":        "string",
 				"description": "Path to the file to read",
 			},
+			"offset": map[string]any{
+				"type":        "integer",
+				"description": "Optional byte offset to start reading from (default 0).",
+			},
+			"max_bytes": map[string]any{
+				"type":        "integer",
+				"description": "Optional maximum bytes to read (default is a safety cap).",
+			},
 		},
 		"required": []string{"path"},
 	}
@@ -130,11 +159,102 @@ func (t *ReadFileTool) Execute(ctx context.Context, args map[string]any) *ToolRe
 		return ErrorResult("path is required")
 	}
 
-	content, err := t.fs.ReadFile(path)
-	if err != nil {
-		return ErrorResult(err.Error())
+	if t == nil || t.fs == nil {
+		return ErrorResult("filesystem is not configured")
 	}
-	return NewToolResult(string(content))
+
+	maxBytes := t.maxReadBytes
+	if maxBytes <= 0 {
+		maxBytes = 30_000
+	}
+	// Allow override per-call, but keep reasonable bounds.
+	parsedMax, err := parseOptionalIntArg(args, "max_bytes", maxBytes, 200, 5*1024*1024)
+	if err != nil {
+		return ErrorResult(err.Error()).WithError(err)
+	}
+	maxBytes = parsedMax
+
+	offset, err := parseOptionalIntArg(args, "offset", 0, 0, 1_000_000_000)
+	if err != nil {
+		return ErrorResult(err.Error()).WithError(err)
+	}
+
+	fi, statErr := t.fs.Stat(path)
+	if statErr != nil || fi == nil {
+		// Fallback: read the first maxBytes as best-effort.
+		buf, readErr := t.fs.ReadFileRange(path, int64(offset), int64(maxBytes))
+		if readErr != nil {
+			return ErrorResult(readErr.Error()).WithError(readErr)
+		}
+		return NewToolResult(string(buf))
+	}
+
+	size := fi.Size()
+	if size < 0 {
+		size = 0
+	}
+	off := int64(offset)
+	if off > size {
+		return ErrorResult(fmt.Sprintf("offset out of range: offset=%d, file_size=%d", off, size))
+	}
+
+	remaining := size - off
+	if remaining <= int64(maxBytes) {
+		buf, readErr := t.fs.ReadFileRange(path, off, remaining)
+		if readErr != nil {
+			return ErrorResult(readErr.Error()).WithError(readErr)
+		}
+		return NewToolResult(string(buf))
+	}
+
+	// Truncated: if offset is non-zero, return a straight slice from offset.
+	if off > 0 {
+		buf, readErr := t.fs.ReadFileRange(path, off, int64(maxBytes))
+		if readErr != nil {
+			return ErrorResult(readErr.Error()).WithError(readErr)
+		}
+		note := fmt.Sprintf(
+			"\n...\n[read_file truncated: file_size=%d bytes, offset=%d, max_bytes=%d]\n...\n",
+			size,
+			off,
+			maxBytes,
+		)
+		return NewToolResult(string(buf) + note)
+	}
+
+	// Truncated from the beginning: return head + tail (keeps useful context).
+	headBytes := maxBytes * 7 / 10
+	tailBytes := maxBytes * 2 / 10
+	if headBytes <= 0 {
+		headBytes = maxBytes
+		tailBytes = 0
+	}
+	if headBytes+tailBytes > maxBytes {
+		tailBytes = maxBytes - headBytes
+		if tailBytes < 0 {
+			tailBytes = 0
+		}
+	}
+
+	head, readErr := t.fs.ReadFileRange(path, 0, int64(headBytes))
+	if readErr != nil {
+		return ErrorResult(readErr.Error()).WithError(readErr)
+	}
+
+	tail := []byte(nil)
+	if tailBytes > 0 && size > int64(tailBytes) {
+		tail, readErr = t.fs.ReadFileRange(path, size-int64(tailBytes), int64(tailBytes))
+		if readErr != nil {
+			return ErrorResult(readErr.Error()).WithError(readErr)
+		}
+	}
+
+	marker := fmt.Sprintf(
+		"\n...\n[read_file truncated: file_size=%d bytes, max_bytes=%d]\n...\n",
+		size,
+		maxBytes,
+	)
+	return NewToolResult(string(head) + marker + string(tail))
 }
 
 type WriteFileTool struct {
@@ -263,6 +383,8 @@ func formatDirEntries(entries []os.DirEntry) *ToolResult {
 // unrestricted (host filesystem) and sandbox (os.Root) implementations to share the same polymorphic interface.
 type fileSystem interface {
 	ReadFile(path string) ([]byte, error)
+	ReadFileRange(path string, offset, length int64) ([]byte, error)
+	Stat(path string) (os.FileInfo, error)
 	WriteFile(path string, data []byte) error
 	ReadDir(path string) ([]os.DirEntry, error)
 }
@@ -282,6 +404,53 @@ func (h *hostFs) ReadFile(path string) ([]byte, error) {
 		return nil, fmt.Errorf("failed to read file: %w", err)
 	}
 	return content, nil
+}
+
+func (h *hostFs) ReadFileRange(path string, offset, length int64) ([]byte, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, fmt.Errorf("failed to read file: file not found: %w", err)
+		}
+		if os.IsPermission(err) {
+			return nil, fmt.Errorf("failed to read file: access denied: %w", err)
+		}
+		return nil, fmt.Errorf("failed to read file: %w", err)
+	}
+	defer f.Close()
+
+	if offset < 0 {
+		return nil, fmt.Errorf("failed to read file: invalid offset %d", offset)
+	}
+	if offset > 0 {
+		if _, err := f.Seek(offset, io.SeekStart); err != nil {
+			return nil, fmt.Errorf("failed to read file: seek failed: %w", err)
+		}
+	}
+	if length <= 0 {
+		return []byte{}, nil
+	}
+
+	limited := io.LimitReader(f, length)
+	content, err := io.ReadAll(limited)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read file: %w", err)
+	}
+	return content, nil
+}
+
+func (h *hostFs) Stat(path string) (os.FileInfo, error) {
+	fi, err := os.Stat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, fmt.Errorf("failed to stat file: file not found: %w", err)
+		}
+		if os.IsPermission(err) {
+			return nil, fmt.Errorf("failed to stat file: access denied: %w", err)
+		}
+		return nil, fmt.Errorf("failed to stat file: %w", err)
+	}
+	return fi, nil
 }
 
 func (h *hostFs) ReadDir(path string) ([]os.DirEntry, error) {
@@ -337,6 +506,67 @@ func (r *sandboxFs) ReadFile(path string) ([]byte, error) {
 		return nil
 	})
 	return content, err
+}
+
+func (r *sandboxFs) ReadFileRange(path string, offset, length int64) ([]byte, error) {
+	var content []byte
+	err := r.execute(path, func(root *os.Root, relPath string) error {
+		f, err := root.Open(relPath)
+		if err != nil {
+			if os.IsNotExist(err) {
+				return fmt.Errorf("failed to read file: file not found: %w", err)
+			}
+			// os.Root returns "escapes from parent" for paths outside the root
+			if os.IsPermission(err) || strings.Contains(err.Error(), "escapes from parent") ||
+				strings.Contains(err.Error(), "permission denied") {
+				return fmt.Errorf("failed to read file: access denied: %w", err)
+			}
+			return fmt.Errorf("failed to read file: %w", err)
+		}
+		defer f.Close()
+
+		if offset < 0 {
+			return fmt.Errorf("failed to read file: invalid offset %d", offset)
+		}
+		if offset > 0 {
+			if _, err := f.Seek(offset, io.SeekStart); err != nil {
+				return fmt.Errorf("failed to read file: seek failed: %w", err)
+			}
+		}
+		if length <= 0 {
+			content = []byte{}
+			return nil
+		}
+
+		limited := io.LimitReader(f, length)
+		fileContent, err := io.ReadAll(limited)
+		if err != nil {
+			return fmt.Errorf("failed to read file: %w", err)
+		}
+		content = fileContent
+		return nil
+	})
+	return content, err
+}
+
+func (r *sandboxFs) Stat(path string) (os.FileInfo, error) {
+	var fi os.FileInfo
+	err := r.execute(path, func(root *os.Root, relPath string) error {
+		info, err := root.Stat(relPath)
+		if err != nil {
+			if os.IsNotExist(err) {
+				return fmt.Errorf("failed to stat file: file not found: %w", err)
+			}
+			if os.IsPermission(err) || strings.Contains(err.Error(), "escapes from parent") ||
+				strings.Contains(err.Error(), "permission denied") {
+				return fmt.Errorf("failed to stat file: access denied: %w", err)
+			}
+			return fmt.Errorf("failed to stat file: %w", err)
+		}
+		fi = info
+		return nil
+	})
+	return fi, err
 }
 
 func (r *sandboxFs) WriteFile(path string, data []byte) error {
@@ -427,6 +657,20 @@ func (w *whitelistFs) ReadFile(path string) ([]byte, error) {
 		return w.host.ReadFile(path)
 	}
 	return w.sandbox.ReadFile(path)
+}
+
+func (w *whitelistFs) ReadFileRange(path string, offset, length int64) ([]byte, error) {
+	if w.matches(path) {
+		return w.host.ReadFileRange(path, offset, length)
+	}
+	return w.sandbox.ReadFileRange(path, offset, length)
+}
+
+func (w *whitelistFs) Stat(path string) (os.FileInfo, error) {
+	if w.matches(path) {
+		return w.host.Stat(path)
+	}
+	return w.sandbox.Stat(path)
 }
 
 func (w *whitelistFs) WriteFile(path string, data []byte) error {

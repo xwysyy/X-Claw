@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 )
@@ -86,11 +87,36 @@ func (t *SpawnTool) Execute(ctx context.Context, args map[string]any) *ToolResul
 
 	// Pass callback to manager for async completion notification (injected via context).
 	cb := toolExecutionAsyncCallback(ctx)
-	result, err := t.manager.Spawn(ctx, task, label, agentID, originChannel, originChatID, cb)
+	taskInfo, err := t.manager.SpawnTask(ctx, task, label, agentID, originChannel, originChatID, cb)
 	if err != nil {
-		return ErrorResult(fmt.Sprintf("failed to spawn subagent: %v", err))
+		return ErrorResult(fmt.Sprintf("failed to spawn subagent: %v", err)).WithError(err)
+	}
+
+	payload := map[string]any{
+		"kind":        "subagent_spawn",
+		"status":      "accepted",
+		"task_id":     taskInfo.ID,
+		"task":        taskInfo.Task,
+		"label":       taskInfo.Label,
+		"agent_id":    taskInfo.AgentID,
+		"run_id":      strings.TrimSpace(taskInfo.RunID),
+		"session_key": strings.TrimSpace(taskInfo.SessionKey),
+		"result_delivery": map[string]any{
+			"channel": "system",
+			"chat_id": fmt.Sprintf("%s:%s", originChannel, originChatID),
+		},
+	}
+
+	data, marshalErr := json.MarshalIndent(payload, "", "  ")
+	if marshalErr != nil {
+		return ErrorResult(fmt.Sprintf("failed to encode spawn payload: %v", marshalErr)).WithError(marshalErr)
 	}
 
 	// Return AsyncResult since the task runs in background
-	return AsyncResult(result)
+	return &ToolResult{
+		ForLLM:  string(data),
+		Silent:  true,
+		IsError: false,
+		Async:   true,
+	}
 }
