@@ -455,10 +455,6 @@ func DefaultConfig() *Config {
 					MaxResults:   5,
 				},
 			},
-			MCP: MCPToolsConfig{
-				Enabled: false,
-				Servers: []MCPServerConfig{},
-			},
 			Trace: ToolTraceConfig{
 				Enabled:               false,
 				Dir:                   "",
@@ -494,6 +490,10 @@ func DefaultConfig() *Config {
 					MaxSize:    50,
 					TTLSeconds: 300,
 				},
+			},
+			MCP: MCPConfig{
+				Enabled: false,
+				Servers: map[string]MCPServerConfig{},
 			},
 		},
 		Heartbeat: HeartbeatConfig{

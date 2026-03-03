@@ -5,25 +5,19 @@ package feishu
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
-	"html"
 	"io"
+	"net/http"
 	"os"
 	"path/filepath"
-	"regexp"
-	"sort"
-	"strconv"
-	"strings"
 	"sync"
-	"time"
+	"sync/atomic"
 
 	lark "github.com/larksuite/oapi-sdk-go/v3"
+	larkcore "github.com/larksuite/oapi-sdk-go/v3/core"
 	larkdispatcher "github.com/larksuite/oapi-sdk-go/v3/event/dispatcher"
 	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
 	larkws "github.com/larksuite/oapi-sdk-go/v3/ws"
-
-	"github.com/google/uuid"
 
 	"github.com/sipeed/picoclaw/pkg/bus"
 	"github.com/sipeed/picoclaw/pkg/channels"
@@ -34,32 +28,16 @@ import (
 	"github.com/sipeed/picoclaw/pkg/utils"
 )
 
-const feishuMaxPostImageAttachments = 4
-
-var (
-	feishuBRTagRe          = regexp.MustCompile(`(?i)<\s*br\s*/?>`)
-	feishuParagraphJoinRe  = regexp.MustCompile(`(?i)<\s*/p\s*>\s*<\s*p\s*>`)
-	feishuParagraphOpenRe  = regexp.MustCompile(`(?i)<\s*p\s*>`)
-	feishuParagraphCloseRe = regexp.MustCompile(`(?i)<\s*/p\s*>`)
-	feishuAnyTagRe         = regexp.MustCompile(`<[^>]+>`)
-	feishuMultiNewlineRe   = regexp.MustCompile(`\n{3,}`)
-	feishuBrokenBulletRe   = regexp.MustCompile(`(?m)(^|\n)([-*•])\n([^\s])`)
-	feishuBrokenNumberedRe = regexp.MustCompile(`(?m)(^|\n)([0-9]+[.)])\n([^\s])`)
-)
-
 type FeishuChannel struct {
 	*channels.BaseChannel
 	config   config.FeishuConfig
 	client   *lark.Client
 	wsClient *larkws.Client
 
+	botOpenID atomic.Value // stores string; populated lazily for @mention detection
+
 	mu     sync.Mutex
 	cancel context.CancelFunc
-
-	processedMu   sync.Mutex
-	processedIDs  map[string]struct{}
-	processedRing []string
-	processedHead int
 }
 
 func NewFeishuChannel(cfg config.FeishuConfig, bus *bus.MessageBus) (*FeishuChannel, error) {
@@ -68,12 +46,13 @@ func NewFeishuChannel(cfg config.FeishuConfig, bus *bus.MessageBus) (*FeishuChan
 		channels.WithReasoningChannelID(cfg.ReasoningChannelID),
 	)
 
-	return &FeishuChannel{
-		BaseChannel:  base,
-		config:       cfg,
-		client:       lark.NewClient(cfg.AppID, cfg.AppSecret),
-		processedIDs: make(map[string]struct{}),
-	}, nil
+	ch := &FeishuChannel{
+		BaseChannel: base,
+		config:      cfg,
+		client:      lark.NewClient(cfg.AppID, cfg.AppSecret),
+	}
+	ch.SetOwner(ch)
+	return ch, nil
 }
 
 func (c *FeishuChannel) Start(ctx context.Context) error {
@@ -81,69 +60,36 @@ func (c *FeishuChannel) Start(ctx context.Context) error {
 		return fmt.Errorf("feishu app_id or app_secret is empty")
 	}
 
-	if c.config.GroupTrigger.MentionOnly && strings.TrimSpace(c.config.BotID) == "" {
-		logger.WarnC("feishu", "group_trigger.mention_only is enabled but bot_id is empty; falling back to best-effort mention detection")
+	// Fetch bot open_id via API for reliable @mention detection.
+	if err := c.fetchBotOpenID(ctx); err != nil {
+		logger.ErrorCF("feishu", "Failed to fetch bot open_id, @mention detection may not work", map[string]any{
+			"error": err.Error(),
+		})
 	}
 
 	dispatcher := larkdispatcher.NewEventDispatcher(c.config.VerificationToken, c.config.EncryptKey).
-		OnP2MessageReceiveV1(c.handleMessageReceive).
-		// Backward compatibility for legacy "message" event subscriptions.
-		OnP1MessageReceiveV1(c.handleLegacyMessageReceive)
+		OnP2MessageReceiveV1(c.handleMessageReceive)
 
 	runCtx, cancel := context.WithCancel(ctx)
 
 	c.mu.Lock()
 	c.cancel = cancel
+	c.wsClient = larkws.NewClient(
+		c.config.AppID,
+		c.config.AppSecret,
+		larkws.WithEventHandler(dispatcher),
+	)
+	wsClient := c.wsClient
 	c.mu.Unlock()
 
 	c.SetRunning(true)
 	logger.InfoC("feishu", "Feishu channel started (websocket mode)")
 
 	go func() {
-		backoff := 1 * time.Second
-		for {
-			c.mu.Lock()
-			// Stop() sets cancel=nil; treat that as terminal.
-			if c.cancel == nil {
-				c.mu.Unlock()
-				return
-			}
-			wsClient := larkws.NewClient(
-				c.config.AppID,
-				c.config.AppSecret,
-				larkws.WithEventHandler(dispatcher),
-			)
-			c.wsClient = wsClient
-			c.mu.Unlock()
-
-			if err := wsClient.Start(runCtx); err != nil {
-				// larkws client should handle reconnect internally, but keep a best-effort
-				// outer restart loop to survive unexpected exits.
-				if runCtx.Err() == nil {
-					logger.ErrorCF("feishu", "Feishu websocket stopped with error", map[string]any{
-						"error": err.Error(),
-					})
-				}
-			}
-
-			if runCtx.Err() != nil {
-				return
-			}
-
-			logger.WarnCF("feishu", "Feishu websocket stopped; retrying", map[string]any{
-				"backoff_s": backoff.Seconds(),
+		if err := wsClient.Start(runCtx); err != nil {
+			logger.ErrorCF("feishu", "Feishu websocket stopped with error", map[string]any{
+				"error": err.Error(),
 			})
-			select {
-			case <-runCtx.Done():
-				return
-			case <-time.After(backoff):
-			}
-			if backoff < 30*time.Second {
-				backoff *= 2
-				if backoff > 30*time.Second {
-					backoff = 30 * time.Second
-				}
-			}
 		}
 	}()
 
@@ -164,178 +110,148 @@ func (c *FeishuChannel) Stop(ctx context.Context) error {
 	return nil
 }
 
+// Send sends a message using Interactive Card format for markdown rendering.
 func (c *FeishuChannel) Send(ctx context.Context, msg bus.OutboundMessage) error {
 	if !c.IsRunning() {
 		return channels.ErrNotRunning
 	}
 
 	if msg.ChatID == "" {
-		return fmt.Errorf("chat ID is empty")
+		return fmt.Errorf("chat ID is empty: %w", channels.ErrSendFailed)
 	}
 
-	content := strings.TrimSpace(msg.Content)
-	if content == "" {
-		return nil
+	// Build interactive card with markdown content
+	cardContent, err := buildMarkdownCard(msg.Content)
+	if err != nil {
+		return fmt.Errorf("feishu send: card build failed: %w", err)
 	}
-
-	// Send as "post" with markdown to match Feishu's rich rendering behavior.
-	// Inspired by: ref/clawdbot-feishu/src/send.ts (tag: "md")
-	content = normalizeFeishuMarkdownLinks(content)
-	chunks := utils.SplitMessage(content, feishuPostChunkLimit)
-	if len(chunks) == 0 {
-		return nil
-	}
-
-	sendID := time.Now().UnixNano()
-	for idx, chunk := range chunks {
-		chunk = strings.TrimSpace(chunk)
-		if chunk == "" {
-			continue
-		}
-
-		postJSON, err := buildFeishuPostMarkdownContent(chunk)
-		if err != nil {
-			return err
-		}
-
-		req := larkim.NewCreateMessageReqBuilder().
-			ReceiveIdType(larkim.ReceiveIdTypeChatId).
-			Body(larkim.NewCreateMessageReqBodyBuilder().
-				ReceiveId(msg.ChatID).
-				MsgType("post").
-				Content(postJSON).
-				Uuid(fmt.Sprintf("picoclaw-%d-%d", sendID, idx)).
-				Build()).
-			Build()
-
-		resp, err := c.client.Im.V1.Message.Create(ctx, req)
-		if err != nil {
-			return fmt.Errorf("%w: feishu send: %v", channels.ErrTemporary, err)
-		}
-
-		if !resp.Success() {
-			fields := map[string]any{
-				"chat_id": msg.ChatID,
-				"chunk":   idx,
-				"code":    resp.Code,
-				"msg":     resp.Msg,
-			}
-			if resp.Code == 99991672 {
-				fields["hint"] = "missing app scopes, enable im:message:send_as_bot (or equivalent) and publish the app"
-			}
-			logger.ErrorCF("feishu", "Feishu message send rejected", fields)
-
-			if resp.Code == 99991672 {
-				return fmt.Errorf("%w: feishu api error: code=%d msg=%s", channels.ErrSendFailed, resp.Code, resp.Msg)
-			}
-			return fmt.Errorf("%w: feishu api error: code=%d msg=%s", channels.ErrTemporary, resp.Code, resp.Msg)
-		}
-
-		logger.DebugCF("feishu", "Feishu message sent", map[string]any{
-			"chat_id": msg.ChatID,
-			"chunk":   idx,
-		})
-	}
-
-	return nil
+	return c.sendCard(ctx, msg.ChatID, cardContent)
 }
 
 // EditMessage implements channels.MessageEditor.
-func (c *FeishuChannel) EditMessage(ctx context.Context, chatID string, messageID string, content string) error {
-	if !c.IsRunning() {
-		return channels.ErrNotRunning
-	}
-	if strings.TrimSpace(messageID) == "" {
-		return fmt.Errorf("message ID is empty")
-	}
-	if strings.TrimSpace(content) == "" {
-		content = " "
+// Uses Message.Patch to update an interactive card message.
+func (c *FeishuChannel) EditMessage(ctx context.Context, chatID, messageID, content string) error {
+	cardContent, err := buildMarkdownCard(content)
+	if err != nil {
+		return fmt.Errorf("feishu edit: card build failed: %w", err)
 	}
 
-	payload, _ := json.Marshal(map[string]string{"text": content})
-	req := larkim.NewUpdateMessageReqBuilder().
+	req := larkim.NewPatchMessageReqBuilder().
 		MessageId(messageID).
-		Body(larkim.NewUpdateMessageReqBodyBuilder().
-			MsgType("text").
-			Content(string(payload)).
-			Build()).
+		Body(larkim.NewPatchMessageReqBodyBuilder().Content(cardContent).Build()).
 		Build()
 
-	resp, err := c.client.Im.V1.Message.Update(ctx, req)
+	resp, err := c.client.Im.V1.Message.Patch(ctx, req)
 	if err != nil {
-		return fmt.Errorf("%w: feishu edit message: %v", channels.ErrTemporary, err)
+		return fmt.Errorf("feishu edit: %w", err)
 	}
-	if resp == nil || !resp.Success() {
-		code := 0
-		msgText := ""
-		if resp != nil {
-			code = resp.Code
-			msgText = resp.Msg
-		}
-		errKind := channels.ErrTemporary
-		if code == 99991672 {
-			errKind = channels.ErrSendFailed
-		}
-		return fmt.Errorf("%w: feishu edit message rejected: code=%d msg=%s", errKind, code, msgText)
+	if !resp.Success() {
+		return fmt.Errorf("feishu edit api error (code=%d msg=%s)", resp.Code, resp.Msg)
 	}
 	return nil
 }
 
 // SendPlaceholder implements channels.PlaceholderCapable.
+// Sends an interactive card with placeholder text and returns its message ID.
 func (c *FeishuChannel) SendPlaceholder(ctx context.Context, chatID string) (string, error) {
 	if !c.config.Placeholder.Enabled {
-		return "", nil
-	}
-	if strings.TrimSpace(chatID) == "" {
+		logger.DebugCF("feishu", "Placeholder disabled, skipping", map[string]any{
+			"chat_id": chatID,
+		})
 		return "", nil
 	}
 
-	text := strings.TrimSpace(c.config.Placeholder.Text)
+	text := c.config.Placeholder.Text
 	if text == "" {
-		text = "正在思考..."
+		text = "Thinking..."
 	}
 
-	payload, _ := json.Marshal(map[string]string{"text": text})
+	cardContent, err := buildMarkdownCard(text)
+	if err != nil {
+		return "", fmt.Errorf("feishu placeholder: card build failed: %w", err)
+	}
+
 	req := larkim.NewCreateMessageReqBuilder().
 		ReceiveIdType(larkim.ReceiveIdTypeChatId).
 		Body(larkim.NewCreateMessageReqBodyBuilder().
 			ReceiveId(chatID).
-			MsgType("text").
-			Content(string(payload)).
-			Uuid("picoclaw-ph-" + uuid.NewString()).
+			MsgType(larkim.MsgTypeInteractive).
+			Content(cardContent).
 			Build()).
 		Build()
 
 	resp, err := c.client.Im.V1.Message.Create(ctx, req)
 	if err != nil {
-		return "", fmt.Errorf("%w: feishu send placeholder: %v", channels.ErrTemporary, err)
+		return "", fmt.Errorf("feishu placeholder send: %w", err)
 	}
-	if resp == nil || !resp.Success() || resp.Data == nil || resp.Data.MessageId == nil || strings.TrimSpace(*resp.Data.MessageId) == "" {
-		code := 0
-		msgText := ""
-		if resp != nil {
-			code = resp.Code
-			msgText = resp.Msg
-		}
-		errKind := channels.ErrTemporary
-		if code == 99991672 {
-			errKind = channels.ErrSendFailed
-		}
-		return "", fmt.Errorf("%w: feishu send placeholder rejected: code=%d msg=%s", errKind, code, msgText)
+	if !resp.Success() {
+		return "", fmt.Errorf("feishu placeholder api error (code=%d msg=%s)", resp.Code, resp.Msg)
 	}
 
-	return strings.TrimSpace(*resp.Data.MessageId), nil
+	if resp.Data != nil && resp.Data.MessageId != nil {
+		return *resp.Data.MessageId, nil
+	}
+	return "", nil
+}
+
+// ReactToMessage implements channels.ReactionCapable.
+// Adds an "Pin" reaction and returns an undo function to remove it.
+func (c *FeishuChannel) ReactToMessage(ctx context.Context, chatID, messageID string) (func(), error) {
+	req := larkim.NewCreateMessageReactionReqBuilder().
+		MessageId(messageID).
+		Body(larkim.NewCreateMessageReactionReqBodyBuilder().
+			ReactionType(larkim.NewEmojiBuilder().EmojiType("Pin").Build()).
+			Build()).
+		Build()
+
+	resp, err := c.client.Im.V1.MessageReaction.Create(ctx, req)
+	if err != nil {
+		logger.ErrorCF("feishu", "Failed to add reaction", map[string]any{
+			"message_id": messageID,
+			"error":      err.Error(),
+		})
+		return func() {}, fmt.Errorf("feishu react: %w", err)
+	}
+	if !resp.Success() {
+		logger.ErrorCF("feishu", "Reaction API error", map[string]any{
+			"message_id": messageID,
+			"code":       resp.Code,
+			"msg":        resp.Msg,
+		})
+		return func() {}, fmt.Errorf("feishu react api error (code=%d msg=%s)", resp.Code, resp.Msg)
+	}
+
+	var reactionID string
+	if resp.Data != nil && resp.Data.ReactionId != nil {
+		reactionID = *resp.Data.ReactionId
+	}
+	if reactionID == "" {
+		return func() {}, nil
+	}
+
+	var undone atomic.Bool
+	undo := func() {
+		if !undone.CompareAndSwap(false, true) {
+			return
+		}
+		delReq := larkim.NewDeleteMessageReactionReqBuilder().
+			MessageId(messageID).
+			ReactionId(reactionID).
+			Build()
+		_, _ = c.client.Im.V1.MessageReaction.Delete(context.Background(), delReq)
+	}
+	return undo, nil
 }
 
 // SendMedia implements channels.MediaSender.
-// It uploads files/images to Feishu and then sends them as native attachments.
+// Uploads images/files via Feishu API then sends as messages.
 func (c *FeishuChannel) SendMedia(ctx context.Context, msg bus.OutboundMediaMessage) error {
 	if !c.IsRunning() {
 		return channels.ErrNotRunning
 	}
 
 	if msg.ChatID == "" {
-		return fmt.Errorf("chat ID is empty")
+		return fmt.Errorf("chat ID is empty: %w", channels.ErrSendFailed)
 	}
 
 	store := c.GetMediaStore()
@@ -343,204 +259,66 @@ func (c *FeishuChannel) SendMedia(ctx context.Context, msg bus.OutboundMediaMess
 		return fmt.Errorf("no media store available: %w", channels.ErrSendFailed)
 	}
 
-	sendID := time.Now().UnixNano()
-	partIdx := 0
-
 	for _, part := range msg.Parts {
-		ref := strings.TrimSpace(part.Ref)
-		if ref == "" {
-			continue
+		if err := c.sendMediaPart(ctx, msg.ChatID, part, store); err != nil {
+			return err
 		}
-
-		if strings.TrimSpace(part.Caption) != "" {
-			if err := c.Send(ctx, bus.OutboundMessage{
-				Channel: "feishu",
-				ChatID:  msg.ChatID,
-				Content: part.Caption,
-			}); err != nil {
-				return err
-			}
-		}
-
-		localPath, meta, err := store.ResolveWithMeta(ref)
-		if err != nil {
-			logger.ErrorCF("feishu", "Failed to resolve media ref", map[string]any{
-				"ref":   ref,
-				"error": err.Error(),
-			})
-			continue
-		}
-
-		filename := strings.TrimSpace(part.Filename)
-		if filename == "" {
-			filename = strings.TrimSpace(meta.Filename)
-		}
-		if filename == "" {
-			filename = filepath.Base(localPath)
-		}
-		filename = utils.SanitizeFilename(filename)
-
-		contentType := strings.TrimSpace(part.ContentType)
-		if contentType == "" {
-			contentType = strings.TrimSpace(meta.ContentType)
-		}
-
-		mediaType := strings.TrimSpace(part.Type)
-		if mediaType == "" {
-			if strings.HasPrefix(contentType, "image/") {
-				mediaType = "image"
-			} else {
-				mediaType = "file"
-			}
-		}
-
-		switch mediaType {
-		case "image":
-			// Feishu limits image uploads to 10MB (SDK comment).
-			if st, statErr := os.Stat(localPath); statErr == nil && st.Size() > 10*1024*1024 {
-				return fmt.Errorf("%w: feishu image too large (>10MB): %s", channels.ErrSendFailed, filename)
-			}
-
-			f, err := os.Open(localPath)
-			if err != nil {
-				return fmt.Errorf("feishu open image: %w", err)
-			}
-
-			imgReq := larkim.NewCreateImageReqBuilder().
-				Body(larkim.NewCreateImageReqBodyBuilder().
-					ImageType("message").
-					Image(f).
-					Build()).
-				Build()
-
-			imgResp, err := c.client.Im.V1.Image.Create(ctx, imgReq)
-			f.Close()
-			if err != nil {
-				return fmt.Errorf("%w: feishu upload image: %v", channels.ErrTemporary, err)
-			}
-			if imgResp == nil || !imgResp.Success() || imgResp.Data == nil || imgResp.Data.ImageKey == nil || *imgResp.Data.ImageKey == "" {
-				code := 0
-				msgText := ""
-				if imgResp != nil {
-					code = imgResp.Code
-					msgText = imgResp.Msg
-				}
-				errKind := channels.ErrTemporary
-				if code == 99991672 {
-					errKind = channels.ErrSendFailed
-				}
-				return fmt.Errorf("%w: feishu upload image rejected: code=%d msg=%s", errKind, code, msgText)
-			}
-
-			payload, _ := json.Marshal(map[string]string{
-				"image_key": *imgResp.Data.ImageKey,
-			})
-
-			createReq := larkim.NewCreateMessageReqBuilder().
-				ReceiveIdType(larkim.ReceiveIdTypeChatId).
-				Body(larkim.NewCreateMessageReqBodyBuilder().
-					ReceiveId(msg.ChatID).
-					MsgType("image").
-					Content(string(payload)).
-					Uuid(fmt.Sprintf("picoclaw-media-%d-%d", sendID, partIdx)).
-					Build()).
-				Build()
-
-			resp, err := c.client.Im.V1.Message.Create(ctx, createReq)
-			if err != nil {
-				return fmt.Errorf("%w: feishu send image: %v", channels.ErrTemporary, err)
-			}
-			if resp == nil || !resp.Success() {
-				code := 0
-				msgText := ""
-				if resp != nil {
-					code = resp.Code
-					msgText = resp.Msg
-				}
-				errKind := channels.ErrTemporary
-				if code == 99991672 {
-					errKind = channels.ErrSendFailed
-				}
-				return fmt.Errorf("%w: feishu send image rejected: code=%d msg=%s", errKind, code, msgText)
-			}
-
-		default:
-			f, err := os.Open(localPath)
-			if err != nil {
-				return fmt.Errorf("feishu open file: %w", err)
-			}
-
-			fileType, msgType := resolveFeishuFileUploadTypes(mediaType, filename, contentType)
-
-			fileReq := larkim.NewCreateFileReqBuilder().
-				Body(larkim.NewCreateFileReqBodyBuilder().
-					FileType(fileType).
-					FileName(filename).
-					File(f).
-					Build()).
-				Build()
-
-			fileResp, err := c.client.Im.V1.File.Create(ctx, fileReq)
-			f.Close()
-			if err != nil {
-				return fmt.Errorf("%w: feishu upload file: %v", channels.ErrTemporary, err)
-			}
-			if fileResp == nil || !fileResp.Success() || fileResp.Data == nil || fileResp.Data.FileKey == nil || *fileResp.Data.FileKey == "" {
-				code := 0
-				msgText := ""
-				if fileResp != nil {
-					code = fileResp.Code
-					msgText = fileResp.Msg
-				}
-				errKind := channels.ErrTemporary
-				if code == 99991672 {
-					errKind = channels.ErrSendFailed
-				}
-				return fmt.Errorf("%w: feishu upload file rejected: code=%d msg=%s", errKind, code, msgText)
-			}
-
-			payload, _ := json.Marshal(map[string]string{
-				"file_key": *fileResp.Data.FileKey,
-			})
-
-			createReq := larkim.NewCreateMessageReqBuilder().
-				ReceiveIdType(larkim.ReceiveIdTypeChatId).
-				Body(larkim.NewCreateMessageReqBodyBuilder().
-					ReceiveId(msg.ChatID).
-					MsgType(msgType).
-					Content(string(payload)).
-					Uuid(fmt.Sprintf("picoclaw-media-%d-%d", sendID, partIdx)).
-					Build()).
-				Build()
-
-			resp, err := c.client.Im.V1.Message.Create(ctx, createReq)
-			if err != nil {
-				return fmt.Errorf("%w: feishu send %s: %v", channels.ErrTemporary, msgType, err)
-			}
-			if resp == nil || !resp.Success() {
-				code := 0
-				msgText := ""
-				if resp != nil {
-					code = resp.Code
-					msgText = resp.Msg
-				}
-				errKind := channels.ErrTemporary
-				if code == 99991672 {
-					errKind = channels.ErrSendFailed
-				}
-				return fmt.Errorf("%w: feishu send %s rejected: code=%d msg=%s", errKind, msgType, code, msgText)
-			}
-		}
-
-		partIdx++
 	}
 
 	return nil
 }
 
+// sendMediaPart resolves and sends a single media part.
+func (c *FeishuChannel) sendMediaPart(
+	ctx context.Context,
+	chatID string,
+	part bus.MediaPart,
+	store media.MediaStore,
+) error {
+	localPath, err := store.Resolve(part.Ref)
+	if err != nil {
+		logger.ErrorCF("feishu", "Failed to resolve media ref", map[string]any{
+			"ref":   part.Ref,
+			"error": err.Error(),
+		})
+		return nil // skip this part
+	}
+
+	file, err := os.Open(localPath)
+	if err != nil {
+		logger.ErrorCF("feishu", "Failed to open media file", map[string]any{
+			"path":  localPath,
+			"error": err.Error(),
+		})
+		return nil // skip this part
+	}
+	defer file.Close()
+
+	switch part.Type {
+	case "image":
+		err = c.sendImage(ctx, chatID, file)
+	default:
+		filename := part.Filename
+		if filename == "" {
+			filename = "file"
+		}
+		err = c.sendFile(ctx, chatID, file, filename, part.Type)
+	}
+
+	if err != nil {
+		logger.ErrorCF("feishu", "Failed to send media", map[string]any{
+			"type":  part.Type,
+			"error": err.Error(),
+		})
+		return fmt.Errorf("feishu send media: %w", channels.ErrTemporary)
+	}
+	return nil
+}
+
+// --- Inbound message handling ---
+
 func (c *FeishuChannel) handleMessageReceive(ctx context.Context, event *larkim.P2MessageReceiveV1) error {
 	if event == nil || event.Event == nil || event.Event.Message == nil {
-		logger.DebugC("feishu", "Ignored empty P2 message event")
 		return nil
 	}
 
@@ -549,7 +327,6 @@ func (c *FeishuChannel) handleMessageReceive(ctx context.Context, event *larkim.
 
 	chatID := stringValue(message.ChatId)
 	if chatID == "" {
-		logger.DebugC("feishu", "Ignored P2 message event with empty chat_id")
 		return nil
 	}
 
@@ -558,231 +335,65 @@ func (c *FeishuChannel) handleMessageReceive(ctx context.Context, event *larkim.
 		senderID = "unknown"
 	}
 
+	messageType := stringValue(message.MessageType)
+	messageID := stringValue(message.MessageId)
+	rawContent := stringValue(message.Content)
+
+	// Check allowlist early to avoid downloading media for rejected senders.
+	// BaseChannel.HandleMessage will check again, but this avoids wasted network I/O.
 	senderInfo := bus.SenderInfo{
 		Platform:    "feishu",
 		PlatformID:  senderID,
 		CanonicalID: identity.BuildCanonicalID("feishu", senderID),
 	}
-
-	// check allowlist early to avoid expensive processing (e.g. media downloads) for rejected users
 	if !c.IsAllowedSender(senderInfo) {
 		return nil
 	}
 
+	// Extract/normalize content based on message type
 	content := extractFeishuMessageContent(message)
+
+	// Handle media messages (download and store)
+	var mediaRefs []string
+	if store := c.GetMediaStore(); store != nil && messageID != "" {
+		mediaRefs = c.downloadInboundMedia(ctx, chatID, messageID, messageType, rawContent, store)
+	}
+
+	// Append media tags to content (like Telegram does)
+	content = appendMediaTags(content, messageType, mediaRefs)
+
 	if content == "" {
 		content = "[empty message]"
 	}
 
 	metadata := map[string]string{}
-	messageID := ""
-	if mid := stringValue(message.MessageId); mid != "" {
-		messageID = mid
+	if messageID != "" {
+		metadata["message_id"] = messageID
 	}
-	if messageID != "" && c.isDuplicateMessageID(messageID) {
-		return nil
-	}
-	if messageType := stringValue(message.MessageType); messageType != "" {
+	if messageType != "" {
 		metadata["message_type"] = messageType
 	}
-	if chatType := stringValue(message.ChatType); chatType != "" {
+	chatType := stringValue(message.ChatType)
+	if chatType != "" {
 		metadata["chat_type"] = chatType
 	}
 	if sender != nil && sender.TenantKey != nil {
 		metadata["tenant_key"] = *sender.TenantKey
 	}
 
-	chatType := stringValue(message.ChatType)
 	var peer bus.Peer
 	if chatType == "p2p" {
 		peer = bus.Peer{Kind: "direct", ID: senderID}
 	} else {
 		peer = bus.Peer{Kind: "group", ID: chatID}
-		isMentioned, stripped := feishuDetectAndStripBotMention(message, content, strings.TrimSpace(c.config.BotID))
-		// In group chats, apply unified group trigger filtering
-		respond, cleaned := c.ShouldRespondInGroup(isMentioned, stripped)
-		if !respond {
-			return nil
+
+		// Check if bot was mentioned
+		isMentioned := c.isBotMentioned(message)
+
+		// Strip mention placeholders from content before group trigger check
+		if len(message.Mentions) > 0 {
+			content = stripMentionPlaceholders(content, message.Mentions)
 		}
-		content = cleaned
-	}
-
-	mediaRefs := []string{}
-	rawContent := stringValue(message.Content)
-	messageType := strings.TrimSpace(stringValue(message.MessageType))
-	if messageID != "" && rawContent != "" {
-		scope := channels.BuildMediaScope("feishu", chatID, messageID)
-
-		// Helper to register a local file with the media store.
-		storeMedia := func(localPath string, meta media.MediaMeta) string {
-			if store := c.GetMediaStore(); store != nil {
-				ref, err := store.Store(localPath, meta, scope)
-				if err == nil {
-					return ref
-				}
-			}
-			return localPath // fallback: raw path
-		}
-
-		switch messageType {
-		case "post":
-			imageKeys := extractFeishuPostImageKeys(rawContent)
-			for _, imageKey := range imageKeys {
-				if len(mediaRefs) >= feishuMaxPostImageAttachments {
-					break
-				}
-				localPath, filename, contentType, err := c.downloadMessageResource(ctx, messageID, imageKey, "image")
-				if err != nil {
-					logger.WarnCF("feishu", "Failed to download post image resource", map[string]any{
-						"message_id": messageID,
-						"image_key":  imageKey,
-						"error":      err.Error(),
-					})
-					continue
-				}
-				mediaRefs = append(mediaRefs, storeMedia(localPath, media.MediaMeta{
-					Filename:    filename,
-					ContentType: contentType,
-					Source:      "feishu",
-				}))
-			}
-		case "image":
-			imageKey := feishuExtractJSONString(rawContent, "image_key", "file_key", "imageKey", "fileKey")
-			if imageKey != "" {
-				localPath, filename, contentType, err := c.downloadMessageResource(ctx, messageID, imageKey, "image")
-				if err != nil {
-					logger.WarnCF("feishu", "Failed to download image resource", map[string]any{
-						"message_id": messageID,
-						"image_key":  imageKey,
-						"error":      err.Error(),
-					})
-				} else {
-					mediaRefs = append(mediaRefs, storeMedia(localPath, media.MediaMeta{
-						Filename:    filename,
-						ContentType: contentType,
-						Source:      "feishu",
-					}))
-				}
-			}
-		case "file", "audio", "video", "media":
-			fileKey := feishuExtractJSONString(rawContent, "file_key", "fileKey")
-			if fileKey != "" {
-				localPath, filename, contentType, err := c.downloadMessageResource(ctx, messageID, fileKey, "file")
-				if err != nil {
-					logger.WarnCF("feishu", "Failed to download file resource", map[string]any{
-						"message_id": messageID,
-						"file_key":   fileKey,
-						"error":      err.Error(),
-					})
-				} else {
-					mediaRefs = append(mediaRefs, storeMedia(localPath, media.MediaMeta{
-						Filename:    filename,
-						ContentType: contentType,
-						Source:      "feishu",
-					}))
-				}
-			}
-		}
-
-		if len(mediaRefs) > 0 {
-			// make the content human-friendly (the media refs carry the actual attachment)
-			label := "[media]"
-			switch messageType {
-			case "image":
-				label = "[image]"
-			case "audio":
-				label = "[audio]"
-			case "video", "media":
-				label = "[video]"
-			case "file":
-				label = "[file]"
-			case "post":
-				label = "[image]"
-			}
-
-			// Replace placeholder-only content like "<media:image>" with a cleaner marker.
-			if strings.HasPrefix(strings.TrimSpace(content), "<media:") {
-				content = ""
-			}
-			if content != "" {
-				content += "\n"
-			}
-			content += label
-		}
-	}
-
-	logger.InfoCF("feishu", "Feishu message received", map[string]any{
-		"sender_id": senderID,
-		"chat_id":   chatID,
-		"preview":   utils.Truncate(content, 80),
-		"media":     len(mediaRefs),
-	})
-
-	c.HandleMessage(ctx, peer, messageID, senderID, chatID, content, mediaRefs, metadata, senderInfo)
-	return nil
-}
-
-func (c *FeishuChannel) handleLegacyMessageReceive(ctx context.Context, event *larkim.P1MessageReceiveV1) error {
-	if event == nil || event.Event == nil {
-		logger.DebugC("feishu", "Ignored empty P1 legacy message event")
-		return nil
-	}
-
-	payload := event.Event
-	chatID := strings.TrimSpace(payload.OpenChatID)
-	if chatID == "" {
-		logger.DebugC("feishu", "Ignored P1 legacy event with empty open_chat_id")
-		return nil
-	}
-
-	senderID := strings.TrimSpace(payload.EmployeeID)
-	if senderID == "" {
-		senderID = strings.TrimSpace(payload.OpenID)
-	}
-	if senderID == "" {
-		senderID = strings.TrimSpace(payload.UnionID)
-	}
-	if senderID == "" {
-		senderID = "unknown"
-	}
-
-	content := strings.TrimSpace(payload.TextWithoutAtBot)
-	if content == "" {
-		content = strings.TrimSpace(payload.Text)
-	}
-	if content == "" {
-		content = "[empty message]"
-	}
-	isMentioned := strings.TrimSpace(payload.TextWithoutAtBot) != "" &&
-		strings.TrimSpace(payload.TextWithoutAtBot) != strings.TrimSpace(payload.Text)
-
-	metadata := map[string]string{}
-	messageID := strings.TrimSpace(payload.OpenMessageID)
-	if messageID != "" && c.isDuplicateMessageID(messageID) {
-		return nil
-	}
-	if messageID != "" {
-		metadata["message_id"] = messageID
-	}
-	if payload.MsgType != "" {
-		metadata["message_type"] = payload.MsgType
-	}
-	if payload.ChatType != "" {
-		metadata["chat_type"] = payload.ChatType
-	}
-	if payload.TenantKey != "" {
-		metadata["tenant_key"] = payload.TenantKey
-	}
-
-	chatType := strings.ToLower(strings.TrimSpace(payload.ChatType))
-	peer := bus.Peer{Kind: "group", ID: chatID}
-	if chatType == "p2p" || chatType == "private" {
-		peer = bus.Peer{Kind: "direct", ID: senderID}
-		metadata["peer_kind"] = "direct"
-		metadata["peer_id"] = senderID
-	} else {
-		metadata["peer_kind"] = "group"
-		metadata["peer_id"] = chatID
 
 		// In group chats, apply unified group trigger filtering
 		respond, cleaned := c.ShouldRespondInGroup(isMentioned, content)
@@ -792,54 +403,400 @@ func (c *FeishuChannel) handleLegacyMessageReceive(ctx context.Context, event *l
 		content = cleaned
 	}
 
-	logger.InfoCF("feishu", "Feishu message received (legacy event)", map[string]any{
-		"sender_id": senderID,
-		"chat_id":   chatID,
-		"preview":   utils.Truncate(content, 80),
+	logger.InfoCF("feishu", "Feishu message received", map[string]any{
+		"sender_id":  senderID,
+		"chat_id":    chatID,
+		"message_id": messageID,
+		"preview":    utils.Truncate(content, 80),
 	})
 
-	senderInfo := bus.SenderInfo{
-		Platform:    "feishu",
-		PlatformID:  senderID,
-		CanonicalID: identity.BuildCanonicalID("feishu", senderID),
-	}
-
-	c.HandleMessage(ctx, peer, messageID, senderID, chatID, content, nil, metadata, senderInfo)
+	c.HandleMessage(ctx, peer, messageID, senderID, chatID, content, mediaRefs, metadata, senderInfo)
 	return nil
 }
 
-func (c *FeishuChannel) isDuplicateMessageID(messageID string) bool {
-	const maxProcessed = 2048
+// --- Internal helpers ---
 
-	messageID = strings.TrimSpace(messageID)
-	if messageID == "" {
+// fetchBotOpenID calls the Feishu bot info API to retrieve and store the bot's open_id.
+func (c *FeishuChannel) fetchBotOpenID(ctx context.Context) error {
+	resp, err := c.client.Do(ctx, &larkcore.ApiReq{
+		HttpMethod:                http.MethodGet,
+		ApiPath:                   "/open-apis/bot/v3/info",
+		SupportedAccessTokenTypes: []larkcore.AccessTokenType{larkcore.AccessTokenTypeTenant},
+	})
+	if err != nil {
+		return fmt.Errorf("bot info request: %w", err)
+	}
+
+	var result struct {
+		Code int `json:"code"`
+		Bot  struct {
+			OpenID string `json:"open_id"`
+		} `json:"bot"`
+	}
+	if err := json.Unmarshal(resp.RawBody, &result); err != nil {
+		return fmt.Errorf("bot info parse: %w", err)
+	}
+	if result.Code != 0 {
+		return fmt.Errorf("bot info api error (code=%d)", result.Code)
+	}
+	if result.Bot.OpenID == "" {
+		return fmt.Errorf("bot info: empty open_id")
+	}
+
+	c.botOpenID.Store(result.Bot.OpenID)
+	logger.InfoCF("feishu", "Fetched bot open_id from API", map[string]any{
+		"open_id": result.Bot.OpenID,
+	})
+	return nil
+}
+
+// isBotMentioned checks if the bot was @mentioned in the message.
+func (c *FeishuChannel) isBotMentioned(message *larkim.EventMessage) bool {
+	if message.Mentions == nil {
 		return false
 	}
 
-	c.processedMu.Lock()
-	defer c.processedMu.Unlock()
-
-	if _, ok := c.processedIDs[messageID]; ok {
-		return true
+	knownID, _ := c.botOpenID.Load().(string)
+	if knownID == "" {
+		logger.DebugCF("feishu", "Bot open_id unknown, cannot detect @mention", nil)
+		return false
 	}
 
-	c.processedIDs[messageID] = struct{}{}
-	c.processedRing = append(c.processedRing, messageID)
+	for _, m := range message.Mentions {
+		if m.Id == nil {
+			continue
+		}
+		if m.Id.OpenId != nil && *m.Id.OpenId == knownID {
+			return true
+		}
+	}
+	return false
+}
 
-	// Evict oldest when over limit.
-	if len(c.processedRing)-c.processedHead > maxProcessed {
-		evict := c.processedRing[c.processedHead]
-		delete(c.processedIDs, evict)
-		c.processedHead++
+// extractContent extracts text content from different message types.
+func extractContent(messageType, rawContent string) string {
+	if rawContent == "" {
+		return ""
+	}
 
-		// Compact periodically to avoid unbounded growth of the underlying array.
-		if c.processedHead > maxProcessed && c.processedHead*2 >= len(c.processedRing) {
-			c.processedRing = append([]string{}, c.processedRing[c.processedHead:]...)
-			c.processedHead = 0
+	switch messageType {
+	case larkim.MsgTypeText:
+		var textPayload struct {
+			Text string `json:"text"`
+		}
+		if err := json.Unmarshal([]byte(rawContent), &textPayload); err == nil {
+			return textPayload.Text
+		}
+		return rawContent
+
+	case larkim.MsgTypePost:
+		// Pass raw JSON to LLM — structured rich text is more informative than flattened plain text
+		return rawContent
+
+	case larkim.MsgTypeImage:
+		// Image messages don't have text content
+		return ""
+
+	case larkim.MsgTypeFile, larkim.MsgTypeAudio, larkim.MsgTypeMedia:
+		// File/audio/video messages may have a filename
+		name := extractFileName(rawContent)
+		if name != "" {
+			return name
+		}
+		return ""
+
+	default:
+		return rawContent
+	}
+}
+
+// downloadInboundMedia downloads media from inbound messages and stores in MediaStore.
+func (c *FeishuChannel) downloadInboundMedia(
+	ctx context.Context,
+	chatID, messageID, messageType, rawContent string,
+	store media.MediaStore,
+) []string {
+	var refs []string
+	scope := channels.BuildMediaScope("feishu", chatID, messageID)
+
+	switch messageType {
+	case larkim.MsgTypeImage:
+		imageKey := extractImageKey(rawContent)
+		if imageKey == "" {
+			return nil
+		}
+		ref := c.downloadResource(ctx, messageID, imageKey, "image", ".jpg", store, scope)
+		if ref != "" {
+			refs = append(refs, ref)
+		}
+
+	case larkim.MsgTypeFile, larkim.MsgTypeAudio, larkim.MsgTypeMedia:
+		fileKey := extractFileKey(rawContent)
+		if fileKey == "" {
+			return nil
+		}
+		// Derive a fallback extension from the message type.
+		var ext string
+		switch messageType {
+		case larkim.MsgTypeAudio:
+			ext = ".ogg"
+		case larkim.MsgTypeMedia:
+			ext = ".mp4"
+		default:
+			ext = "" // generic file — rely on resp.FileName
+		}
+		ref := c.downloadResource(ctx, messageID, fileKey, "file", ext, store, scope)
+		if ref != "" {
+			refs = append(refs, ref)
 		}
 	}
 
-	return false
+	return refs
+}
+
+// downloadResource downloads a message resource (image/file) from Feishu,
+// writes it to the project media directory, and stores the reference in MediaStore.
+// fallbackExt (e.g. ".jpg") is appended when the resolved filename has no extension.
+func (c *FeishuChannel) downloadResource(
+	ctx context.Context,
+	messageID, fileKey, resourceType, fallbackExt string,
+	store media.MediaStore,
+	scope string,
+) string {
+	req := larkim.NewGetMessageResourceReqBuilder().
+		MessageId(messageID).
+		FileKey(fileKey).
+		Type(resourceType).
+		Build()
+
+	resp, err := c.client.Im.V1.MessageResource.Get(ctx, req)
+	if err != nil {
+		logger.ErrorCF("feishu", "Failed to download resource", map[string]any{
+			"message_id": messageID,
+			"file_key":   fileKey,
+			"error":      err.Error(),
+		})
+		return ""
+	}
+	if !resp.Success() {
+		logger.ErrorCF("feishu", "Resource download api error", map[string]any{
+			"code": resp.Code,
+			"msg":  resp.Msg,
+		})
+		return ""
+	}
+
+	if resp.File == nil {
+		return ""
+	}
+	// Safely close the underlying reader if it implements io.Closer (e.g. HTTP response body).
+	if closer, ok := resp.File.(io.Closer); ok {
+		defer closer.Close()
+	}
+
+	filename := resp.FileName
+	if filename == "" {
+		filename = fileKey
+	}
+	// If filename still has no extension, append the fallback (like Telegram's ext parameter).
+	if filepath.Ext(filename) == "" && fallbackExt != "" {
+		filename += fallbackExt
+	}
+
+	// Write to the shared picoclaw_media directory using a unique name to avoid collisions.
+	mediaDir := filepath.Join(os.TempDir(), "picoclaw_media")
+	if mkdirErr := os.MkdirAll(mediaDir, 0o700); mkdirErr != nil {
+		logger.ErrorCF("feishu", "Failed to create media directory", map[string]any{
+			"error": mkdirErr.Error(),
+		})
+		return ""
+	}
+	ext := filepath.Ext(filename)
+	localPath := filepath.Join(mediaDir, utils.SanitizeFilename(messageID+"-"+fileKey+ext))
+
+	out, err := os.Create(localPath)
+	if err != nil {
+		logger.ErrorCF("feishu", "Failed to create local file for resource", map[string]any{
+			"error": err.Error(),
+		})
+		return ""
+	}
+
+	if _, copyErr := io.Copy(out, resp.File); copyErr != nil {
+		out.Close()
+		os.Remove(localPath)
+		logger.ErrorCF("feishu", "Failed to write resource to file", map[string]any{
+			"error": copyErr.Error(),
+		})
+		return ""
+	}
+	out.Close()
+
+	ref, err := store.Store(localPath, media.MediaMeta{
+		Filename: filename,
+		Source:   "feishu",
+	}, scope)
+	if err != nil {
+		logger.ErrorCF("feishu", "Failed to store downloaded resource", map[string]any{
+			"file_key": fileKey,
+			"error":    err.Error(),
+		})
+		os.Remove(localPath)
+		return ""
+	}
+
+	return ref
+}
+
+// appendMediaTags appends media type tags to content (like Telegram's "[image: photo]").
+func appendMediaTags(content, messageType string, mediaRefs []string) string {
+	if len(mediaRefs) == 0 {
+		return content
+	}
+
+	var tag string
+	switch messageType {
+	case larkim.MsgTypeImage:
+		tag = "[image: photo]"
+	case larkim.MsgTypeAudio:
+		tag = "[audio]"
+	case larkim.MsgTypeMedia:
+		tag = "[video]"
+	case larkim.MsgTypeFile:
+		tag = "[file]"
+	default:
+		tag = "[attachment]"
+	}
+
+	if content == "" {
+		return tag
+	}
+	return content + " " + tag
+}
+
+// sendCard sends an interactive card message to a chat.
+func (c *FeishuChannel) sendCard(ctx context.Context, chatID, cardContent string) error {
+	req := larkim.NewCreateMessageReqBuilder().
+		ReceiveIdType(larkim.ReceiveIdTypeChatId).
+		Body(larkim.NewCreateMessageReqBodyBuilder().
+			ReceiveId(chatID).
+			MsgType(larkim.MsgTypeInteractive).
+			Content(cardContent).
+			Build()).
+		Build()
+
+	resp, err := c.client.Im.V1.Message.Create(ctx, req)
+	if err != nil {
+		return fmt.Errorf("feishu send card: %w", channels.ErrTemporary)
+	}
+
+	if !resp.Success() {
+		return fmt.Errorf("feishu api error (code=%d msg=%s): %w", resp.Code, resp.Msg, channels.ErrTemporary)
+	}
+
+	logger.DebugCF("feishu", "Feishu card message sent", map[string]any{
+		"chat_id": chatID,
+	})
+
+	return nil
+}
+
+// sendImage uploads an image and sends it as a message.
+func (c *FeishuChannel) sendImage(ctx context.Context, chatID string, file *os.File) error {
+	// Upload image to get image_key
+	uploadReq := larkim.NewCreateImageReqBuilder().
+		Body(larkim.NewCreateImageReqBodyBuilder().
+			ImageType("message").
+			Image(file).
+			Build()).
+		Build()
+
+	uploadResp, err := c.client.Im.V1.Image.Create(ctx, uploadReq)
+	if err != nil {
+		return fmt.Errorf("feishu image upload: %w", err)
+	}
+	if !uploadResp.Success() {
+		return fmt.Errorf("feishu image upload api error (code=%d msg=%s)", uploadResp.Code, uploadResp.Msg)
+	}
+	if uploadResp.Data == nil || uploadResp.Data.ImageKey == nil {
+		return fmt.Errorf("feishu image upload: no image_key returned")
+	}
+
+	imageKey := *uploadResp.Data.ImageKey
+
+	// Send image message
+	content, _ := json.Marshal(map[string]string{"image_key": imageKey})
+	req := larkim.NewCreateMessageReqBuilder().
+		ReceiveIdType(larkim.ReceiveIdTypeChatId).
+		Body(larkim.NewCreateMessageReqBodyBuilder().
+			ReceiveId(chatID).
+			MsgType(larkim.MsgTypeImage).
+			Content(string(content)).
+			Build()).
+		Build()
+
+	resp, err := c.client.Im.V1.Message.Create(ctx, req)
+	if err != nil {
+		return fmt.Errorf("feishu image send: %w", err)
+	}
+	if !resp.Success() {
+		return fmt.Errorf("feishu image send api error (code=%d msg=%s)", resp.Code, resp.Msg)
+	}
+	return nil
+}
+
+// sendFile uploads a file and sends it as a message.
+func (c *FeishuChannel) sendFile(ctx context.Context, chatID string, file *os.File, filename, fileType string) error {
+	// Map part type to Feishu file type
+	feishuFileType := "stream"
+	switch fileType {
+	case "audio":
+		feishuFileType = "opus"
+	case "video":
+		feishuFileType = "mp4"
+	}
+
+	// Upload file to get file_key
+	uploadReq := larkim.NewCreateFileReqBuilder().
+		Body(larkim.NewCreateFileReqBodyBuilder().
+			FileType(feishuFileType).
+			FileName(filename).
+			File(file).
+			Build()).
+		Build()
+
+	uploadResp, err := c.client.Im.V1.File.Create(ctx, uploadReq)
+	if err != nil {
+		return fmt.Errorf("feishu file upload: %w", err)
+	}
+	if !uploadResp.Success() {
+		return fmt.Errorf("feishu file upload api error (code=%d msg=%s)", uploadResp.Code, uploadResp.Msg)
+	}
+	if uploadResp.Data == nil || uploadResp.Data.FileKey == nil {
+		return fmt.Errorf("feishu file upload: no file_key returned")
+	}
+
+	fileKey := *uploadResp.Data.FileKey
+
+	// Send file message
+	content, _ := json.Marshal(map[string]string{"file_key": fileKey})
+	req := larkim.NewCreateMessageReqBuilder().
+		ReceiveIdType(larkim.ReceiveIdTypeChatId).
+		Body(larkim.NewCreateMessageReqBodyBuilder().
+			ReceiveId(chatID).
+			MsgType(larkim.MsgTypeFile).
+			Content(string(content)).
+			Build()).
+		Build()
+
+	resp, err := c.client.Im.V1.Message.Create(ctx, req)
+	if err != nil {
+		return fmt.Errorf("feishu file send: %w", err)
+	}
+	if !resp.Success() {
+		return fmt.Errorf("feishu file send api error (code=%d msg=%s)", resp.Code, resp.Msg)
+	}
+	return nil
 }
 
 func extractFeishuSenderID(sender *larkim.EventSender) string {
@@ -858,527 +815,4 @@ func extractFeishuSenderID(sender *larkim.EventSender) string {
 	}
 
 	return ""
-}
-
-func extractFeishuMessageContent(message *larkim.EventMessage) string {
-	if message == nil || message.Content == nil || *message.Content == "" {
-		return ""
-	}
-
-	raw := *message.Content
-	messageType := ""
-	if message.MessageType != nil {
-		messageType = strings.TrimSpace(*message.MessageType)
-	}
-
-	switch messageType {
-	case larkim.MsgTypeText:
-		var textPayload struct {
-			Text string `json:"text"`
-		}
-		if err := json.Unmarshal([]byte(raw), &textPayload); err == nil {
-			return normalizeFeishuText(textPayload.Text)
-		}
-	case "post":
-		if extracted := extractFeishuPostContent(raw); extracted != "" {
-			return extracted
-		}
-		// Fall through: return raw JSON if we failed to parse
-	case "image":
-		return "<media:image>"
-	case "file":
-		return "<media:file>"
-	case "audio":
-		return "<media:audio>"
-	case "video", "media":
-		return "<media:video>"
-	case "sticker":
-		return "<media:sticker>"
-	}
-
-	return raw
-}
-
-func normalizeFeishuText(raw string) string {
-	t := strings.TrimSpace(raw)
-	if t == "" {
-		return ""
-	}
-
-	t = feishuBRTagRe.ReplaceAllString(t, "\n")
-	t = feishuParagraphJoinRe.ReplaceAllString(t, "\n")
-	t = feishuParagraphOpenRe.ReplaceAllString(t, "")
-	t = feishuParagraphCloseRe.ReplaceAllString(t, "")
-	t = feishuAnyTagRe.ReplaceAllString(t, "")
-	t = html.UnescapeString(t)
-	t = strings.ReplaceAll(t, "\u00a0", " ")
-
-	t = strings.ReplaceAll(t, "\r\n", "\n")
-	t = strings.ReplaceAll(t, "\r", "\n")
-	t = feishuMultiNewlineRe.ReplaceAllString(t, "\n\n")
-
-	// Fix Feishu list quirk: "-" or "1." marker and content split across lines.
-	t = feishuBrokenBulletRe.ReplaceAllString(t, "$1$2 $3")
-	t = feishuBrokenNumberedRe.ReplaceAllString(t, "$1$2 $3")
-
-	return strings.TrimSpace(t)
-}
-
-func feishuDetectAndStripBotMention(message *larkim.EventMessage, extractedContent, botID string) (isMentioned bool, cleaned string) {
-	cleaned = extractedContent
-	if message == nil {
-		return false, strings.TrimSpace(cleaned)
-	}
-
-	mentions := message.Mentions
-	if len(mentions) == 0 {
-		return false, strings.TrimSpace(cleaned)
-	}
-
-	messageType := strings.TrimSpace(stringValue(message.MessageType))
-
-	// For plain text, content may include mention keys like "@_user_1" which we can strip/replace.
-	if messageType == larkim.MsgTypeText {
-		cleanedText, mentioned := feishuCleanTextMentions(cleaned, mentions, botID)
-		return mentioned, cleanedText
-	}
-
-	// For non-text messages, we can only infer mention from the mentions array.
-	if botID == "" {
-		return true, strings.TrimSpace(cleaned)
-	}
-
-	for _, m := range mentions {
-		if m == nil {
-			continue
-		}
-		if feishuUserIDMatches(m.Id, botID) {
-			return true, strings.TrimSpace(cleaned)
-		}
-	}
-
-	return false, strings.TrimSpace(cleaned)
-}
-
-func feishuCleanTextMentions(text string, mentions []*larkim.MentionEvent, botID string) (cleaned string, isMentioned bool) {
-	cleaned = strings.TrimSpace(text)
-	if cleaned == "" || len(mentions) == 0 {
-		return cleaned, false
-	}
-
-	// If botID is unknown, use a best-effort heuristic:
-	// treat leading mention(s) as the "addressing" mention(s) and strip them.
-	if botID == "" {
-		for {
-			removed := false
-			for _, m := range mentions {
-				if m == nil {
-					continue
-				}
-				key := strings.TrimSpace(stringValue(m.Key))
-				if key == "" {
-					continue
-				}
-				if strings.HasPrefix(cleaned, key) {
-					isMentioned = true
-					cleaned = strings.TrimSpace(strings.TrimPrefix(cleaned, key))
-					removed = true
-					break
-				}
-			}
-			if !removed {
-				break
-			}
-		}
-
-		// Replace remaining mention keys with "@Name" for readability.
-		for _, m := range mentions {
-			if m == nil {
-				continue
-			}
-			key := strings.TrimSpace(stringValue(m.Key))
-			name := strings.TrimSpace(stringValue(m.Name))
-			if key == "" || name == "" {
-				continue
-			}
-			cleaned = strings.ReplaceAll(cleaned, key, "@"+name)
-		}
-
-		return feishuNormalizeWhitespace(cleaned), isMentioned
-	}
-
-	// botID configured: detect bot mention by ID and strip bot mention key(s).
-	botKeys := make(map[string]struct{})
-	for _, m := range mentions {
-		if m == nil {
-			continue
-		}
-		if feishuUserIDMatches(m.Id, botID) {
-			isMentioned = true
-			if key := strings.TrimSpace(stringValue(m.Key)); key != "" {
-				botKeys[key] = struct{}{}
-			}
-		}
-	}
-
-	for key := range botKeys {
-		cleaned = strings.ReplaceAll(cleaned, key, "")
-	}
-
-	// Replace other mention keys with "@Name" for readability.
-	for _, m := range mentions {
-		if m == nil {
-			continue
-		}
-		key := strings.TrimSpace(stringValue(m.Key))
-		name := strings.TrimSpace(stringValue(m.Name))
-		if key == "" || name == "" {
-			continue
-		}
-		if _, ok := botKeys[key]; ok {
-			continue
-		}
-		cleaned = strings.ReplaceAll(cleaned, key, "@"+name)
-	}
-
-	return feishuNormalizeWhitespace(cleaned), isMentioned
-}
-
-func feishuNormalizeWhitespace(s string) string {
-	s = strings.TrimSpace(s)
-	for strings.Contains(s, "  ") {
-		s = strings.ReplaceAll(s, "  ", " ")
-	}
-	s = strings.ReplaceAll(s, "\n ", "\n")
-	s = strings.ReplaceAll(s, " \n", "\n")
-	return strings.TrimSpace(s)
-}
-
-func feishuUserIDMatches(id *larkim.UserId, want string) bool {
-	if id == nil || want == "" {
-		return false
-	}
-	if id.UserId != nil && *id.UserId == want {
-		return true
-	}
-	if id.OpenId != nil && *id.OpenId == want {
-		return true
-	}
-	if id.UnionId != nil && *id.UnionId == want {
-		return true
-	}
-	return false
-}
-
-func feishuExtractJSONString(rawJSON string, keys ...string) string {
-	rawJSON = strings.TrimSpace(rawJSON)
-	if rawJSON == "" || len(keys) == 0 {
-		return ""
-	}
-
-	var payload map[string]any
-	if err := json.Unmarshal([]byte(rawJSON), &payload); err != nil {
-		return ""
-	}
-
-	for _, key := range keys {
-		key = strings.TrimSpace(key)
-		if key == "" {
-			continue
-		}
-		if v, ok := payload[key]; ok {
-			if s, ok := v.(string); ok && strings.TrimSpace(s) != "" {
-				return strings.TrimSpace(s)
-			}
-		}
-	}
-	return ""
-}
-
-func extractFeishuPostImageKeys(rawJSON string) []string {
-	rawJSON = strings.TrimSpace(rawJSON)
-	if rawJSON == "" {
-		return nil
-	}
-
-	var payload any
-	if err := json.Unmarshal([]byte(rawJSON), &payload); err != nil {
-		return nil
-	}
-
-	keys := map[string]struct{}{}
-	var walk func(v any)
-	walk = func(v any) {
-		switch n := v.(type) {
-		case map[string]any:
-			if imageKey, ok := n["image_key"].(string); ok && strings.TrimSpace(imageKey) != "" {
-				keys[strings.TrimSpace(imageKey)] = struct{}{}
-			}
-			if imageKey, ok := n["imageKey"].(string); ok && strings.TrimSpace(imageKey) != "" {
-				keys[strings.TrimSpace(imageKey)] = struct{}{}
-			}
-			for _, child := range n {
-				walk(child)
-			}
-		case []any:
-			for _, child := range n {
-				walk(child)
-			}
-		}
-	}
-	walk(payload)
-
-	out := make([]string, 0, len(keys))
-	for k := range keys {
-		out = append(out, k)
-	}
-	sort.Strings(out)
-	return out
-}
-
-func resolveFeishuFileUploadTypes(mediaType, filename, contentType string) (fileType, messageType string) {
-	ext := strings.TrimPrefix(strings.ToLower(filepath.Ext(filename)), ".")
-	if ext == "" {
-		ct := strings.ToLower(strings.TrimSpace(contentType))
-		switch {
-		case strings.HasPrefix(ct, "video/mp4"):
-			ext = "mp4"
-		case strings.Contains(ct, "opus"):
-			ext = "opus"
-		}
-	}
-	if ext == "" {
-		ext = "file"
-	}
-
-	messageType = "file"
-	switch strings.ToLower(strings.TrimSpace(mediaType)) {
-	case "video":
-		if ext == "mp4" {
-			messageType = "media"
-		}
-	case "audio":
-		if ext == "opus" {
-			messageType = "audio"
-		}
-	}
-	return ext, messageType
-}
-
-func (c *FeishuChannel) downloadMessageResource(ctx context.Context, messageID, fileKey, resourceType string) (localPath, filename, contentType string, err error) {
-	if messageID == "" {
-		return "", "", "", fmt.Errorf("feishu resource download: message_id is empty")
-	}
-	if fileKey == "" {
-		return "", "", "", fmt.Errorf("feishu resource download: file_key is empty")
-	}
-	resourceType = strings.TrimSpace(resourceType)
-	if resourceType == "" {
-		return "", "", "", fmt.Errorf("feishu resource download: type is empty")
-	}
-
-	req := larkim.NewGetMessageResourceReqBuilder().
-		MessageId(messageID).
-		FileKey(fileKey).
-		Type(resourceType).
-		Build()
-
-	// Avoid blocking websocket handler forever on stuck downloads.
-	dlCtx := ctx
-	if _, ok := ctx.Deadline(); !ok {
-		var cancel context.CancelFunc
-		dlCtx, cancel = context.WithTimeout(ctx, 30*time.Second)
-		defer cancel()
-	}
-
-	var resp *larkim.GetMessageResourceResp
-	var lastErr error
-	backoff := 400 * time.Millisecond
-retry:
-	for attempt := 0; attempt < 3; attempt++ {
-		resp, err = c.client.Im.V1.MessageResource.Get(dlCtx, req)
-		if err == nil {
-			lastErr = nil
-			break
-		}
-		lastErr = err
-		// Respect cancellation/deadline immediately.
-		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || dlCtx.Err() != nil {
-			break
-		}
-		select {
-		case <-dlCtx.Done():
-			break retry
-		case <-time.After(backoff):
-		}
-		if backoff < 2*time.Second {
-			backoff *= 2
-		}
-	}
-	if lastErr != nil {
-		return "", "", "", fmt.Errorf("%w: feishu resource download: %v", channels.ErrTemporary, lastErr)
-	}
-	if resp == nil || resp.File == nil {
-		if resp != nil && !resp.Success() {
-			return "", "", "", fmt.Errorf("feishu resource download rejected: code=%d msg=%s", resp.Code, resp.Msg)
-		}
-		return "", "", "", fmt.Errorf("feishu resource download: empty response")
-	}
-
-	filename = strings.TrimSpace(resp.FileName)
-	if filename == "" {
-		filename = fileKey
-	}
-	filename = utils.SanitizeFilename(filename)
-
-	if resp.ApiResp != nil {
-		contentType = strings.TrimSpace(resp.ApiResp.Header.Get("Content-Type"))
-		if idx := strings.Index(contentType, ";"); idx >= 0 {
-			contentType = strings.TrimSpace(contentType[:idx])
-		}
-	}
-
-	maxBytes := int64(25 * 1024 * 1024) // default: 25MB for files
-	if strings.EqualFold(resourceType, "image") {
-		maxBytes = 10 * 1024 * 1024 // Feishu message images: 10MB limit
-	}
-	if resp.ApiResp != nil {
-		if cl := strings.TrimSpace(resp.ApiResp.Header.Get("Content-Length")); cl != "" {
-			if n, parseErr := strconv.ParseInt(cl, 10, 64); parseErr == nil && n > 0 && maxBytes > 0 && n > maxBytes {
-				return "", "", "", fmt.Errorf("%w: feishu resource download: file too large (%d bytes > %d bytes)", channels.ErrSendFailed, n, maxBytes)
-			}
-		}
-	}
-
-	mediaDir := filepath.Join(os.TempDir(), "picoclaw_media")
-	if err := os.MkdirAll(mediaDir, 0o700); err != nil {
-		return "", "", "", fmt.Errorf("feishu resource download: create media dir: %w", err)
-	}
-
-	localPath = filepath.Join(mediaDir, uuid.New().String()[:8]+"_"+filename)
-	f, err := os.Create(localPath)
-	if err != nil {
-		return "", "", "", fmt.Errorf("feishu resource download: create file: %w", err)
-	}
-	defer f.Close()
-
-	if closer, ok := resp.File.(interface{ Close() error }); ok {
-		defer closer.Close()
-	}
-
-	reader := io.Reader(resp.File)
-	if maxBytes > 0 {
-		reader = io.LimitReader(resp.File, maxBytes+1)
-	}
-
-	written, err := io.Copy(f, reader)
-	if err != nil {
-		f.Close()
-		_ = os.Remove(localPath)
-		return "", "", "", fmt.Errorf("feishu resource download: write file: %w", err)
-	}
-	if maxBytes > 0 && written > maxBytes {
-		f.Close()
-		_ = os.Remove(localPath)
-		return "", "", "", fmt.Errorf("%w: feishu resource download: file too large (> %d bytes)", channels.ErrSendFailed, maxBytes)
-	}
-
-	return localPath, filename, contentType, nil
-}
-
-func extractFeishuPostContent(rawJSON string) string {
-	var payload map[string]any
-	if err := json.Unmarshal([]byte(rawJSON), &payload); err != nil {
-		return ""
-	}
-
-	title, _ := payload["title"].(string)
-	title = normalizeFeishuText(title)
-
-	var content any
-	if zh, ok := payload["zh_cn"].(map[string]any); ok {
-		content = zh["content"]
-	} else {
-		content = payload["content"]
-	}
-
-	lines := extractFeishuPostLines(content)
-	if len(lines) == 0 {
-		return strings.TrimSpace(title)
-	}
-
-	if strings.TrimSpace(title) != "" {
-		lines = append([]string{title}, lines...)
-	}
-	return strings.TrimSpace(strings.Join(lines, "\n"))
-}
-
-func extractFeishuPostLines(content any) []string {
-	paras, ok := content.([]any)
-	if !ok || len(paras) == 0 {
-		return nil
-	}
-
-	lines := make([]string, 0, len(paras))
-	for _, para := range paras {
-		nodes, ok := para.([]any)
-		if !ok {
-			continue
-		}
-		var sb strings.Builder
-		for _, node := range nodes {
-			obj, ok := node.(map[string]any)
-			if !ok {
-				continue
-			}
-			appendFeishuPostNodeText(&sb, obj)
-		}
-		line := normalizeFeishuText(sb.String())
-		if line != "" {
-			lines = append(lines, line)
-		}
-	}
-	return lines
-}
-
-func appendFeishuPostNodeText(sb *strings.Builder, node map[string]any) {
-	tag, _ := node["tag"].(string)
-	tag = strings.ToLower(strings.TrimSpace(tag))
-	switch tag {
-	case "text", "md":
-		if text, _ := node["text"].(string); text != "" {
-			sb.WriteString(text)
-		}
-	case "a":
-		if text, _ := node["text"].(string); text != "" {
-			sb.WriteString(text)
-			return
-		}
-		if href, _ := node["href"].(string); href != "" {
-			sb.WriteString(href)
-		}
-	case "at":
-		// Best-effort: keep something readable, actual mention expansion is not available here.
-		if name, _ := node["user_name"].(string); name != "" {
-			sb.WriteString("@")
-			sb.WriteString(name)
-			return
-		}
-		if name, _ := node["name"].(string); name != "" {
-			sb.WriteString("@")
-			sb.WriteString(name)
-			return
-		}
-		if openID, _ := node["open_id"].(string); openID != "" {
-			sb.WriteString("@")
-			sb.WriteString(openID)
-			return
-		}
-	case "img":
-		sb.WriteString("[image]")
-	default:
-		if text, _ := node["text"].(string); text != "" {
-			sb.WriteString(text)
-		}
-	}
 }

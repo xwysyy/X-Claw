@@ -53,11 +53,13 @@ type AgentLoop struct {
 
 // processOptions configures how a message is processed
 type processOptions struct {
-	SessionKey      string // Session identifier for history/context
-	Channel         string // Target channel for tool execution
-	ChatID          string // Target chat ID for tool execution
-	SenderID        string // Message sender identifier for tool execution
-	UserMessage     string // User message content (may include prefix)
+	SessionKey  string // Session identifier for history/context
+	Channel     string // Target channel for tool execution
+	ChatID      string // Target chat ID for tool execution
+	SenderID    string // Message sender identifier for tool execution
+	UserMessage string // User message content (may include trigger prefix)
+	Media       []string
+
 	DefaultResponse string // Response when LLM returns empty
 	EnableSummary   bool   // Whether to trigger summarization
 	SendResponse    bool   // Whether to send response via bus
@@ -121,7 +123,7 @@ func NewAgentLoop(cfg *config.Config, msgBus *bus.MessageBus, provider providers
 	fallbackChain := providers.NewFallbackChain(cooldown)
 
 	// MCP Bridge manager (Phase D1/D2).
-	mcpMgr := mcp.NewManager(cfg.Tools.MCP)
+	mcpMgr := mcp.NewManager()
 
 	// Create state manager using default agent's workspace for channel recording
 	defaultAgent := registry.GetDefaultAgent()
@@ -147,7 +149,7 @@ func NewAgentLoop(cfg *config.Config, msgBus *bus.MessageBus, provider providers
 	}
 
 	// Register shared tools to all agents.
-	registerSharedTools(cfg, msgBus, registry, provider, al, taskLedger, mcpMgr)
+	registerSharedTools(cfg, msgBus, registry, provider, al, taskLedger)
 
 	return al
 }
@@ -176,31 +178,52 @@ func (al *AgentLoop) SetConfig(cfg *config.Config) {
 // ReloadMCPTools refreshes MCP servers and re-registers tools into each agent registry.
 // This is best-effort and safe to call multiple times.
 func (al *AgentLoop) ReloadMCPTools(ctx context.Context) {
-	if al == nil || al.registry == nil || al.mcpMgr == nil {
+	if al == nil || al.registry == nil {
 		return
+	}
+	if ctx == nil {
+		ctx = context.Background()
 	}
 
 	cfg := al.Config()
-	if cfg == nil {
+
+	// Always unregister old MCP tools first to avoid stale tool definitions.
+	for _, agentID := range al.registry.ListAgentIDs() {
+		agent, ok := al.registry.GetAgent(agentID)
+		if !ok || agent == nil || agent.Tools == nil {
+			continue
+		}
+		agent.Tools.UnregisterPrefix("mcp_")
+		if agent.ContextBuilder != nil {
+			agent.ContextBuilder.InvalidateCache()
+		}
+	}
+
+	oldMgr := al.mcpMgr
+
+	// Disabled or empty config → close connections and exit.
+	if cfg == nil || !cfg.Tools.MCP.Enabled || len(cfg.Tools.MCP.Servers) == 0 {
+		if oldMgr != nil {
+			_ = oldMgr.Close()
+		}
+		al.mcpMgr = mcp.NewManager()
 		return
 	}
 
-	oldPrefixes := al.mcpMgr.ToolPrefixes()
-	al.mcpMgr.ApplyConfig(cfg.Tools.MCP)
-	newPrefixes := al.mcpMgr.ToolPrefixes()
+	newMgr := mcp.NewManager()
+	if err := newMgr.LoadFromConfig(ctx, cfg); err != nil {
+		logger.WarnCF("agent", "MCP manager load failed (best-effort)", map[string]any{
+			"error": err.Error(),
+		})
+	}
 
-	prefixSet := map[string]struct{}{}
-	for _, p := range oldPrefixes {
-		prefixSet[p] = struct{}{}
+	// Deterministic registration order for stable prompts / KV cache.
+	all := newMgr.GetAllTools()
+	serverNames := make([]string, 0, len(all))
+	for name := range all {
+		serverNames = append(serverNames, name)
 	}
-	for _, p := range newPrefixes {
-		prefixSet[p] = struct{}{}
-	}
-	prefixes := make([]string, 0, len(prefixSet))
-	for p := range prefixSet {
-		prefixes = append(prefixes, p)
-	}
-	sort.Strings(prefixes)
+	sort.Strings(serverNames)
 
 	for _, agentID := range al.registry.ListAgentIDs() {
 		agent, ok := al.registry.GetAgent(agentID)
@@ -208,22 +231,23 @@ func (al *AgentLoop) ReloadMCPTools(ctx context.Context) {
 			continue
 		}
 
-		for _, p := range prefixes {
-			agent.Tools.UnregisterPrefix(p)
-		}
-
-		if al.mcpMgr.Enabled() {
-			if err := al.mcpMgr.RegisterTools(ctx, agent.Tools); err != nil {
-				logger.WarnCF("agent", "MCP tools reload failed (best-effort)", map[string]any{
-					"agent_id": agentID,
-					"error":    err.Error(),
-				})
+		for _, serverName := range serverNames {
+			for _, toolDef := range all[serverName] {
+				if toolDef == nil {
+					continue
+				}
+				agent.Tools.Register(tools.NewMCPTool(newMgr, serverName, toolDef))
 			}
 		}
 
 		if agent.ContextBuilder != nil {
 			agent.ContextBuilder.InvalidateCache()
 		}
+	}
+
+	al.mcpMgr = newMgr
+	if oldMgr != nil {
+		_ = oldMgr.Close()
 	}
 }
 
@@ -258,7 +282,6 @@ func registerSharedTools(
 	provider providers.LLMProvider,
 	sessionsExecutor tools.SessionsSendExecutor,
 	taskLedger *tools.TaskLedger,
-	mcpMgr *mcp.Manager,
 ) {
 	for _, agentID := range registry.ListAgentIDs() {
 		agent, ok := registry.GetAgent(agentID)
@@ -389,16 +412,6 @@ func registerSharedTools(
 			})
 		}
 
-		// MCP Bridge (Phase D1): dynamically register external tool ecosystems.
-		if mcpMgr.Enabled() {
-			if err := mcpMgr.RegisterTools(context.Background(), agent.Tools); err != nil {
-				logger.WarnCF("agent", "MCP tools registration failed (best-effort)", map[string]any{
-					"agent_id": agentID,
-					"error":    err.Error(),
-				})
-			}
-		}
-
 		// Update context builder with the complete tools registry
 		agent.ContextBuilder.SetToolsRegistry(agent.Tools)
 	}
@@ -504,6 +517,12 @@ func (al *AgentLoop) Run(ctx context.Context) error {
 	cfg := al.Config()
 	if cfg != nil && cfg.Audit.Enabled {
 		go al.runAuditLoop(ctx)
+	}
+
+	// Best-effort: ensure MCP tools are registered on startup (and connections
+	// are established if enabled). This is safe to call multiple times.
+	if cfg != nil && cfg.Tools.MCP.Enabled {
+		al.ReloadMCPTools(ctx)
 	}
 
 	queueEnabled := true
@@ -779,7 +798,10 @@ func (al *AgentLoop) LastActive() (string, string) {
 	return channel, chatID
 }
 
-func (al *AgentLoop) ProcessDirect(ctx context.Context, content, sessionKey string) (string, error) {
+func (al *AgentLoop) ProcessDirect(
+	ctx context.Context,
+	content, sessionKey string,
+) (string, error) {
 	return al.ProcessDirectWithChannel(ctx, content, sessionKey, "cli", "direct")
 }
 
@@ -839,7 +861,10 @@ func (al *AgentLoop) ProcessSessionMessage(
 
 // ProcessHeartbeat processes a heartbeat request without session history.
 // Each heartbeat is independent and doesn't accumulate context.
-func (al *AgentLoop) ProcessHeartbeat(ctx context.Context, content, channel, chatID string) (string, error) {
+func (al *AgentLoop) ProcessHeartbeat(
+	ctx context.Context,
+	content, channel, chatID string,
+) (string, error) {
 	agent := al.registry.GetDefaultAgent()
 	if agent == nil {
 		return "", fmt.Errorf("no default agent for heartbeat")
@@ -864,13 +889,16 @@ func (al *AgentLoop) processMessage(ctx context.Context, msg bus.InboundMessage)
 	} else {
 		logContent = utils.Truncate(msg.Content, 80)
 	}
-	logger.InfoCF("agent", fmt.Sprintf("Processing message from %s:%s: %s", msg.Channel, msg.SenderID, logContent),
+	logger.InfoCF(
+		"agent",
+		fmt.Sprintf("Processing message from %s:%s: %s", msg.Channel, msg.SenderID, logContent),
 		map[string]any{
 			"channel":     msg.Channel,
 			"chat_id":     msg.ChatID,
 			"sender_id":   msg.SenderID,
 			"session_key": msg.SessionKey,
-		})
+		},
+	)
 
 	// Route system messages to processSystemMessage
 	if msg.Channel == "system" {
@@ -955,6 +983,7 @@ func (al *AgentLoop) processMessage(ctx context.Context, msg bus.InboundMessage)
 		ChatID:          msg.ChatID,
 		SenderID:        msg.SenderID,
 		UserMessage:     userMessage,
+		Media:           msg.Media,
 		DefaultResponse: defaultResponse,
 		EnableSummary:   true,
 		SendResponse:    false,
@@ -963,9 +992,15 @@ func (al *AgentLoop) processMessage(ctx context.Context, msg bus.InboundMessage)
 	})
 }
 
-func (al *AgentLoop) processSystemMessage(ctx context.Context, msg bus.InboundMessage) (string, error) {
+func (al *AgentLoop) processSystemMessage(
+	ctx context.Context,
+	msg bus.InboundMessage,
+) (string, error) {
 	if msg.Channel != "system" {
-		return "", fmt.Errorf("processSystemMessage called with non-system message channel: %s", msg.Channel)
+		return "", fmt.Errorf(
+			"processSystemMessage called with non-system message channel: %s",
+			msg.Channel,
+		)
 	}
 
 	logger.InfoCF("agent", "Processing system message",
@@ -1023,16 +1058,23 @@ func (al *AgentLoop) processSystemMessage(ctx context.Context, msg bus.InboundMe
 }
 
 // runAgentLoop is the core message processing logic.
-func (al *AgentLoop) runAgentLoop(ctx context.Context, agent *AgentInstance, opts processOptions) (string, error) {
+func (al *AgentLoop) runAgentLoop(
+	ctx context.Context,
+	agent *AgentInstance,
+	opts processOptions,
+) (string, error) {
 	cfg := al.Config()
-
 	// 0. Record last channel for heartbeat notifications (skip internal channels)
 	if opts.Channel != "" && opts.ChatID != "" {
 		// Don't record internal channels (cli, system, subagent)
 		if !constants.IsInternalChannel(opts.Channel) {
 			channelKey := fmt.Sprintf("%s:%s", opts.Channel, opts.ChatID)
 			if err := al.RecordLastChannel(channelKey); err != nil {
-				logger.WarnCF("agent", "Failed to record last channel", map[string]any{"error": err.Error()})
+				logger.WarnCF(
+					"agent",
+					"Failed to record last channel",
+					map[string]any{"error": err.Error()},
+				)
 			}
 		}
 	}
@@ -1069,11 +1111,18 @@ func (al *AgentLoop) runAgentLoop(ctx context.Context, agent *AgentInstance, opt
 		history,
 		summary,
 		llmUserMessage,
-		nil,
+		opts.Media,
 		opts.Channel,
 		opts.ChatID,
 		ws,
 	)
+
+	// Resolve media:// refs to base64 data URLs (streaming)
+	maxMediaSize := config.DefaultMaxMediaSize
+	if cfg != nil {
+		maxMediaSize = cfg.Agents.Defaults.GetMaxMediaSize()
+	}
+	messages = resolveMediaRefs(messages, al.mediaStore, maxMediaSize)
 
 	// Phase E1: durable run checkpoint (append-only JSONL event stream).
 	runTraceEnabled := cfg != nil && cfg.Tools.Trace.Enabled
@@ -1086,7 +1135,7 @@ func (al *AgentLoop) runAgentLoop(ctx context.Context, agent *AgentInstance, opt
 		}
 	}
 
-	// 4. Save user message to session
+	// Save user message to session (WAL before entering the LLM/tool loop).
 	agent.Sessions.AddMessage(opts.SessionKey, "user", opts.UserMessage)
 	// WAL: persist user message before entering the LLM/tool loop to avoid losing
 	// inbound user input on crash/restart.
@@ -1195,7 +1244,10 @@ func (al *AgentLoop) targetReasoningChannelID(channelName string) (chatID string
 	return ""
 }
 
-func (al *AgentLoop) handleReasoning(ctx context.Context, reasoningContent, channelName, channelID string) {
+func (al *AgentLoop) handleReasoning(
+	ctx context.Context,
+	reasoningContent, channelName, channelID string,
+) {
 	if reasoningContent == "" || channelName == "" || channelID == "" {
 		return
 	}
@@ -1321,22 +1373,33 @@ func (al *AgentLoop) runLLMIteration(
 
 		callLLM := func() (*providers.LLMResponse, string, error) {
 			if len(agent.Candidates) > 1 && al.fallback != nil {
-				fbResult, fbErr := al.fallback.Execute(ctx, agent.Candidates,
+				fbResult, fbErr := al.fallback.Execute(
+					ctx,
+					agent.Candidates,
 					func(ctx context.Context, provider, model string) (*providers.LLMResponse, error) {
-						return agent.Provider.Chat(ctx, messages, providerToolDefs, model, map[string]any{
-							"max_tokens":       agent.MaxTokens,
-							"temperature":      agent.Temperature,
-							"prompt_cache_key": agent.ID,
-						})
+						return agent.Provider.Chat(
+							ctx,
+							messages,
+							providerToolDefs,
+							model,
+							map[string]any{
+								"max_tokens":       agent.MaxTokens,
+								"temperature":      agent.Temperature,
+								"prompt_cache_key": agent.ID,
+							},
+						)
 					},
 				)
 				if fbErr != nil {
 					return nil, "", fbErr
 				}
 				if fbResult.Provider != "" && len(fbResult.Attempts) > 0 {
-					logger.InfoCF("agent", fmt.Sprintf("Fallback: succeeded with %s/%s after %d attempts",
-						fbResult.Provider, fbResult.Model, len(fbResult.Attempts)+1),
-						map[string]any{"agent_id": agent.ID, "iteration": iteration})
+					logger.InfoCF(
+						"agent",
+						fmt.Sprintf("Fallback: succeeded with %s/%s after %d attempts",
+							fbResult.Provider, fbResult.Model, len(fbResult.Attempts)+1),
+						map[string]any{"agent_id": agent.ID, "iteration": iteration},
+					)
 				}
 				return fbResult.Response, strings.TrimSpace(fbResult.Model), nil
 			}
@@ -1526,7 +1589,12 @@ func (al *AgentLoop) runLLMIteration(
 			}
 		}
 
-		go al.handleReasoning(ctx, response.Reasoning, opts.Channel, al.targetReasoningChannelID(opts.Channel))
+		go al.handleReasoning(
+			ctx,
+			response.Reasoning,
+			opts.Channel,
+			al.targetReasoningChannelID(opts.Channel),
+		)
 
 		logger.DebugCF("agent", "LLM response",
 			map[string]any{
@@ -1999,7 +2067,11 @@ func formatMessagesForLog(messages []providers.Message) string {
 			for _, tc := range msg.ToolCalls {
 				fmt.Fprintf(&sb, "    - ID: %s, Type: %s, Name: %s\n", tc.ID, tc.Type, tc.Name)
 				if tc.Function != nil {
-					fmt.Fprintf(&sb, "      Arguments: %s\n", utils.Truncate(tc.Function.Arguments, 200))
+					fmt.Fprintf(
+						&sb,
+						"      Arguments: %s\n",
+						utils.Truncate(tc.Function.Arguments, 200),
+					)
 				}
 			}
 		}
@@ -2028,7 +2100,11 @@ func formatToolsForLog(toolDefs []providers.ToolDefinition) string {
 		fmt.Fprintf(&sb, "  [%d] Type: %s, Name: %s\n", i, tool.Type, tool.Function.Name)
 		fmt.Fprintf(&sb, "      Description: %s\n", tool.Function.Description)
 		if len(tool.Function.Parameters) > 0 {
-			fmt.Fprintf(&sb, "      Parameters: %s\n", utils.Truncate(fmt.Sprintf("%v", tool.Function.Parameters), 200))
+			fmt.Fprintf(
+				&sb,
+				"      Parameters: %s\n",
+				utils.Truncate(fmt.Sprintf("%v", tool.Function.Parameters), 200),
+			)
 		}
 	}
 	sb.WriteString("]")
@@ -2125,7 +2201,9 @@ func (al *AgentLoop) summarizeBatch(
 	existingSummary string,
 ) (string, error) {
 	var sb strings.Builder
-	sb.WriteString("Provide a concise summary of this conversation segment, preserving core context and key points.\n")
+	sb.WriteString(
+		"Provide a concise summary of this conversation segment, preserving core context and key points.\n",
+	)
 	if existingSummary != "" {
 		sb.WriteString("Existing context: ")
 		sb.WriteString(existingSummary)

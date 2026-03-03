@@ -26,7 +26,12 @@ func NewToolRegistry() *ToolRegistry {
 func (r *ToolRegistry) Register(tool Tool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.tools[tool.Name()] = tool
+	name := tool.Name()
+	if _, exists := r.tools[name]; exists {
+		logger.WarnCF("tools", "Tool registration overwrites existing tool",
+			map[string]any{"name": name})
+	}
+	r.tools[name] = tool
 }
 
 // Unregister removes a tool by name. It returns true if a tool existed.

@@ -92,6 +92,15 @@ func resolveProviderSelection(cfg *config.Config) (providerSelection, error) {
 			if cfg.Providers.OpenRouter.APIKey != "" {
 				applyProviderConfig(&sel, cfg.Providers.OpenRouter, "https://openrouter.ai/api/v1")
 			}
+		case "litellm":
+			if cfg.Providers.LiteLLM.APIKey != "" || cfg.Providers.LiteLLM.APIBase != "" {
+				sel.apiKey = cfg.Providers.LiteLLM.APIKey
+				sel.apiBase = cfg.Providers.LiteLLM.APIBase
+				sel.proxy = cfg.Providers.LiteLLM.Proxy
+				if sel.apiBase == "" {
+					sel.apiBase = "http://localhost:4000/v1"
+				}
+			}
 		case "zhipu", "glm":
 			if cfg.Providers.Zhipu.APIKey != "" {
 				applyProviderConfig(&sel, cfg.Providers.Zhipu, "https://open.bigmodel.cn/api/paas/v4")

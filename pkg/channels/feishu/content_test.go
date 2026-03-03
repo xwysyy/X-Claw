@@ -194,34 +194,6 @@ func TestExtractFeishuMessageContent(t *testing.T) {
 	}
 }
 
-func TestExtractFeishuMessageContent_MediaPlaceholders(t *testing.T) {
-	tests := []struct {
-		messageType string
-		want        string
-	}{
-		{messageType: "image", want: "<media:image>"},
-		{messageType: "file", want: "<media:file>"},
-		{messageType: "audio", want: "<media:audio>"},
-		{messageType: "video", want: "<media:video>"},
-		{messageType: "media", want: "<media:video>"},
-		{messageType: "sticker", want: "<media:sticker>"},
-	}
-
-	raw := `{"x":"y"}`
-	for _, tc := range tests {
-		t.Run(tc.messageType, func(t *testing.T) {
-			mt := tc.messageType
-			msg := &larkim.EventMessage{
-				MessageType: &mt,
-				Content:     &raw,
-			}
-			if got := extractFeishuMessageContent(msg); got != tc.want {
-				t.Fatalf("extractFeishuMessageContent(%s) = %q, want %q", tc.messageType, got, tc.want)
-			}
-		})
-	}
-}
-
 func TestExtractFeishuPostContent_FallbackContentField(t *testing.T) {
 	raw := `{
 		"title":"<p>t</p>",
