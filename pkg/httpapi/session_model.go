@@ -9,6 +9,7 @@ import (
 
 	"github.com/sipeed/picoclaw/pkg/auditlog"
 	"github.com/sipeed/picoclaw/pkg/session"
+	"github.com/sipeed/picoclaw/pkg/utils"
 )
 
 type SessionModelHandlerOptions struct {
@@ -92,7 +93,7 @@ func (h *SessionModelHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 
 	switch r.Method {
 	case http.MethodGet:
-		key := strings.TrimSpace(r.URL.Query().Get("session_key"))
+		key := utils.CanonicalSessionKey(r.URL.Query().Get("session_key"))
 		if key == "" {
 			w.WriteHeader(http.StatusBadRequest)
 			_ = json.NewEncoder(w).Encode(sessionModelResponse{OK: false, Error: "session_key is required"})
@@ -131,7 +132,7 @@ func (h *SessionModelHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 			return
 		}
 
-		key := strings.TrimSpace(req.SessionKey)
+		key := utils.CanonicalSessionKey(req.SessionKey)
 		if key == "" {
 			w.WriteHeader(http.StatusBadRequest)
 			_ = json.NewEncoder(w).Encode(sessionModelResponse{OK: false, Error: "session_key is required"})

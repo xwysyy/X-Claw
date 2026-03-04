@@ -40,7 +40,10 @@ func NewServer(host string, port int) *Server {
 	}
 
 	mux.HandleFunc("/health", s.healthHandler)
+	// Alias for Kubernetes conventions.
+	mux.HandleFunc("/healthz", s.healthHandler)
 	mux.HandleFunc("/ready", s.readyHandler)
+	mux.HandleFunc("/readyz", s.readyHandler)
 
 	addr := fmt.Sprintf("%s:%d", host, port)
 	s.server = &http.Server{
@@ -159,7 +162,9 @@ func (s *Server) readyHandler(w http.ResponseWriter, r *http.Request) {
 // This allows the health endpoints to be served by a shared HTTP server.
 func (s *Server) RegisterOnMux(mux *http.ServeMux) {
 	mux.HandleFunc("/health", s.healthHandler)
+	mux.HandleFunc("/healthz", s.healthHandler)
 	mux.HandleFunc("/ready", s.readyHandler)
+	mux.HandleFunc("/readyz", s.readyHandler)
 }
 
 func statusString(ok bool) string {

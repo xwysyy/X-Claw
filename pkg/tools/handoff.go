@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/sipeed/picoclaw/pkg/session"
+	"github.com/sipeed/picoclaw/pkg/utils"
 )
 
 type AgentLookupFunc func(agentID string) (AgentInfo, bool)
@@ -98,15 +99,15 @@ func (t *HandoffTool) Execute(ctx context.Context, args map[string]any) *ToolRes
 	}
 
 	sessionKey := toolExecutionSessionKey(ctx)
-	if strings.TrimSpace(sessionKey) == "" {
+	if sessionKey == "" {
 		// Fallback for non-agent tool contexts.
 		channel := toolExecutionChannel(ctx)
 		chatID := toolExecutionChatID(ctx)
 		if channel != "" && chatID != "" {
-			sessionKey = fmt.Sprintf("%s:%s", channel, chatID)
+			sessionKey = utils.CanonicalSessionKey(fmt.Sprintf("%s:%s", channel, chatID))
 		}
 	}
-	if strings.TrimSpace(sessionKey) == "" {
+	if sessionKey == "" {
 		return ErrorResult("handoff failed: missing session key context")
 	}
 

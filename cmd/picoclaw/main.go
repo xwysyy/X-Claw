@@ -16,7 +16,9 @@ import (
 	"github.com/sipeed/picoclaw/cmd/picoclaw/internal/agent"
 	"github.com/sipeed/picoclaw/cmd/picoclaw/internal/auditlog"
 	"github.com/sipeed/picoclaw/cmd/picoclaw/internal/auth"
+	"github.com/sipeed/picoclaw/cmd/picoclaw/internal/config"
 	"github.com/sipeed/picoclaw/cmd/picoclaw/internal/cron"
+	"github.com/sipeed/picoclaw/cmd/picoclaw/internal/doctor"
 	"github.com/sipeed/picoclaw/cmd/picoclaw/internal/estop"
 	"github.com/sipeed/picoclaw/cmd/picoclaw/internal/export"
 	"github.com/sipeed/picoclaw/cmd/picoclaw/internal/gateway"
@@ -42,6 +44,8 @@ func NewPicoclawCommand() *cobra.Command {
 		agent.NewAgentCommand(),
 		auditlog.NewAuditLogCommand(),
 		auth.NewAuthCommand(),
+		config.NewConfigCommand(),
+		doctor.NewDoctorCommand(),
 		gateway.NewGatewayCommand(),
 		status.NewStatusCommand(),
 		security.NewSecurityCommand(),

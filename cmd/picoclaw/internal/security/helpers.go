@@ -1,8 +1,6 @@
 package security
 
 import (
-	"bytes"
-	"encoding/json"
 	"fmt"
 	"net"
 	"os"
@@ -11,6 +9,7 @@ import (
 	"time"
 
 	"github.com/sipeed/picoclaw/cmd/picoclaw/internal"
+	"github.com/sipeed/picoclaw/cmd/picoclaw/internal/cliutil"
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/tools"
 )
@@ -86,7 +85,7 @@ func securityCmd(opts securityOptions) error {
 	report := buildSecurityReport(cfg)
 
 	if opts.JSON {
-		data, err := marshalIndentNoEscape(report)
+		data, err := cliutil.MarshalIndentNoEscape(report)
 		if err != nil {
 			return err
 		}
@@ -261,17 +260,6 @@ func buildSecurityReport(cfg *config.Config) securityReport {
 	}
 
 	return report
-}
-
-func marshalIndentNoEscape(v any) ([]byte, error) {
-	var buf bytes.Buffer
-	enc := json.NewEncoder(&buf)
-	enc.SetEscapeHTML(false)
-	enc.SetIndent("", "  ")
-	if err := enc.Encode(v); err != nil {
-		return nil, err
-	}
-	return bytes.TrimRight(buf.Bytes(), "\n"), nil
 }
 
 func isLoopbackHost(host string) bool {

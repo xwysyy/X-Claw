@@ -393,7 +393,7 @@ Manager 已被完全重写。你的修改需要理解新架构：
 
 Agent Loop 的主要变化：
 
-1. **MediaStore 注入**：`agentLoop.SetMediaStore(mediaStore)` — Agent 通过 MediaStore 解析工具产生的媒体引用
+1. **MediaResolver 注入**：`agentLoop.SetMediaResolver(media.AsMediaResolver(mediaStore))` — Agent 通过 resolver 端口解析工具产生的 `media://` 引用（由 MediaStore 适配）
 2. **ChannelManager 注入**：`agentLoop.SetChannelManager(channelManager)` — Agent 可查询 channel 状态
 3. **OutboundMediaMessage**：Agent 现在通过 `bus.PublishOutboundMedia()` 发送媒体消息，而非嵌入文本回复
 4. **extractPeer**：路由使用 `msg.Peer` 结构化字段而非 Metadata 查找
@@ -1337,7 +1337,7 @@ channelManager := channels.NewManager(cfg, msgBus, mediaStore)
 
 // 4. 注入引用
 agentLoop.SetChannelManager(channelManager)
-agentLoop.SetMediaStore(mediaStore)
+agentLoop.SetMediaResolver(media.AsMediaResolver(mediaStore))
 
 // 5. 配置共享 HTTP 服务器
 channelManager.SetupHTTPServer(addr, healthServer)

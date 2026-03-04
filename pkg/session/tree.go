@@ -33,6 +33,8 @@ type SessionTree struct {
 }
 
 func (sm *SessionManager) LeafEventID(key string) string {
+	key = utils.CanonicalSessionKey(key)
+
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
 
@@ -44,7 +46,7 @@ func (sm *SessionManager) LeafEventID(key string) string {
 }
 
 func (sm *SessionManager) GetTree(key string, limit int) (*SessionTree, error) {
-	key = strings.TrimSpace(key)
+	key = utils.CanonicalSessionKey(key)
 	if key == "" {
 		return nil, fmt.Errorf("session key is empty")
 	}
@@ -124,7 +126,7 @@ func (sm *SessionManager) GetTree(key string, limit int) (*SessionTree, error) {
 }
 
 func (sm *SessionManager) SwitchLeaf(key, leafID string) (fromLeaf string, toLeaf string, err error) {
-	key = strings.TrimSpace(key)
+	key = utils.CanonicalSessionKey(key)
 	leafID = strings.TrimSpace(leafID)
 	if key == "" {
 		return "", "", fmt.Errorf("session key is empty")

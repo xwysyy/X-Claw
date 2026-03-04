@@ -10,6 +10,7 @@ import (
 
 	"github.com/sipeed/picoclaw/pkg/fileutil"
 	"github.com/sipeed/picoclaw/pkg/tools"
+	"github.com/sipeed/picoclaw/pkg/utils"
 )
 
 type sessionPermissionMode string
@@ -55,7 +56,7 @@ func (s sessionPermissionState) isPlan() bool {
 
 func sessionPermissionStatePath(workspace, sessionKey string) (string, error) {
 	workspace = strings.TrimSpace(workspace)
-	sessionKey = strings.TrimSpace(sessionKey)
+	sessionKey = utils.CanonicalSessionKey(sessionKey)
 	if workspace == "" {
 		return "", fmt.Errorf("workspace is required")
 	}

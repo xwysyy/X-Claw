@@ -34,6 +34,18 @@ func TestHealthHandler_AlwaysOK(t *testing.T) {
 	}
 }
 
+func TestHealthHandler_HealthzAlias(t *testing.T) {
+	s := NewServer("127.0.0.1", 0)
+
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	s.server.Handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status code: got %d want %d", rr.Code, http.StatusOK)
+	}
+}
+
 func TestReadyHandler_NotReadyWhenFlagFalse(t *testing.T) {
 	s := NewServer("127.0.0.1", 0)
 
@@ -54,6 +66,18 @@ func TestReadyHandler_NotReadyWhenFlagFalse(t *testing.T) {
 	}
 	if len(resp.Checks) != 0 {
 		t.Fatalf("expected no checks, got %d", len(resp.Checks))
+	}
+}
+
+func TestReadyHandler_ReadyzAlias(t *testing.T) {
+	s := NewServer("127.0.0.1", 0)
+
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/readyz", nil)
+	s.server.Handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status code: got %d want %d", rr.Code, http.StatusServiceUnavailable)
 	}
 }
 

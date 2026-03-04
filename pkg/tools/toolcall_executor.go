@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/sipeed/picoclaw/internal/core/events"
 	"github.com/sipeed/picoclaw/pkg/auditlog"
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/logger"
@@ -177,7 +178,7 @@ func ExecuteToolCalls(
 
 		meta := ToolHookContext{
 			Workspace:  strings.TrimSpace(opts.Workspace),
-			SessionKey: strings.TrimSpace(opts.SessionKey),
+			SessionKey: utils.CanonicalSessionKey(opts.SessionKey),
 			RunID:      strings.TrimSpace(opts.RunID),
 
 			Channel:  strings.TrimSpace(opts.Channel),
@@ -431,12 +432,12 @@ func ExecuteToolCalls(
 				errText = resultPreview
 			}
 			auditlog.Record(opts.Workspace, auditlog.Event{
-				Type: "tool.executed",
+				Type: string(events.ToolExecuted),
 
 				Source: strings.TrimSpace(scope),
 
 				RunID:      strings.TrimSpace(opts.RunID),
-				SessionKey: strings.TrimSpace(opts.SessionKey),
+				SessionKey: utils.CanonicalSessionKey(opts.SessionKey),
 				Channel:    strings.TrimSpace(opts.Channel),
 				ChatID:     strings.TrimSpace(opts.ChatID),
 				SenderID:   strings.TrimSpace(opts.SenderID),
@@ -561,11 +562,19 @@ func truncateToolResult(result *ToolResult, maxChars int) {
 	if result == nil || maxChars <= 0 {
 		return
 	}
+
+	// Preserve tail diagnostics (stack traces, error summaries, etc). This mirrors
+	// OpenClaw's production hardening: head-only truncation often drops the most
+	// useful information at the end of outputs.
+	tailMin := min(120, max(20, maxChars/4))
+	if result.IsError {
+		tailMin = min(200, max(20, maxChars/2))
+	}
 	if strings.TrimSpace(result.ForLLM) != "" {
-		result.ForLLM = utils.Truncate(result.ForLLM, maxChars)
+		result.ForLLM = utils.TruncateHeadTail(result.ForLLM, maxChars, tailMin)
 	}
 	if strings.TrimSpace(result.ForUser) != "" {
-		result.ForUser = utils.Truncate(result.ForUser, maxChars)
+		result.ForUser = utils.TruncateHeadTail(result.ForUser, maxChars, tailMin)
 	}
 }
 

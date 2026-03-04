@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/sipeed/picoclaw/internal/core/events"
 	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/utils"
 )
@@ -27,7 +28,7 @@ type toolPolicyLedgerResult struct {
 }
 
 type toolPolicyLedgerEvent struct {
-	Type string `json:"type"`
+	Type events.Type `json:"type"`
 
 	TS   string `json:"ts"`
 	TSMS int64  `json:"ts_ms"`
@@ -78,12 +79,12 @@ type toolPolicyStore struct {
 var toolPolicyStores sync.Map // key -> *toolPolicyStore
 
 func toolPolicyStoreKey(workspace, sessionKey, runID string) string {
-	return strings.TrimSpace(workspace) + "\n" + strings.TrimSpace(sessionKey) + "\n" + strings.TrimSpace(runID)
+	return strings.TrimSpace(workspace) + "\n" + utils.CanonicalSessionKey(sessionKey) + "\n" + strings.TrimSpace(runID)
 }
 
 func policyRunDir(workspace, sessionKey, runID string) (string, bool) {
 	workspace = strings.TrimSpace(workspace)
-	sessionKey = strings.TrimSpace(sessionKey)
+	sessionKey = utils.CanonicalSessionKey(sessionKey)
 	runID = strings.TrimSpace(runID)
 	if workspace == "" || sessionKey == "" || runID == "" {
 		return "", false
@@ -169,7 +170,7 @@ func (s *toolPolicyStore) Load() {
 		}
 
 		switch ev.Type {
-		case "tool.confirmed":
+		case events.ToolConfirmed:
 			key := strings.TrimSpace(ev.ConfirmKey)
 			if key == "" {
 				continue
@@ -178,7 +179,7 @@ func (s *toolPolicyStore) Load() {
 				ExpiresAtMS: ev.ExpiresAtMS,
 				Note:        ev.Note,
 			}
-		case "tool.executed":
+		case events.ToolExecuted:
 			key := strings.TrimSpace(ev.IdempotencyKey)
 			if key == "" || ev.Result == nil {
 				continue
@@ -230,13 +231,13 @@ func (s *toolPolicyStore) RecordConfirmation(runID, sessionKey, confirmKey, tool
 
 	ts := time.Now()
 	ev := toolPolicyLedgerEvent{
-		Type: "tool.confirmed",
+		Type: events.ToolConfirmed,
 
 		TS:   ts.UTC().Format(time.RFC3339Nano),
 		TSMS: ts.UnixMilli(),
 
 		RunID:      strings.TrimSpace(runID),
-		SessionKey: strings.TrimSpace(sessionKey),
+		SessionKey: utils.CanonicalSessionKey(sessionKey),
 
 		Tool:       strings.TrimSpace(toolName),
 		ToolCallID: strings.TrimSpace(toolCallID),
@@ -334,13 +335,13 @@ func (s *toolPolicyStore) RecordExecution(
 	}
 
 	ev := toolPolicyLedgerEvent{
-		Type: "tool.executed",
+		Type: events.ToolExecuted,
 
 		TS:   ts.UTC().Format(time.RFC3339Nano),
 		TSMS: ts.UnixMilli(),
 
 		RunID:      strings.TrimSpace(runID),
-		SessionKey: strings.TrimSpace(sessionKey),
+		SessionKey: utils.CanonicalSessionKey(sessionKey),
 
 		Tool:       strings.TrimSpace(tcName),
 		ToolCallID: strings.TrimSpace(tcID),

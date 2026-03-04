@@ -12,7 +12,6 @@ import (
 
 	"github.com/sipeed/picoclaw/pkg/bus"
 	"github.com/sipeed/picoclaw/pkg/logger"
-	"github.com/sipeed/picoclaw/pkg/media"
 	"github.com/sipeed/picoclaw/pkg/utils"
 )
 
@@ -132,21 +131,21 @@ func (al *AgentLoop) importInboundMediaToWorkspace(workspace string, msg bus.Inb
 	return imported, skipped
 }
 
-func (al *AgentLoop) resolveInboundMedia(item string) (string, media.MediaMeta, bool) {
-	if strings.HasPrefix(item, "media://") && al.mediaStore != nil {
-		localPath, meta, err := al.mediaStore.ResolveWithMeta(item)
+func (al *AgentLoop) resolveInboundMedia(item string) (string, MediaMeta, bool) {
+	if strings.HasPrefix(item, "media://") && al.mediaResolver != nil {
+		localPath, meta, err := al.mediaResolver.ResolveWithMeta(item)
 		if err != nil {
-			return "", media.MediaMeta{}, false
+			return "", MediaMeta{}, false
 		}
 		return localPath, meta, true
 	}
 
 	// Fallback: some channels may emit raw local paths when MediaStore is not set.
 	if filepath.IsAbs(item) {
-		return item, media.MediaMeta{Filename: filepath.Base(item)}, true
+		return item, MediaMeta{Filename: filepath.Base(item)}, true
 	}
 
-	return "", media.MediaMeta{}, false
+	return "", MediaMeta{}, false
 }
 
 func formatInboundMediaNote(imported []importedInboundMedia, skipped int) string {

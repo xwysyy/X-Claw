@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/sipeed/picoclaw/pkg/utils"
 )
 
 const (
@@ -71,7 +73,8 @@ func (t *SessionsSendTool) Execute(ctx context.Context, args map[string]any) *To
 	}
 
 	sessionKey, ok := getStringArg(args, "session_key")
-	if !ok || strings.TrimSpace(sessionKey) == "" {
+	targetKey := utils.CanonicalSessionKey(sessionKey)
+	if !ok || targetKey == "" {
 		return ErrorResult("session_key is required")
 	}
 	message, ok := getStringArg(args, "message")
@@ -100,13 +103,13 @@ func (t *SessionsSendTool) Execute(ctx context.Context, args map[string]any) *To
 	reply, execErr := t.executor.ProcessSessionMessage(
 		execCtx,
 		message,
-		strings.TrimSpace(sessionKey),
+		targetKey,
 		"system",
 		"sessions-send",
 	)
 
 	payload := map[string]any{
-		"session_key": strings.TrimSpace(sessionKey),
+		"session_key": targetKey,
 	}
 
 	switch {

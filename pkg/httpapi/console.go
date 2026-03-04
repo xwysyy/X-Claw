@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/sipeed/picoclaw/pkg/cron"
+	"github.com/sipeed/picoclaw/pkg/utils"
 )
 
 type ConsoleHandlerOptions struct {
@@ -569,7 +570,7 @@ func listTraceSessions(opts traceListOptions) ([]traceSessionItem, error) {
 				RunID      string `json:"run_id"`
 			}
 			if json.Unmarshal([]byte(line), &meta) == nil {
-				sessionKey = strings.TrimSpace(meta.SessionKey)
+				sessionKey = utils.CanonicalSessionKey(meta.SessionKey)
 				channel = strings.TrimSpace(meta.Channel)
 				chatID = strings.TrimSpace(meta.ChatID)
 				runID = strings.TrimSpace(meta.RunID)

@@ -175,7 +175,7 @@ func BuildConversationPeerSessionKey(params SessionKeyParams) string {
 
 // ParseAgentSessionKey extracts agentId and rest from "agent:<agentId>:<rest>".
 func ParseAgentSessionKey(sessionKey string) *ParsedSessionKey {
-	raw := strings.TrimSpace(sessionKey)
+	raw := strings.ToLower(strings.TrimSpace(sessionKey))
 	if raw == "" {
 		return nil
 	}

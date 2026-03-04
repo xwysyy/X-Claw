@@ -111,7 +111,7 @@ func initGatewayServices(debug bool) (*gatewayServices, error) {
 	}
 
 	agentLoop.SetChannelManager(channelManager)
-	agentLoop.SetMediaStore(mediaStore)
+	agentLoop.SetMediaResolver(media.AsMediaResolver(mediaStore))
 
 	enabledChannels := channelManager.GetEnabledChannels()
 	if len(enabledChannels) > 0 {
@@ -161,7 +161,7 @@ func runGateway(svc *gatewayServices) error {
 		return err
 	}
 
-	fmt.Printf("✓ Health endpoints available at http://%s:%d/health and /ready\n", svc.cfg.Gateway.Host, svc.cfg.Gateway.Port)
+	fmt.Printf("✓ Health endpoints available at http://%s:%d/health (/healthz) and /ready (/readyz)\n", svc.cfg.Gateway.Host, svc.cfg.Gateway.Port)
 
 	go svc.agentLoop.Run(ctx)
 

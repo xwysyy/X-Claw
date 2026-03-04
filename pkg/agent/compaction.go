@@ -8,6 +8,7 @@ import (
 
 	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/providers"
+	"github.com/sipeed/picoclaw/pkg/utils"
 )
 
 func (al *AgentLoop) maybeFlushMemoryBeforeCompaction(
@@ -210,9 +211,9 @@ func (al *AgentLoop) generateCompactionSummary(
 			continue
 		}
 		if msg.Role == "tool" && len(content) > 1200 {
-			head := 700
-			tail := 300
-			content = content[:head] + "\n...\n[tool result condensed]\n...\n" + content[len(content)-tail:]
+			const maxLen = 1100
+			const tailMin = 300
+			content = utils.TruncateHeadTailWithMarker(content, maxLen, "\n...\n[tool result condensed]\n...\n", tailMin)
 		}
 		msg.Content = content
 		safeMessages = append(safeMessages, msg)

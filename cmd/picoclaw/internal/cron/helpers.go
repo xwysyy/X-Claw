@@ -1,12 +1,11 @@
 package cron
 
 import (
-	"bytes"
-	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
 
+	"github.com/sipeed/picoclaw/cmd/picoclaw/internal/cliutil"
 	"github.com/sipeed/picoclaw/pkg/cron"
 )
 
@@ -92,7 +91,7 @@ func cronShowCmd(storePath, jobID string, jsonOut bool) error {
 	}
 
 	if jsonOut {
-		data, err := marshalIndentNoEscape(found)
+		data, err := cliutil.MarshalIndentNoEscape(found)
 		if err != nil {
 			return err
 		}
@@ -168,17 +167,6 @@ func formatSchedule(s cron.CronSchedule) string {
 	default:
 		return s.Kind
 	}
-}
-
-func marshalIndentNoEscape(v any) ([]byte, error) {
-	var buf bytes.Buffer
-	enc := json.NewEncoder(&buf)
-	enc.SetEscapeHTML(false)
-	enc.SetIndent("", "  ")
-	if err := enc.Encode(v); err != nil {
-		return nil, err
-	}
-	return bytes.TrimRight(buf.Bytes(), "\n"), nil
 }
 
 func cronRemoveCmd(storePath, jobID string) {

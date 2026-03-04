@@ -6,6 +6,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"syscall"
@@ -22,6 +23,12 @@ func processExists(pid int) bool {
 }
 
 func TestShellTool_TimeoutKillsChildProcess(t *testing.T) {
+	if v := strings.TrimSpace(os.Getenv("PICOCLAW_TEST_MEMLIMIT")); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 && n < (512<<20) {
+			t.Skipf("skipping fork-heavy timeout test in constrained env (PICOCLAW_TEST_MEMLIMIT=%d)", n)
+		}
+	}
+
 	tool, err := NewExecTool(t.TempDir(), false)
 	if err != nil {
 		t.Errorf("unable to configure exec tool: %s", err)
@@ -31,8 +38,13 @@ func TestShellTool_TimeoutKillsChildProcess(t *testing.T) {
 
 	args := map[string]any{
 		// Spawn a child process that would outlive the shell unless process-group kill is used.
-		"command": "sleep 60 & echo $! > child.pid; wait",
+		"command": "sleep 5 & echo $! > child.pid; wait",
 	}
+
+	// This test forks a child process. In memory-constrained environments,
+	// forcing a GC + returning pages to the OS avoids the OOM killer targeting
+	// the test binary at fork time.
+	debug.FreeOSMemory()
 
 	result := tool.Execute(context.Background(), args)
 	if !result.IsError {

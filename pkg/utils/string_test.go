@@ -1,6 +1,9 @@
 package utils
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestTruncate(t *testing.T) {
 	tests := []struct {
@@ -103,6 +106,79 @@ func TestTruncate(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestTruncateHeadTail(t *testing.T) {
+	const marker = "\n... (truncated) ...\n"
+	const customMarker = "\n...[tool result condensed]...\n"
+
+	t.Run("short string unchanged", func(t *testing.T) {
+		in := "hello"
+		got := TruncateHeadTail(in, 100, 0)
+		if got != in {
+			t.Fatalf("got %q, want %q", got, in)
+		}
+	})
+
+	t.Run("maxLen too small falls back to Truncate", func(t *testing.T) {
+		in := "abcdefghijklmnopqrstuvwxyz"
+		got := TruncateHeadTail(in, 10, 0)
+		want := Truncate(in, 10)
+		if got != want {
+			t.Fatalf("got %q, want %q", got, want)
+		}
+	})
+
+	t.Run("keeps head and tail with marker", func(t *testing.T) {
+		in := "HEAD-0123456789-ABCDEFGHIJKLMNOPQRSTUVWXYZ-TAIL"
+		// Make it long enough to require truncation.
+		in = in + in + in + in
+
+		maxLen := 60
+		got := TruncateHeadTail(in, maxLen, 0)
+		if len([]rune(got)) > maxLen {
+			t.Fatalf("expected <= %d runes, got %d", maxLen, len([]rune(got)))
+		}
+		if !strings.Contains(got, marker) {
+			t.Fatalf("expected marker in output, got: %q", got)
+		}
+		if got == Truncate(in, maxLen) {
+			t.Fatalf("expected head+tail truncation, got head-only: %q", got)
+		}
+	})
+
+	t.Run("tailMin increases tail budget", func(t *testing.T) {
+		in := strings.Repeat("A", 200) + "TAIL" + strings.Repeat("Z", 200)
+		maxLen := 90
+		tailMin := 40
+		got := TruncateHeadTail(in, maxLen, tailMin)
+		if len([]rune(got)) > maxLen {
+			t.Fatalf("expected <= %d runes, got %d", maxLen, len([]rune(got)))
+		}
+		if !strings.Contains(got, marker) {
+			t.Fatalf("expected marker in output, got: %q", got)
+		}
+		// Should end with at least tailMin runes from the original string (best-effort).
+		wantTail := string([]rune(in)[len([]rune(in))-tailMin:])
+		if !strings.HasSuffix(got, wantTail) {
+			t.Fatalf("expected output to keep tail suffix of length %d", tailMin)
+		}
+	})
+
+	t.Run("custom marker is preserved", func(t *testing.T) {
+		in := strings.Repeat("X", 200) + "TAIL" + strings.Repeat("Y", 200)
+		maxLen := 80
+		got := TruncateHeadTailWithMarker(in, maxLen, customMarker, 20)
+		if len([]rune(got)) > maxLen {
+			t.Fatalf("expected <= %d runes, got %d", maxLen, len([]rune(got)))
+		}
+		if !strings.Contains(got, customMarker) {
+			t.Fatalf("expected custom marker in output, got: %q", got)
+		}
+		if strings.Contains(got, marker) {
+			t.Fatalf("did not expect default marker when custom marker supplied, got: %q", got)
+		}
+	})
 }
 
 func TestSanitizeMessageContent(t *testing.T) {

@@ -9,8 +9,10 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/sipeed/picoclaw/internal/core/events"
 	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/routing"
+	"github.com/sipeed/picoclaw/pkg/utils"
 )
 
 type ResumeCandidate struct {
@@ -28,7 +30,7 @@ type ResumeCandidate struct {
 }
 
 func isInternalSessionKey(sessionKey string) bool {
-	switch strings.ToLower(strings.TrimSpace(sessionKey)) {
+	switch utils.CanonicalSessionKey(sessionKey) {
 	case "heartbeat":
 		return true
 	default:
@@ -106,7 +108,7 @@ func findLastUnfinishedRun(workspace string) (*ResumeCandidate, error) {
 
 			// Keep best-effort metadata.
 			if st.sessionKey == "" && strings.TrimSpace(ev.SessionKey) != "" {
-				st.sessionKey = strings.TrimSpace(ev.SessionKey)
+				st.sessionKey = utils.CanonicalSessionKey(ev.SessionKey)
 			}
 			if st.channel == "" && strings.TrimSpace(ev.Channel) != "" {
 				st.channel = strings.TrimSpace(ev.Channel)
@@ -124,16 +126,16 @@ func findLastUnfinishedRun(workspace string) (*ResumeCandidate, error) {
 				st.model = strings.TrimSpace(ev.Model)
 			}
 
-			if ev.Type == "run.start" && strings.TrimSpace(ev.UserMessagePreview) != "" {
+			if ev.Type == events.RunStart && strings.TrimSpace(ev.UserMessagePreview) != "" {
 				st.userMsg = strings.TrimSpace(ev.UserMessagePreview)
 			}
 
 			if ev.TSMS > 0 && ev.TSMS >= st.lastTSMS {
 				st.lastTSMS = ev.TSMS
-				st.lastType = strings.TrimSpace(ev.Type)
+				st.lastType = strings.TrimSpace(string(ev.Type))
 			}
 
-			if ev.Type == "run.end" {
+			if ev.Type == events.RunEnd {
 				st.endedNormally = true
 			}
 		}

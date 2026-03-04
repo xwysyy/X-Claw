@@ -3,6 +3,8 @@ package tools
 import (
 	"context"
 	"strings"
+
+	"github.com/sipeed/picoclaw/pkg/utils"
 )
 
 type executionContextKey string
@@ -37,8 +39,9 @@ func withExecutionSessionKey(ctx context.Context, sessionKey string) context.Con
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	if strings.TrimSpace(sessionKey) != "" {
-		ctx = context.WithValue(ctx, executionContextSessionKey, strings.TrimSpace(sessionKey))
+	sessionKey = utils.CanonicalSessionKey(sessionKey)
+	if sessionKey != "" {
+		ctx = context.WithValue(ctx, executionContextSessionKey, sessionKey)
 	}
 	return ctx
 }
@@ -102,7 +105,7 @@ func toolExecutionSessionKey(ctx context.Context) string {
 		return ""
 	}
 	v, _ := ctx.Value(executionContextSessionKey).(string)
-	return strings.TrimSpace(v)
+	return utils.CanonicalSessionKey(v)
 }
 
 func toolExecutionRunID(ctx context.Context) string {

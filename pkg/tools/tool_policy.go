@@ -67,7 +67,7 @@ func newToolPolicy(workspace, sessionKey, runID string, isResume bool, cfg confi
 	p := &toolPolicy{
 		cfg:        cfg,
 		workspace:  strings.TrimSpace(workspace),
-		sessionKey: strings.TrimSpace(sessionKey),
+		sessionKey: utils.CanonicalSessionKey(sessionKey),
 		runID:      strings.TrimSpace(runID),
 		isResume:   isResume,
 		enabled:    cfg.Enabled,

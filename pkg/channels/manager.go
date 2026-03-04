@@ -466,7 +466,7 @@ func (m *Manager) SetupHTTPServer(addr string, healthServer *health.Server) {
 
 	m.httpServer = &http.Server{
 		Addr:        addr,
-		Handler:     m.mux,
+		Handler:     withSecurityHeaders(m.mux),
 		ReadTimeout: 30 * time.Second,
 		// Some gateway endpoints (e.g. resume_last_task) may take longer than a typical
 		// webhook response because they can trigger LLM + tool execution.
@@ -968,6 +968,27 @@ func (m *Manager) GetEnabledChannels() []string {
 		names = append(names, name)
 	}
 	return names
+}
+
+// EnabledChannels implements the agent.ChannelDirectory port.
+// It is a small adapter shim to avoid agent core depending on the full Manager API.
+func (m *Manager) EnabledChannels() []string {
+	return m.GetEnabledChannels()
+}
+
+// HasChannel implements the agent.ChannelDirectory port.
+func (m *Manager) HasChannel(channelName string) bool {
+	_, ok := m.GetChannel(channelName)
+	return ok
+}
+
+// ReasoningChannelID implements the agent.ChannelDirectory port.
+func (m *Manager) ReasoningChannelID(channelName string) string {
+	ch, ok := m.GetChannel(channelName)
+	if !ok || ch == nil {
+		return ""
+	}
+	return ch.ReasoningChannelID()
 }
 
 func (m *Manager) RegisterChannel(name string, channel Channel) {

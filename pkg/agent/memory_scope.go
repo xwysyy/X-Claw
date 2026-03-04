@@ -5,6 +5,8 @@ import (
 	"encoding/hex"
 	"regexp"
 	"strings"
+
+	"github.com/sipeed/picoclaw/pkg/utils"
 )
 
 type memoryScopeKind string
@@ -21,8 +23,8 @@ type memoryScope struct {
 }
 
 func deriveMemoryScope(sessionKey, channel, chatID string) memoryScope {
-	raw := strings.TrimSpace(sessionKey)
-	lower := strings.ToLower(raw)
+	raw := utils.CanonicalSessionKey(sessionKey)
+	lower := raw
 
 	if lower == "" {
 		return memoryScope{Kind: memoryScopeAgent, RawID: "agent"}
@@ -76,7 +78,7 @@ func deriveMemoryScope(sessionKey, channel, chatID string) memoryScope {
 }
 
 func extractChannelFromSessionKey(sessionKey string) string {
-	lower := strings.ToLower(strings.TrimSpace(sessionKey))
+	lower := utils.CanonicalSessionKey(sessionKey)
 	if !strings.HasPrefix(lower, "agent:") {
 		return ""
 	}

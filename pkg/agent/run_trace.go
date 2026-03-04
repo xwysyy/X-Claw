@@ -11,6 +11,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/sipeed/picoclaw/internal/core/events"
 	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/providers"
 	"github.com/sipeed/picoclaw/pkg/tools"
@@ -38,7 +39,7 @@ type runTraceWriter struct {
 }
 
 type runTraceEvent struct {
-	Type string `json:"type"`
+	Type events.Type `json:"type"`
 
 	TS   string `json:"ts"`
 	TSMS int64  `json:"ts_ms"`
@@ -90,10 +91,10 @@ func newRunTraceWriter(workspace string, enabled bool, opts processOptions, agen
 		return nil
 	}
 
-	sessionKey := strings.TrimSpace(opts.SessionKey)
+	sessionKey := utils.CanonicalSessionKey(opts.SessionKey)
 	if sessionKey == "" {
 		// Should not happen in normal agent loop, but keep best-effort.
-		sessionKey = strings.TrimSpace(opts.Channel) + ":" + strings.TrimSpace(opts.ChatID)
+		sessionKey = utils.CanonicalSessionKey(strings.TrimSpace(opts.Channel) + ":" + strings.TrimSpace(opts.ChatID))
 	}
 	dirKey := tools.SafePathToken(sessionKey)
 	if dirKey == "" {
@@ -146,7 +147,7 @@ func (w *runTraceWriter) recordStart(userMessage string, messagesCount, toolsCou
 	}
 	ts := time.Now()
 	w.appendEvent(runTraceEvent{
-		Type: "run.start",
+		Type: events.RunStart,
 
 		TS:   ts.UTC().Format(time.RFC3339Nano),
 		TSMS: ts.UnixMilli(),
@@ -173,7 +174,7 @@ func (w *runTraceWriter) recordResume(userMessage string, messagesCount, toolsCo
 	}
 	ts := time.Now()
 	w.appendEvent(runTraceEvent{
-		Type: "run.resume",
+		Type: events.RunResume,
 
 		TS:   ts.UTC().Format(time.RFC3339Nano),
 		TSMS: ts.UnixMilli(),
@@ -200,7 +201,7 @@ func (w *runTraceWriter) recordLLMRequest(iteration int, messagesCount, toolsCou
 	}
 	ts := time.Now()
 	w.appendEvent(runTraceEvent{
-		Type: "llm.request",
+		Type: events.LLMRequest,
 
 		TS:   ts.UTC().Format(time.RFC3339Nano),
 		TSMS: ts.UnixMilli(),
@@ -227,7 +228,7 @@ func (w *runTraceWriter) recordLLMResponse(iteration int, content string, toolCa
 	ts := time.Now()
 
 	event := runTraceEvent{
-		Type: "llm.response",
+		Type: events.LLMResponse,
 
 		TS:   ts.UTC().Format(time.RFC3339Nano),
 		TSMS: ts.UnixMilli(),
@@ -282,7 +283,7 @@ func (w *runTraceWriter) recordToolBatch(iteration int, execs []tools.ToolCallEx
 	}
 
 	w.appendEvent(runTraceEvent{
-		Type: "tool.batch",
+		Type: events.ToolBatch,
 
 		TS:   ts.UTC().Format(time.RFC3339Nano),
 		TSMS: ts.UnixMilli(),
@@ -307,7 +308,7 @@ func (w *runTraceWriter) recordEnd(iterations int, finalContent string) {
 	}
 	ts := time.Now()
 	w.appendEvent(runTraceEvent{
-		Type: "run.end",
+		Type: events.RunEnd,
 
 		TS:   ts.UTC().Format(time.RFC3339Nano),
 		TSMS: ts.UnixMilli(),
@@ -332,7 +333,7 @@ func (w *runTraceWriter) recordError(iteration int, err error) {
 	}
 	ts := time.Now()
 	w.appendEvent(runTraceEvent{
-		Type: "run.error",
+		Type: events.RunError,
 
 		TS:   ts.UTC().Format(time.RFC3339Nano),
 		TSMS: ts.UnixMilli(),

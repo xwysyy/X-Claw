@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/sipeed/picoclaw/cmd/picoclaw/internal"
+	"github.com/sipeed/picoclaw/cmd/picoclaw/internal/cliutil"
 	"github.com/sipeed/picoclaw/pkg/session"
 	"github.com/sipeed/picoclaw/pkg/state"
 	"github.com/sipeed/picoclaw/pkg/tools"
@@ -180,7 +181,7 @@ func RunExport(opts ExportOptions) (*ExportResult, error) {
 	// 1) manifest is written last (after files list is populated).
 
 	// 2) session snapshot
-	sessionPayload, err := marshalIndentNoEscape(snapshot)
+	sessionPayload, err := cliutil.MarshalIndentNoEscape(snapshot)
 	if err != nil {
 		return nil, fmt.Errorf("failed to encode session snapshot: %w", err)
 	}
@@ -226,7 +227,7 @@ func RunExport(opts ExportOptions) (*ExportResult, error) {
 		}
 	}
 
-	manifestBytes, err := marshalIndentNoEscape(manifest)
+	manifestBytes, err := cliutil.MarshalIndentNoEscape(manifest)
 	if err != nil {
 		return nil, fmt.Errorf("failed to encode manifest: %w", err)
 	}
@@ -508,7 +509,7 @@ func readRedactedConfig(configPath string) (data []byte, note string, err error)
 
 	redactSensitiveJSON(v)
 
-	out, err := marshalIndentNoEscape(v)
+	out, err := cliutil.MarshalIndentNoEscape(v)
 	if err != nil {
 		return nil, "", err
 	}
@@ -541,15 +542,4 @@ func redactSensitiveJSON(v any) {
 			redactSensitiveJSON(t[i])
 		}
 	}
-}
-
-func marshalIndentNoEscape(v any) ([]byte, error) {
-	var buf bytes.Buffer
-	enc := json.NewEncoder(&buf)
-	enc.SetEscapeHTML(false)
-	enc.SetIndent("", "  ")
-	if err := enc.Encode(v); err != nil {
-		return nil, err
-	}
-	return bytes.TrimRight(buf.Bytes(), "\n"), nil
 }

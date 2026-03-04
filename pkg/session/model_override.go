@@ -6,10 +6,11 @@ import (
 	"time"
 
 	"github.com/sipeed/picoclaw/pkg/providers"
+	"github.com/sipeed/picoclaw/pkg/utils"
 )
 
 func (sm *SessionManager) EffectiveModelOverride(key string) (string, bool) {
-	key = strings.TrimSpace(key)
+	key = utils.CanonicalSessionKey(key)
 	if key == "" {
 		return "", false
 	}
@@ -37,7 +38,7 @@ func (sm *SessionManager) EffectiveModelOverride(key string) (string, bool) {
 }
 
 func (sm *SessionManager) SetModelOverride(key, model string, ttl time.Duration) (*time.Time, error) {
-	key = strings.TrimSpace(key)
+	key = utils.CanonicalSessionKey(key)
 	model = strings.TrimSpace(model)
 	if key == "" {
 		return nil, fmt.Errorf("session key is empty")
@@ -87,7 +88,7 @@ func (sm *SessionManager) SetModelOverride(key, model string, ttl time.Duration)
 }
 
 func (sm *SessionManager) ClearModelOverride(key string) (*time.Time, error) {
-	key = strings.TrimSpace(key)
+	key = utils.CanonicalSessionKey(key)
 	if key == "" {
 		return nil, fmt.Errorf("session key is empty")
 	}

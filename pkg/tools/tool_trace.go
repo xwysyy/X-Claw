@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/sipeed/picoclaw/internal/core/events"
 	"github.com/sipeed/picoclaw/pkg/fileutil"
 	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/providers"
@@ -62,7 +63,7 @@ type toolTraceWriter struct {
 }
 
 type toolTraceEvent struct {
-	Type string `json:"type"`
+	Type events.Type `json:"type"`
 
 	TS   string `json:"ts"`
 	TSMS int64  `json:"ts_ms"`
@@ -138,9 +139,9 @@ func newToolTraceWriter(opts ToolCallExecutionOptions, scope string) *toolTraceW
 	}
 
 	dir := strings.TrimSpace(opts.Trace.Dir)
-	effectiveSessionKey := strings.TrimSpace(opts.SessionKey)
+	effectiveSessionKey := utils.CanonicalSessionKey(opts.SessionKey)
 	if effectiveSessionKey == "" {
-		effectiveSessionKey = fmt.Sprintf("%s_%s", strings.TrimSpace(opts.Channel), strings.TrimSpace(opts.ChatID))
+		effectiveSessionKey = utils.CanonicalSessionKey(strings.TrimSpace(opts.Channel) + ":" + strings.TrimSpace(opts.ChatID))
 	}
 
 	if dir == "" {
@@ -216,7 +217,7 @@ func (w *toolTraceWriter) RecordStart(ts time.Time, iteration int, tc providers.
 	}
 
 	event := toolTraceEvent{
-		Type: "tool.start",
+		Type: events.ToolStart,
 		TS:   ts.UTC().Format(time.RFC3339Nano),
 		TSMS: ts.UnixMilli(),
 
@@ -282,7 +283,7 @@ func (w *toolTraceWriter) RecordEnd(
 	}
 
 	event := toolTraceEvent{
-		Type: "tool.end",
+		Type: events.ToolEnd,
 		TS:   ts.UTC().Format(time.RFC3339Nano),
 		TSMS: ts.UnixMilli(),
 

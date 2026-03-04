@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+
+	"github.com/sipeed/picoclaw/pkg/utils"
 )
 
 type SpawnTool struct {
@@ -100,7 +102,7 @@ func (t *SpawnTool) Execute(ctx context.Context, args map[string]any) *ToolResul
 		"label":       taskInfo.Label,
 		"agent_id":    taskInfo.AgentID,
 		"run_id":      strings.TrimSpace(taskInfo.RunID),
-		"session_key": strings.TrimSpace(taskInfo.SessionKey),
+		"session_key": utils.CanonicalSessionKey(taskInfo.SessionKey),
 		"result_delivery": map[string]any{
 			"channel": "system",
 			"chat_id": fmt.Sprintf("%s:%s", originChannel, originChatID),

@@ -16,7 +16,6 @@ import (
 	"github.com/h2non/filetype"
 
 	"github.com/sipeed/picoclaw/pkg/logger"
-	"github.com/sipeed/picoclaw/pkg/media"
 	"github.com/sipeed/picoclaw/pkg/providers"
 )
 
@@ -24,8 +23,8 @@ import (
 // Uses streaming base64 encoding (file handle → encoder → buffer) to avoid holding
 // both raw bytes and encoded string in memory simultaneously.
 // Returns a new slice; original messages are not mutated.
-func resolveMediaRefs(messages []providers.Message, store media.MediaStore, maxSize int) []providers.Message {
-	if store == nil {
+func resolveMediaRefs(messages []providers.Message, resolver MediaResolver, maxSize int) []providers.Message {
+	if resolver == nil {
 		return messages
 	}
 
@@ -44,7 +43,7 @@ func resolveMediaRefs(messages []providers.Message, store media.MediaStore, maxS
 				continue
 			}
 
-			localPath, meta, err := store.ResolveWithMeta(ref)
+			localPath, meta, err := resolver.ResolveWithMeta(ref)
 			if err != nil {
 				logger.WarnCF("agent", "Failed to resolve media ref", map[string]any{
 					"ref":   ref,

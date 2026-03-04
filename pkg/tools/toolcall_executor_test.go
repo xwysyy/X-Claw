@@ -577,6 +577,66 @@ func TestExecuteToolCalls_PlanModeDeniesRestrictedTools(t *testing.T) {
 	}
 }
 
+func TestExecuteToolCalls_MaxResultChars_UsesHeadTailTruncation(t *testing.T) {
+	registry := NewToolRegistry()
+
+	head := "HEAD_BEGIN:"
+	tail := ":TAIL_END_1234567890"
+	long := head + strings.Repeat("x", 500) + tail
+
+	registry.Register(&executorMockTool{
+		name: "big_ok",
+		result: &ToolResult{
+			ForLLM:  long,
+			ForUser: long,
+			IsError: false,
+		},
+	})
+	registry.Register(&executorMockTool{
+		name: "big_err",
+		result: &ToolResult{
+			ForLLM:  long,
+			ForUser: long,
+			IsError: true,
+		},
+	})
+
+	calls := []providers.ToolCall{
+		{ID: "tc-1", Name: "big_ok", Arguments: map[string]any{}},
+		{ID: "tc-2", Name: "big_err", Arguments: map[string]any{}},
+	}
+
+	results := ExecuteToolCalls(context.Background(), registry, calls, ToolCallExecutionOptions{
+		Iteration:      1,
+		LogScope:       "test",
+		MaxResultChars: 60,
+	})
+
+	if len(results) != 2 {
+		t.Fatalf("len(results) = %d, want 2", len(results))
+	}
+	for i, res := range results {
+		if res.Result == nil {
+			t.Fatalf("results[%d].Result is nil", i)
+		}
+		if len([]rune(res.Result.ForLLM)) > 60 {
+			t.Fatalf("results[%d].Result.ForLLM exceeds MaxResultChars: %d", i, len([]rune(res.Result.ForLLM)))
+		}
+		if !strings.Contains(res.Result.ForLLM, "\n... (truncated) ...\n") {
+			t.Fatalf("results[%d].Result.ForLLM missing truncation marker: %q", i, res.Result.ForLLM)
+		}
+		if !strings.HasSuffix(res.Result.ForLLM, tail) {
+			t.Fatalf("results[%d].Result.ForLLM should preserve tail suffix %q, got %q", i, tail, res.Result.ForLLM)
+		}
+	}
+
+	// Non-error results should keep a meaningful head prefix; error results may
+	// intentionally bias toward keeping more tail diagnostics.
+	if !strings.HasPrefix(results[0].Result.ForLLM, head) {
+		t.Fatalf("ok result should preserve head prefix %q, got %q", head, results[0].Result.ForLLM)
+	}
+}
+
 func TestPercentileInt64_NearestRank(t *testing.T) {
 	values := []int64{10, 100}
 	if got := percentileInt64(values, 0.95); got != 100 {

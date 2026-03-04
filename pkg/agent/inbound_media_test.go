@@ -29,7 +29,7 @@ func TestImportInboundMediaToWorkspace_CopiesFileAndBuildsNote(t *testing.T) {
 		t.Fatalf("Store failed: %v", err)
 	}
 
-	al := &AgentLoop{mediaStore: store}
+	al := &AgentLoop{mediaResolver: media.AsMediaResolver(store)}
 	msg := bus.InboundMessage{
 		Channel:   "feishu",
 		ChatID:    "oc_test",

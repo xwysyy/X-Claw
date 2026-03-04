@@ -18,6 +18,7 @@ import (
 	"github.com/sipeed/picoclaw/pkg/providers"
 	"github.com/sipeed/picoclaw/pkg/skills"
 	"github.com/sipeed/picoclaw/pkg/tools"
+	"github.com/sipeed/picoclaw/pkg/utils"
 )
 
 type ContextRuntimeSettings struct {
@@ -55,7 +56,7 @@ type ContextBuilder struct {
 	// Dynamic per-request data (time/session/summary) is appended in BuildMessages.
 	systemPromptMutex  sync.RWMutex
 	cachedSystemPrompt string
-	cachedAt time.Time // max observed mtime across tracked paths at cache build time
+	cachedAt           time.Time // max observed mtime across tracked paths at cache build time
 
 	// existedAtCache tracks which source file paths existed the last time the
 	// cache was built. This lets sourceFilesChanged detect files that are newly
@@ -632,7 +633,9 @@ func skillFilesChangedSince(skillRoots []string, filesAtCache map[string]time.Ti
 }
 
 func (cb *ContextBuilder) LoadBootstrapFiles(sessionKey string) string {
-	if cb.settings.BootstrapSnapshotEnabled && strings.TrimSpace(sessionKey) != "" {
+	sessionKey = utils.CanonicalSessionKey(sessionKey)
+
+	if cb.settings.BootstrapSnapshotEnabled && sessionKey != "" {
 		cb.bootstrapMu.RLock()
 		cached, ok := cb.bootstrapCache[sessionKey]
 		cb.bootstrapMu.RUnlock()
@@ -657,7 +660,7 @@ func (cb *ContextBuilder) LoadBootstrapFiles(sessionKey string) string {
 	}
 
 	content := sb.String()
-	if cb.settings.BootstrapSnapshotEnabled && strings.TrimSpace(sessionKey) != "" {
+	if cb.settings.BootstrapSnapshotEnabled && sessionKey != "" {
 		cb.bootstrapMu.Lock()
 		cb.bootstrapCache[sessionKey] = content
 		cb.bootstrapMu.Unlock()

@@ -393,7 +393,7 @@ The Manager has been completely rewritten. Your modifications will need to accou
 
 Main changes to the Agent Loop:
 
-1. **MediaStore injection**: `agentLoop.SetMediaStore(mediaStore)` — Agent resolves media references produced by tools via MediaStore
+1. **MediaResolver injection**: `agentLoop.SetMediaResolver(media.AsMediaResolver(mediaStore))` — Agent resolves `media://` references produced by tools via a resolver port (adapting MediaStore)
 2. **ChannelManager injection**: `agentLoop.SetChannelManager(channelManager)` — Agent can query channel state
 3. **OutboundMediaMessage**: Agent now sends media messages via `bus.PublishOutboundMedia()` instead of embedding them in text replies
 4. **extractPeer**: Routing uses `msg.Peer` structured fields instead of Metadata lookups
@@ -1338,7 +1338,7 @@ channelManager := channels.NewManager(cfg, msgBus, mediaStore)
 
 // 4. Inject references
 agentLoop.SetChannelManager(channelManager)
-agentLoop.SetMediaStore(mediaStore)
+agentLoop.SetMediaResolver(media.AsMediaResolver(mediaStore))
 
 // 5. Configure shared HTTP server
 channelManager.SetupHTTPServer(addr, healthServer)

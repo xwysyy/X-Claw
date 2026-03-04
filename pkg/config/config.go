@@ -1193,6 +1193,17 @@ type MCPConfig struct {
 }
 
 func LoadConfig(path string) (*Config, error) {
+	cfg, err := loadConfigUnvalidated(path)
+	if err != nil {
+		return nil, err
+	}
+	if err := cfg.ValidateAll(); err != nil {
+		return nil, err
+	}
+	return cfg, nil
+}
+
+func loadConfigUnvalidated(path string) (*Config, error) {
 	cfg := DefaultConfig()
 
 	data, err := os.ReadFile(path)
@@ -1229,15 +1240,6 @@ func LoadConfig(path string) (*Config, error) {
 		cfg.ModelList = ConvertProvidersToModelList(cfg)
 	}
 
-	// Validate model_list for uniqueness and required fields
-	if err := cfg.ValidateModelList(); err != nil {
-		return nil, err
-	}
-
-	if err := cfg.ValidateSecurity(); err != nil {
-		return nil, err
-	}
-
 	return cfg, nil
 }
 
@@ -1261,62 +1263,21 @@ func (c *Config) ValidateSecurity() error {
 		return nil
 	}
 
-	var problems []string
-
-	// Public gateway bind must be explicitly acknowledged.
-	if !isLoopbackHost(c.Gateway.Host) && !c.Security.BreakGlass.AllowPublicGateway {
-		problems = append(
-			problems,
-			fmt.Sprintf(
-				"gateway.host=%q binds non-loopback; set security.break_glass.allow_public_gateway=true to acknowledge",
-				strings.TrimSpace(c.Gateway.Host),
-			),
-		)
-	}
-
-	// Unsafe workspace settings must be explicitly acknowledged.
-	if (!c.Agents.Defaults.RestrictToWorkspace || c.Agents.Defaults.AllowReadOutsideWorkspace) &&
-		!c.Security.BreakGlass.AllowUnsafeWorkspace {
-		problems = append(
-			problems,
-			"agents.defaults workspace restrictions are loosened; set security.break_glass.allow_unsafe_workspace=true to acknowledge",
-		)
-	}
-
-	// Disabling exec deny patterns is unsafe.
-	if !c.Tools.Exec.EnableDenyPatterns && !c.Security.BreakGlass.AllowUnsafeExec {
-		problems = append(
-			problems,
-			"tools.exec.enable_deny_patterns=false; set security.break_glass.allow_unsafe_exec=true to acknowledge",
-		)
-	}
-
-	// Passing full env to host exec is unsafe.
-	if strings.EqualFold(strings.TrimSpace(c.Tools.Exec.Env.Mode), "inherit") && !c.Security.BreakGlass.AllowExecInheritEnv {
-		problems = append(
-			problems,
-			"tools.exec.env.mode=\"inherit\"; set security.break_glass.allow_exec_inherit_env=true to acknowledge",
-		)
-	}
-
-	// Docker sandbox networking must be acknowledged.
-	if strings.EqualFold(strings.TrimSpace(c.Tools.Exec.Backend), "docker") {
-		network := strings.ToLower(strings.TrimSpace(c.Tools.Exec.Docker.Network))
-		if network != "" && network != "none" && !c.Security.BreakGlass.AllowDockerNetwork {
-			problems = append(
-				problems,
-				fmt.Sprintf(
-					"tools.exec.docker.network=%q is not \"none\"; set security.break_glass.allow_docker_network=true to acknowledge",
-					strings.TrimSpace(c.Tools.Exec.Docker.Network),
-				),
-			)
-		}
-	}
-
+	problems := c.securityProblems()
 	if len(problems) == 0 {
 		return nil
 	}
-	return fmt.Errorf("unsafe configuration (break-glass required): %s", strings.Join(problems, "; "))
+
+	msgs := make([]string, 0, len(problems))
+	for _, p := range problems {
+		if strings.TrimSpace(p.Message) != "" {
+			msgs = append(msgs, strings.TrimSpace(p.Message))
+		}
+	}
+	if len(msgs) == 0 {
+		return fmt.Errorf("unsafe configuration (break-glass required)")
+	}
+	return fmt.Errorf("unsafe configuration (break-glass required): %s", strings.Join(msgs, "; "))
 }
 
 func (c *Config) migrateChannelConfigs() {
@@ -1397,10 +1358,23 @@ func (c *Config) HasProvidersConfig() bool {
 // It checks that each model config is valid.
 // Note: Multiple entries with the same model_name are allowed for load balancing.
 func (c *Config) ValidateModelList() error {
-	for i := range c.ModelList {
-		if err := c.ModelList[i].Validate(); err != nil {
-			return fmt.Errorf("model_list[%d]: %w", i, err)
-		}
+	if c == nil {
+		return nil
 	}
-	return nil
+
+	problems := c.modelListProblems()
+	if len(problems) == 0 {
+		return nil
+	}
+
+	p := problems[0]
+	path := strings.TrimSpace(p.Path)
+	msg := strings.TrimSpace(p.Message)
+	if path == "" {
+		return fmt.Errorf("%s", msg)
+	}
+	if msg == "" {
+		return fmt.Errorf("%s is invalid", path)
+	}
+	return fmt.Errorf("%s: %s", path, msg)
 }

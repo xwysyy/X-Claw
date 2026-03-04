@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/sipeed/picoclaw/pkg/providers"
+	"github.com/sipeed/picoclaw/pkg/utils"
 )
 
 type Session struct {
@@ -54,6 +55,8 @@ func NewSessionManager(storage string) *SessionManager {
 }
 
 func (sm *SessionManager) GetOrCreate(key string) *Session {
+	key = utils.CanonicalSessionKey(key)
+
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
@@ -83,6 +86,11 @@ func (sm *SessionManager) AddMessage(sessionKey, role, content string) {
 // AddFullMessage adds a complete message with tool calls and tool call ID to the session.
 // This is used to save the full conversation flow including tool calls and tool results.
 func (sm *SessionManager) AddFullMessage(sessionKey string, msg providers.Message) {
+	sessionKey = utils.CanonicalSessionKey(sessionKey)
+	if sessionKey == "" {
+		return
+	}
+
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
@@ -115,7 +123,7 @@ func (sm *SessionManager) AddFullMessage(sessionKey string, msg providers.Messag
 		ParentID:   strings.TrimSpace(session.LastEventID),
 		TS:         now.UTC().Format(time.RFC3339Nano),
 		TSMS:       now.UnixMilli(),
-		SessionKey: strings.TrimSpace(sessionKey),
+		SessionKey: sessionKey,
 		Message:    &msgCopy,
 	}
 	if path := sm.eventsPath(sessionKey); path != "" {
@@ -131,6 +139,11 @@ func (sm *SessionManager) AddFullMessage(sessionKey string, msg providers.Messag
 }
 
 func (sm *SessionManager) GetHistory(key string) []providers.Message {
+	key = utils.CanonicalSessionKey(key)
+	if key == "" {
+		return []providers.Message{}
+	}
+
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
 
@@ -145,6 +158,11 @@ func (sm *SessionManager) GetHistory(key string) []providers.Message {
 }
 
 func (sm *SessionManager) GetSummary(key string) string {
+	key = utils.CanonicalSessionKey(key)
+	if key == "" {
+		return ""
+	}
+
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
 
@@ -157,6 +175,11 @@ func (sm *SessionManager) GetSummary(key string) string {
 
 // GetActiveAgentID returns the active agent id for this session, if any.
 func (sm *SessionManager) GetActiveAgentID(key string) string {
+	key = utils.CanonicalSessionKey(key)
+	if key == "" {
+		return ""
+	}
+
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
 
@@ -173,7 +196,7 @@ func (sm *SessionManager) SetActiveAgentID(key, agentID string) {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
-	key = strings.TrimSpace(key)
+	key = utils.CanonicalSessionKey(key)
 	if key == "" {
 		return
 	}
@@ -219,6 +242,11 @@ func (sm *SessionManager) SetSummary(key string, summary string) {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
+	key = utils.CanonicalSessionKey(key)
+	if key == "" {
+		return
+	}
+
 	session, ok := sm.sessions[key]
 	if ok {
 		now := time.Now()
@@ -235,7 +263,7 @@ func (sm *SessionManager) SetSummary(key string, summary string) {
 			ParentID:   strings.TrimSpace(session.LastEventID),
 			TS:         now.UTC().Format(time.RFC3339Nano),
 			TSMS:       now.UnixMilli(),
-			SessionKey: strings.TrimSpace(key),
+			SessionKey: key,
 			Summary:    summary,
 		}
 		if path := sm.eventsPath(key); path != "" {
@@ -252,6 +280,11 @@ func (sm *SessionManager) SetSummary(key string, summary string) {
 func (sm *SessionManager) TruncateHistory(key string, keepLast int) {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
+
+	key = utils.CanonicalSessionKey(key)
+	if key == "" {
+		return
+	}
 
 	session, ok := sm.sessions[key]
 	if !ok {
@@ -281,7 +314,7 @@ func (sm *SessionManager) TruncateHistory(key string, keepLast int) {
 		ParentID:   strings.TrimSpace(session.LastEventID),
 		TS:         now.UTC().Format(time.RFC3339Nano),
 		TSMS:       now.UnixMilli(),
-		SessionKey: strings.TrimSpace(key),
+		SessionKey: key,
 		KeepLast:   keepLast,
 	}
 	if path := sm.eventsPath(key); path != "" {
@@ -298,6 +331,11 @@ func (sm *SessionManager) IncrementCompactionCount(key string) int {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
+	key = utils.CanonicalSessionKey(key)
+	if key == "" {
+		return 0
+	}
+
 	session, ok := sm.sessions[key]
 	if !ok {
 		return 0
@@ -313,7 +351,7 @@ func (sm *SessionManager) IncrementCompactionCount(key string) int {
 			ParentID:        strings.TrimSpace(session.LastEventID),
 			TS:              now.UTC().Format(time.RFC3339Nano),
 			TSMS:            now.UnixMilli(),
-			SessionKey:      strings.TrimSpace(key),
+			SessionKey:      key,
 			CompactionCount: session.CompactionCount,
 		}
 		if path := sm.eventsPath(key); path != "" {
@@ -332,6 +370,11 @@ func (sm *SessionManager) MarkMemoryFlush(key string, compactionCount int) {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
+	key = utils.CanonicalSessionKey(key)
+	if key == "" {
+		return
+	}
+
 	session, ok := sm.sessions[key]
 	if !ok {
 		return
@@ -348,7 +391,7 @@ func (sm *SessionManager) MarkMemoryFlush(key string, compactionCount int) {
 			ParentID:                   strings.TrimSpace(session.LastEventID),
 			TS:                         now.UTC().Format(time.RFC3339Nano),
 			TSMS:                       now.UnixMilli(),
-			SessionKey:                 strings.TrimSpace(key),
+			SessionKey:                 key,
 			MemoryFlushAt:              session.MemoryFlushAt,
 			MemoryFlushCompactionCount: session.MemoryFlushCompactionCount,
 		}
@@ -364,6 +407,11 @@ func (sm *SessionManager) MarkMemoryFlush(key string, compactionCount int) {
 }
 
 func (sm *SessionManager) GetCompactionState(key string) (count int, flushCount int, flushAt time.Time) {
+	key = utils.CanonicalSessionKey(key)
+	if key == "" {
+		return 0, 0, time.Time{}
+	}
+
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
 
@@ -384,7 +432,7 @@ func sanitizeFilename(key string) string {
 }
 
 func fileStemForKey(key string) (string, bool) {
-	stem := sanitizeFilename(strings.TrimSpace(key))
+	stem := sanitizeFilename(utils.CanonicalSessionKey(key))
 	if stem == "" || stem == "." {
 		return "", false
 	}
@@ -455,6 +503,11 @@ func buildSessionMeta(s *Session) SessionMeta {
 func (sm *SessionManager) Save(key string) error {
 	if sm.storage == "" {
 		return nil
+	}
+
+	key = utils.CanonicalSessionKey(key)
+	if key == "" {
+		return os.ErrInvalid
 	}
 
 	filename, ok := fileStemForKey(key)
@@ -669,7 +722,10 @@ func (sm *SessionManager) loadSessions() error {
 				sess.Updated = sess.Created
 			}
 
-			sm.sessions[sess.Key] = sess
+			sess.Key = utils.CanonicalSessionKey(sess.Key)
+			if sess.Key != "" {
+				sm.sessions[sess.Key] = sess
+			}
 			continue
 		}
 
@@ -686,7 +742,10 @@ func (sm *SessionManager) loadSessions() error {
 				_ = sm.migrateLegacyToJSONL(sess)
 			}
 
-			sm.sessions[sess.Key] = sess
+			sess.Key = utils.CanonicalSessionKey(sess.Key)
+			if sess.Key != "" {
+				sm.sessions[sess.Key] = sess
+			}
 			continue
 		}
 	}
@@ -698,7 +757,7 @@ func (sm *SessionManager) migrateLegacyToJSONL(sess *Session) error {
 	if sm == nil || strings.TrimSpace(sm.storage) == "" || sess == nil {
 		return nil
 	}
-	key := strings.TrimSpace(sess.Key)
+	key := utils.CanonicalSessionKey(sess.Key)
 	if key == "" {
 		return nil
 	}
@@ -761,6 +820,11 @@ func (sm *SessionManager) SetHistory(key string, history []providers.Message) {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
+	key = utils.CanonicalSessionKey(key)
+	if key == "" {
+		return
+	}
+
 	session, ok := sm.sessions[key]
 	if ok {
 		// Create a deep copy to strictly isolate internal state
@@ -781,7 +845,7 @@ func (sm *SessionManager) SetHistory(key string, history []providers.Message) {
 			ParentID:   strings.TrimSpace(session.LastEventID),
 			TS:         now.UTC().Format(time.RFC3339Nano),
 			TSMS:       now.UnixMilli(),
-			SessionKey: strings.TrimSpace(key),
+			SessionKey: key,
 			History:    msgs,
 		}
 		if path := sm.eventsPath(key); path != "" {
@@ -797,6 +861,11 @@ func (sm *SessionManager) SetHistory(key string, history []providers.Message) {
 
 // GetSessionSnapshot returns a deep-copied snapshot of a session by key.
 func (sm *SessionManager) GetSessionSnapshot(key string) (*Session, bool) {
+	key = utils.CanonicalSessionKey(key)
+	if key == "" {
+		return nil, false
+	}
+
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
 

@@ -1,16 +1,14 @@
 package status
 
 import (
-	"bytes"
-	"encoding/json"
 	"fmt"
-	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 	"time"
 
 	"github.com/sipeed/picoclaw/cmd/picoclaw/internal"
+	"github.com/sipeed/picoclaw/cmd/picoclaw/internal/cliutil"
 	"github.com/sipeed/picoclaw/pkg/auth"
 	"github.com/sipeed/picoclaw/pkg/cron"
 	"github.com/sipeed/picoclaw/pkg/session"
@@ -109,10 +107,10 @@ func statusCmd(opts statusOptions) error {
 	report.Build = build
 
 	report.Config.Path = configPath
-	report.Config.Exists = fileExists(configPath)
+	report.Config.Exists = cliutil.FileExists(configPath)
 
 	report.Workspace.Path = workspace
-	report.Workspace.Exists = workspace != "" && dirExists(workspace)
+	report.Workspace.Exists = workspace != "" && cliutil.DirExists(workspace)
 
 	// gateway
 	report.Gateway.Host = strings.TrimSpace(cfg.Gateway.Host)
@@ -144,7 +142,7 @@ func statusCmd(opts statusOptions) error {
 	if report.Workspace.Exists {
 		storePath := filepath.Join(workspace, "cron", "jobs.json")
 		report.Cron.StorePath = storePath
-		report.Cron.StoreExists = fileExists(storePath)
+		report.Cron.StoreExists = cliutil.FileExists(storePath)
 		cs := cron.NewCronService(storePath, nil)
 		jobs := cs.ListJobs(true)
 		report.Cron.TotalJobs = len(jobs)
@@ -162,7 +160,7 @@ func statusCmd(opts statusOptions) error {
 	if report.Workspace.Exists {
 		sessionsDir := filepath.Join(workspace, "sessions")
 		report.Sessions.Dir = sessionsDir
-		if dirExists(sessionsDir) {
+		if cliutil.DirExists(sessionsDir) {
 			sm := session.NewSessionManager(sessionsDir)
 			snaps := sm.ListSessionSnapshots()
 			report.Sessions.Count = len(snaps)
@@ -219,7 +217,7 @@ func statusCmd(opts statusOptions) error {
 	}
 
 	if opts.JSON {
-		data, err := marshalIndentNoEscape(report)
+		data, err := cliutil.MarshalIndentNoEscape(report)
 		if err != nil {
 			return err
 		}
@@ -300,19 +298,6 @@ func statusCmd(opts statusOptions) error {
 	return nil
 }
 
-func fileExists(path string) bool {
-	_, err := os.Stat(path)
-	return err == nil
-}
-
-func dirExists(path string) bool {
-	info, err := os.Stat(path)
-	if err != nil {
-		return false
-	}
-	return info.IsDir()
-}
-
 func yesNo(ok bool) string {
 	if ok {
 		return "✓"
@@ -356,15 +341,4 @@ func readLastActive(workspace string) (raw string, channel string, chatID string
 	channel = strings.TrimSpace(parts[0])
 	chatID = strings.TrimSpace(parts[1])
 	return raw, channel, chatID, ts
-}
-
-func marshalIndentNoEscape(v any) ([]byte, error) {
-	var buf bytes.Buffer
-	enc := json.NewEncoder(&buf)
-	enc.SetEscapeHTML(false)
-	enc.SetIndent("", "  ")
-	if err := enc.Encode(v); err != nil {
-		return nil, err
-	}
-	return bytes.TrimRight(buf.Bytes(), "\n"), nil
 }

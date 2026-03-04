@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"runtime/debug"
 	"strings"
 	"testing"
 )
@@ -28,6 +29,7 @@ func TestExecBackground_WithProcessPoll(t *testing.T) {
 	}
 	processTool := NewProcessTool(execTool.ProcessManager())
 
+	debug.FreeOSMemory()
 	start := execTool.Execute(context.Background(), map[string]any{
 		"command":    "sleep 0.2; echo done",
 		"background": true,
@@ -83,6 +85,7 @@ func TestProcessTool_KillAndRemove(t *testing.T) {
 	}
 	processTool := NewProcessTool(execTool.ProcessManager())
 
+	debug.FreeOSMemory()
 	start := execTool.Execute(context.Background(), map[string]any{
 		"command":    "sleep 60",
 		"background": true,
@@ -137,6 +140,7 @@ func TestProcessTool_Write(t *testing.T) {
 	}
 	processTool := NewProcessTool(execTool.ProcessManager())
 
+	debug.FreeOSMemory()
 	start := execTool.Execute(context.Background(), map[string]any{
 		"command":    "cat",
 		"background": true,

@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/sipeed/picoclaw/pkg/providers"
+	"github.com/sipeed/picoclaw/pkg/utils"
 )
 
 // SubagentHandoffBlockHook blocks the handoff tool when executed from a subagent
@@ -62,7 +63,7 @@ func (h *SubagentHandoffBlockHook) BeforeToolCall(_ context.Context, call provid
 		"tool":               "handoff",
 		"reason":             "handoff is not allowed from subagents; return a handoff_suggestion to the parent agent instead",
 		"handoff_suggestion": suggestion,
-		"session_key":        strings.TrimSpace(meta.SessionKey),
+		"session_key":        utils.CanonicalSessionKey(meta.SessionKey),
 		"next_step": "Return handoff_suggestion in your final summary; " +
 			"the parent agent may decide to call handoff explicitly.",
 	}
