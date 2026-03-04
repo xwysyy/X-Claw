@@ -99,10 +99,17 @@
 - F1：`handoff(agent_name, reason)` 工具（切换 active agent）✅（done: 2026-03-04；落点：`pkg/tools/handoff.go` + `pkg/tools/agents_list.go` + `pkg/agent/loop.go` + `pkg/session/manager.go` + `pkg/routing/session_key.go`）
 - F2：与 subagent/并发任务融合（完成后接管/汇总）✅（done: 2026-03-04；落点：`pkg/agent/loop.go` + `pkg/tools/subagent.go` + `pkg/session/manager.go`）
 
-### Phase G — 渠道与媒体（“本地桥接”与“媒体稳”）
+### Phase G — 渠道与媒体（”本地桥接”与”媒体稳”）
 
-- G1：飞书等渠道的“本地长连接桥接”模式（避免公网 Webhook）✅（done: 2026-03-02；落点：`pkg/channels/feishu/feishu_64.go`）
+- G1：飞书等渠道的”本地长连接桥接”模式（避免公网 Webhook）✅（done: 2026-03-02；落点：`pkg/channels/feishu/feishu_64.go`）
 - G2：图片/音频/附件的端到端可靠通路（下载、大小限制、临时文件、回传）✅（done: 2026-03-02；落点：`pkg/channels/feishu/feishu_64.go` + `pkg/media/store.go`）
+
+### Phase H — Provider 层重构与优化
+
+- H1：消除 CLI provider 冗余委托（inline `extractToolCalls`/`stripToolCallsJSON` 到共享函数，删除无用 wrapper 方法）✅（done: 2026-03-04；落点：`pkg/providers/claude_cli_provider.go` + `pkg/providers/claude_cli_provider_test.go`）
+- H2：`findMatchingBrace` 迁移到 `tool_call_extract.go`（与调用者同文件，减少跨文件依赖）✅（done: 2026-03-04；落点：`pkg/providers/tool_call_extract.go`）
+- H3：提取共享 CLI 消息格式化函数 `formatConversationParts`（消除 ClaudeCliProvider 中的重复逻辑）✅（done: 2026-03-04；落点：`pkg/providers/toolcall_utils.go` + `pkg/providers/claude_cli_provider.go`）
+- H4：简化 `ClaudeProvider.Chat` pass-through（去除冗余 nil 检查，直接 return delegate）✅（done: 2026-03-04；落点：`pkg/providers/claude_provider.go`）
 
 ---
 
