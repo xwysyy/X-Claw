@@ -1216,6 +1216,13 @@ const consoleHTML = `<!doctype html>
   <div class="row muted">Files under <code>.picoclaw/audit/tools/&lt;session&gt;/events.jsonl</code></div>
   <div id="tools"></div>
 
+  <h2>Audit log</h2>
+  <div class="row muted">Append-only events under <code>.picoclaw/audit/audit.jsonl</code></div>
+  <div class="row">
+    <button onclick="viewTrace('audit','.picoclaw/audit/audit.jsonl','audit')">View</button>
+    <button onclick="downloadPath('.picoclaw/audit/audit.jsonl')">Download</button>
+  </div>
+
   <h2>Trace viewer</h2>
   <div class="row muted">Select a run/tool trace above to view recent events (tail, bounded).</div>
   <div class="row">

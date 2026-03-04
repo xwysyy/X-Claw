@@ -19,6 +19,7 @@ import (
 
 	"golang.org/x/time/rate"
 
+	"github.com/sipeed/picoclaw/pkg/auditlog"
 	"github.com/sipeed/picoclaw/pkg/bus"
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/constants"
@@ -131,6 +132,32 @@ func (m *Manager) RecordReactionUndo(channel, chatID string, undo func()) {
 	m.reactionUndos.Store(key, reactionEntry{undo: undo, createdAt: time.Now()})
 }
 
+func (m *Manager) recordChannelAudit(evType string, channel string, chatID string, note string) {
+	if m == nil || m.config == nil {
+		return
+	}
+	evType = strings.TrimSpace(evType)
+	channel = strings.TrimSpace(channel)
+	chatID = strings.TrimSpace(chatID)
+	if evType == "" || channel == "" || chatID == "" {
+		return
+	}
+
+	workspace := strings.TrimSpace(m.config.WorkspacePath())
+	if workspace == "" {
+		return
+	}
+
+	auditlog.Record(workspace, auditlog.Event{
+		Type:       evType,
+		Source:     "channels",
+		SessionKey: strings.ToLower(channel + ":" + chatID),
+		Channel:    channel,
+		ChatID:     chatID,
+		Note:       strings.TrimSpace(note),
+	})
+}
+
 func (m *Manager) SchedulePlaceholder(
 	ctx context.Context,
 	channel string,
@@ -158,7 +185,9 @@ func (m *Manager) SchedulePlaceholder(
 		sendCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		if id, err := send(sendCtx); err == nil && strings.TrimSpace(id) != "" {
-			m.RecordPlaceholder(channel, chatID, strings.TrimSpace(id))
+			id = strings.TrimSpace(id)
+			m.RecordPlaceholder(channel, chatID, id)
+			m.recordChannelAudit("channel.placeholder.sent", channel, chatID, fmt.Sprintf("id=%q delay_ms=0", id))
 		}
 		return
 	}
@@ -210,7 +239,9 @@ func (m *Manager) SchedulePlaceholder(
 			return
 		}
 		if strings.TrimSpace(id) != "" {
-			m.RecordPlaceholder(channel, chatID, strings.TrimSpace(id))
+			id = strings.TrimSpace(id)
+			m.RecordPlaceholder(channel, chatID, id)
+			m.recordChannelAudit("channel.placeholder.sent", channel, chatID, fmt.Sprintf("id=%q delay_ms=%d", id, delay.Milliseconds()))
 		}
 	}()
 }
@@ -234,6 +265,8 @@ func (m *Manager) CancelPlaceholder(channel, chatID string) {
 			if entry.timer != nil {
 				entry.timer.Stop()
 			}
+			age := time.Since(entry.createdAt).Milliseconds()
+			m.recordChannelAudit("channel.placeholder.cancelled", channel, chatID, fmt.Sprintf("age_ms=%d", age))
 		}
 	}
 }
@@ -265,7 +298,10 @@ func (m *Manager) preSend(ctx context.Context, name string, msg bus.OutboundMess
 		if entry, ok := v.(placeholderEntry); ok && entry.id != "" {
 			if editor, ok := ch.(MessageEditor); ok {
 				if err := editor.EditMessage(ctx, msg.ChatID, entry.id, msg.Content); err == nil {
+					m.recordChannelAudit("channel.placeholder.edited", name, msg.ChatID, fmt.Sprintf("id=%q", entry.id))
 					return true // edited successfully, skip Send
+				} else {
+					m.recordChannelAudit("channel.placeholder.edit_failed", name, msg.ChatID, fmt.Sprintf("id=%q error=%q", entry.id, err.Error()))
 				}
 				// edit failed → fall through to normal Send
 			}

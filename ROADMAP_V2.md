@@ -287,9 +287,9 @@
 ### Phase G+（optional）— Feishu 策略与 UX 补齐（偏“生产可运营”）
 
 - ✅ G+1：策略矩阵补齐：dmPolicy/groupPolicy/requireMention/mentionless 安全默认/命令 bypass
-- 🟡 G+2：统一 placeholder 策略：阈值触发 → patch/update → 失败回退（事件化落盘）
-  - ✅ 已落地：delay 阈值（避免快回复闪烁）+ cancel + placeholder edit（失败自动回退 normal send）
-  - 🚧 待补强：placeholder 的事件落盘（以便 trace panel / 运维回放）
+- ✅ G+2：统一 placeholder 策略：阈值触发 → patch/update → 失败回退（事件化落盘）
+  - delay 阈值（避免快回复闪烁）+ cancel + placeholder edit（失败自动回退 normal send）
+  - audit log：`channel.placeholder.*` 事件落盘（console 可直接 View/Download）
 - 🚧 G+3：把“资源共享给 bot”这种平台约束写入错误提示与运维文档（减少踩坑）
 
 ### Phase L（optional）— Web 工具可靠性栈（搜索 + fetch + 证据）
