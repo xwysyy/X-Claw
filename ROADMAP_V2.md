@@ -16,7 +16,7 @@
 - ✅ Phase G：飞书本地桥接 + 媒体通路 已落地（详见 `ROADMAP.md`）
 - ✅ Phase F（MVP）：多 Agent handoff（active agent 切换 + 持久化 + takeover）已落地
 - ✅ Phase S/H（MVP）：默认安全 + break-glass + limits + audit log + security self-check 已落地
-- 🟡 Phase I/J/K：事件流/模型策略/主动编排仍有待推进（见第 4 节清单；S4/G+3/L4 等）
+- 🟡 Phase J：运行时模型策略仍有待推进（J1：运行时覆盖的剩余细节待补齐）
 
 ---
 
@@ -303,7 +303,7 @@
   - JSON：pretty print → raw
   - 失败原因分类（DNS/timeout/403/oversize/parse）
 - ✅ L3：缓存/去重（同 URL 在短窗口内不重复拉取）
-- 🟡 L4：证据引用规范（与 `web_search` 的 evidence_mode 结合）：fetch 后输出 `sources[]`/`quotes[]`
+- ✅ L4：证据引用规范（与 `web_search` 的 evidence_mode 结合）：`web_fetch` 输出 `sources[]`/`quotes[]`
 
 ---
 
