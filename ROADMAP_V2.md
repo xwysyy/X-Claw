@@ -33,10 +33,10 @@
 - 落点：`pkg/tools/handoff.go`、`pkg/tools/agents_list.go`、`pkg/agent/loop.go`、`pkg/session/*`
 - 兼容性：历史字段 `agent_name` 仍可作为别名解析，但 schema 顶层不使用 `anyOf`/`oneOf`（避免 OpenAI-compat 拒绝）
 
-#### 🟡 F2：与 `subagent`/并行任务融合（输出 contract + 接管策略）
+#### ✅ F2：与 `subagent`/并行任务融合（输出 contract + 接管策略）
 
 - ✅ 已落地：`subagent` / `spawn` 输出稳定 JSON contract（`kind=subagent_result`，`summary` + `artifacts`）
-- 🚧 待补：明确“子代理建议 handoff/接管”的策略与留痕（保持必须显式 handoff，不让子代理隐式接管）
+- ✅ 补齐：子代理内禁止直接执行 `handoff`（通过 hooks 拦截），改为输出 `handoff_suggestions[]` 供父代理显式决策（可追踪/可审计）
 
 ---
 
@@ -88,7 +88,7 @@
 
 对 V2 的落地建议（Phase H，已部分落地）：
 - ✅ H1：Resource limits（预算/软限制）
-- 🚧 H2：OS-level enforcement（可选：cgroups/容器/沙盒后端）
+- 🟡 H2：OS-level enforcement（可选：host ulimit 已落地；cgroups/容器/沙盒后端仍待补齐）
 - ✅ H3：Audit log JSONL + rotation（可选 HMAC 签名）
 - ✅ H4：`picoclaw security --check` / `/api/security`（输出当前安全态）
 
@@ -217,9 +217,9 @@
 
 - ✅ F1：`handoff(agent_id, reason, takeover?)` 工具（active agent 切换）
   - 兼容：历史字段 `agent_name` 仍可作为别名解析，但参数 schema 顶层不使用 `anyOf`/`oneOf`（避免 OpenAI-compat 拒绝）
-- 🟡 F2：handoff 与 subagent/并行任务融合（接管/汇总）
+- ✅ F2：handoff 与 subagent/并行任务融合（接管/汇总）
   - ✅ 输出 contract：`subagent_result`（`summary` + `artifacts`）
-  - 🚧 “handoff 建议/接管策略”的显式化与留痕（保持必须显式 handoff，不让子代理隐式接管）
+  - ✅ 保护：subagent 内禁止 `handoff`，通过 `handoff_suggestions[]` 输出建议（显式 handoff + trace/audit 留痕）
 
 ### Phase S（new）— Security Model：信任边界、默认安全与 break-glass
 
@@ -235,9 +235,10 @@
 - ✅ H1：资源预算模型（soft limit）
   - per-run：最大 tool calls、最大累计 wall time、最大输出字节、最大 trace 体积
   - per-tool：`exec`/`web_fetch`/`write_file` 的超时/输出/文件大小 guard 统一化
-- 🚧 H2：资源限制 enforcement（hard limit，可选）
-  - Linux：优先 cgroups v2 / systemd 限制（可外部配置，不强绑定代码）
-  - Exec docker sandbox：补 memory/cpu 限额映射（默认关闭）
+- 🟡 H2：资源限制 enforcement（hard limit，可选）
+  - ✅ host exec backend：`ulimit` wrapper（memory/cpu/file/nproc，best-effort）
+  - 🚧 Linux：优先 cgroups v2 / systemd 限制（可外部配置，不强绑定代码）
+  - 🚧 Exec docker sandbox：补 memory/cpu 限额映射（默认关闭）
 - ✅ H3：Audit log（append-only JSONL）
   - 事件覆盖：exec/web/file write/mcp call/estop change/config reload/handoff
   - 支持 rotation（按大小/按日）
@@ -249,10 +250,11 @@
 
 - ✅ N1：Session JSONL 树（`id/parent_id/leaf`）与 `/tree`（原地切换分支）
   - 可选：离开分支时生成 branch summary entry（用于保留探索路径的可检索摘要）
-- 🚧 N2：Hook/Extension 机制（最小版）
-  - 能拦截 `tool_call`（block/require confirm/重写参数）
-  - 能拦截 `tool_result`（脱敏/截断/补充 metadata）
-  - 能写入自定义 entry（不进 LLM context，但可用于 UI/运维）
+- 🟡 N2：Hook/Extension 机制（最小版）
+  - ✅ `tool_call` 拦截：支持 short-circuit（deny/rewrite）；已用于禁止 subagent 内 `handoff`
+  - ✅ `tool_result` 拦截：内置 redaction hook（regex + JSON field）
+  - ✅ tool trace 记录 `hook_actions`（便于 UI/运维）
+  - 🚧 自定义 entry（不进 LLM context，但可用于 UI/运维）仍待补齐
 
 ### Phase I（new）— EventStream：把“可回放”推到 UI/渠道
 
@@ -267,7 +269,7 @@
 
 - 🟡 J1：运行时模型覆盖（per session / per task）
   - ✅ `session_model`（TTL + 持久化）已落地（CLI：`/switch session_model to <name> [ttl_minutes]`）
-  - 🚧 Gateway API / tool 化入口 + 统一留痕（run_trace / audit）仍待补齐
+  - ✅ Gateway API：`/api/session_model`（GET/POST）+ audit log 留痕
 - 🚧 J2：自动降级策略（与 fallback 链协同）
   - 当连续失败/超时/上下文溢出时：切到 fallback model（必须留痕）
 
@@ -303,7 +305,7 @@
 ### Must（P0）
 
 - [x] F1：handoff 工具（最小闭环）
-- [ ] F2：subagent 融合（contract 已落地；handoff 接管策略仍待补齐）
+- [x] F2：subagent 融合（contract + handoff_suggestions + 禁止子代理隐式 handoff）
 - [x] S1：安全/信任模型文档 + break-glass 默认值（先把边界说清楚）
 - [x] H1：资源预算模型（soft limit）
 - [x] H3：append-only audit log（先可查询 + rotation）
@@ -318,9 +320,9 @@
 
 ### Could（P2）
 
-- [ ] H2：OS-level resource enforcement（cgroups / docker 限额）
+- [ ] H2：OS-level resource enforcement（host ulimit ✅；cgroups / docker 限额待补齐）
 - [x] H3：HMAC 签名 + verify CLI
-- [ ] J1：运行时模型覆盖（session/task）
+- [x] J1：运行时模型覆盖（session/task）
 - [ ] L0：provider key pool（配额/负载均衡）
 - [x] L2：`web_fetch` extractor 降级链（可选 FireCrawl/FlareSolverr）
 - [ ] G+1：飞书策略矩阵补齐（dm/group/mentionless/命令 bypass）

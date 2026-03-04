@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -544,5 +545,42 @@ func TestShellTool_DockerBackend_InvalidBackendRejected(t *testing.T) {
 
 	if _, err := NewExecToolWithConfig(t.TempDir(), true, cfg); err == nil {
 		t.Fatalf("expected invalid backend to be rejected")
+	}
+}
+
+func TestShellTool_HostLimits_WrapsCommand(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("host_limits wrapping is Unix-only")
+	}
+
+	cfg := config.DefaultConfig()
+	cfg.Tools.Exec.Backend = "host"
+	cfg.Tools.Exec.HostLimits = config.ExecHostLimitsConfig{
+		MemoryMB:    64,
+		CPUSeconds:  2,
+		FileSizeMB:  8,
+		NProc:       32,
+	}
+
+	tool, err := NewExecToolWithConfig(t.TempDir(), true, cfg)
+	if err != nil {
+		t.Fatalf("unable to configure exec tool: %s", err)
+	}
+
+	got := tool.withHostLimits("echo hi")
+	if !strings.Contains(got, "ulimit -v") {
+		t.Fatalf("expected wrapped command to include ulimit -v, got: %q", got)
+	}
+	if !strings.Contains(got, "ulimit -t") {
+		t.Fatalf("expected wrapped command to include ulimit -t, got: %q", got)
+	}
+	if !strings.Contains(got, "ulimit -f") {
+		t.Fatalf("expected wrapped command to include ulimit -f, got: %q", got)
+	}
+	if !strings.Contains(got, "ulimit -u") {
+		t.Fatalf("expected wrapped command to include ulimit -u, got: %q", got)
+	}
+	if !strings.HasSuffix(got, "echo hi") {
+		t.Fatalf("expected wrapped command to end with original command, got: %q", got)
 	}
 }

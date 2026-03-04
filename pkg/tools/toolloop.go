@@ -46,6 +46,10 @@ type ToolLoopConfig struct {
 	// ErrorTemplate controls tool error wrapping (Phase A3).
 	ErrorTemplate ToolErrorTemplateOptions
 
+	// Hooks enables lightweight tool call interception/scrubbing (Phase N2).
+	// When nil/empty, no hooks are applied.
+	Hooks []ToolHook
+
 	ToolCallsParallelEnabled bool
 	MaxToolCallConcurrency   int
 	ParallelToolsMode        string
@@ -274,6 +278,7 @@ func RunToolLoop(
 			Trace:          config.Trace,
 			MaxResultChars: config.MaxToolResultChars,
 			ErrorTemplate:  config.ErrorTemplate,
+			Hooks:          config.Hooks,
 			Parallel: ToolCallParallelConfig{
 				Enabled:             config.ToolCallsParallelEnabled,
 				MaxConcurrency:      config.MaxToolCallConcurrency,

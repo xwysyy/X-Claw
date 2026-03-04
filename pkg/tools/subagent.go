@@ -48,6 +48,13 @@ type SubagentArtifacts struct {
 	EvidenceDropped int                        `json:"evidence_dropped,omitempty"`
 }
 
+type SubagentHandoffSuggestion struct {
+	AgentID    string `json:"agent_id,omitempty"`
+	Reason     string `json:"reason,omitempty"`
+	Takeover   bool   `json:"takeover,omitempty"`
+	ToolCallID string `json:"tool_call_id,omitempty"`
+}
+
 // SubagentResultPayload is the stable JSON contract returned by subagent/spawn results
 // and used for system announcements (Phase F2 in ROADMAP_V2.md).
 type SubagentResultPayload struct {
@@ -73,8 +80,9 @@ type SubagentResultPayload struct {
 	Summary string `json:"summary,omitempty"`
 	Error   string `json:"error,omitempty"`
 
-	Artifacts SubagentArtifacts `json:"artifacts,omitempty"`
-	Warnings  []string          `json:"warnings,omitempty"`
+	HandoffSuggestions []SubagentHandoffSuggestion `json:"handoff_suggestions,omitempty"`
+	Artifacts          SubagentArtifacts           `json:"artifacts,omitempty"`
+	Warnings           []string                    `json:"warnings,omitempty"`
 }
 
 type SubagentExecutionConfig struct {
@@ -135,6 +143,7 @@ type SubagentManager struct {
 	toolPolicyTags    map[string]string
 	toolTrace         ToolTraceOptions
 	toolErrorTemplate ToolErrorTemplateOptions
+	toolHooks         []ToolHook
 
 	// Resource budgets (soft limits).
 	maxToolCallsPerRun int
@@ -263,6 +272,14 @@ func (sm *SubagentManager) SetToolExecutionTracing(trace ToolTraceOptions, error
 	sm.toolErrorTemplate = errorTemplate
 }
 
+// SetToolHooks configures the tool hook chain applied to all tool executions
+// performed by subagents (Phase N2).
+func (sm *SubagentManager) SetToolHooks(hooks []ToolHook) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	sm.toolHooks = hooks
+}
+
 func clonePolicyOverrides(src map[string]string) map[string]string {
 	if len(src) == 0 {
 		return nil
@@ -359,6 +376,57 @@ func buildSubagentArtifacts(trace []ToolExecutionTrace) SubagentArtifacts {
 	}
 
 	return artifacts
+}
+
+func extractSubagentHandoffSuggestions(trace []ToolExecutionTrace) ([]SubagentHandoffSuggestion, []string) {
+	if len(trace) == 0 {
+		return nil, nil
+	}
+
+	out := make([]SubagentHandoffSuggestion, 0, 1)
+	warnings := []string(nil)
+
+	for _, tr := range trace {
+		if !strings.EqualFold(strings.TrimSpace(tr.ToolName), "handoff") {
+			continue
+		}
+		raw := strings.TrimSpace(tr.Result)
+		if raw == "" || !strings.HasPrefix(raw, "{") {
+			continue
+		}
+
+		var payload struct {
+			Kind              string                     `json:"kind"`
+			HandoffSuggestion *SubagentHandoffSuggestion `json:"handoff_suggestion,omitempty"`
+			Suggestion        *SubagentHandoffSuggestion `json:"suggestion,omitempty"`
+		}
+		if err := json.Unmarshal([]byte(raw), &payload); err != nil {
+			continue
+		}
+		if payload.HandoffSuggestion == nil {
+			payload.HandoffSuggestion = payload.Suggestion
+		}
+		if payload.HandoffSuggestion == nil {
+			continue
+		}
+
+		s := *payload.HandoffSuggestion
+		if strings.TrimSpace(s.ToolCallID) == "" {
+			s.ToolCallID = strings.TrimSpace(tr.ToolCallID)
+		}
+		s.AgentID = strings.TrimSpace(s.AgentID)
+		s.Reason = strings.TrimSpace(s.Reason)
+		if s.AgentID == "" && s.Reason == "" && !s.Takeover {
+			warnings = append(warnings, "subagent handoff suggestion is empty (ignored)")
+			continue
+		}
+		out = append(out, s)
+	}
+
+	if len(out) == 0 {
+		return nil, warnings
+	}
+	return out, warnings
 }
 
 func marshalSubagentPayload(payload SubagentResultPayload) (string, error) {
@@ -541,6 +609,10 @@ Working directory: %s`, sm.workspace)
 	policyTags := copyStringMap(sm.toolPolicyTags)
 	traceOpts := sm.toolTrace
 	errorTemplateOpts := sm.toolErrorTemplate
+	toolHooks := sm.toolHooks
+	if len(toolHooks) > 0 {
+		toolHooks = append([]ToolHook(nil), toolHooks...)
+	}
 	maxToolCallsPerRun := sm.maxToolCallsPerRun
 	maxWallTimeSeconds := sm.maxWallTimeSeconds
 	maxToolResultChars := sm.maxToolResultChars
@@ -644,6 +716,7 @@ Working directory: %s`, sm.workspace)
 		PolicyTags:               policyTags,
 		Trace:                    traceOpts,
 		ErrorTemplate:            errorTemplateOpts,
+		Hooks:                    toolHooks,
 		ToolCallsParallelEnabled: toolCallsParallelEnabled,
 		MaxToolCallConcurrency:   maxToolCallConcurrency,
 		ParallelToolsMode:        parallelToolsMode,
@@ -658,6 +731,8 @@ Working directory: %s`, sm.workspace)
 		trace = loopResult.Trace
 		iterations = loopResult.Iterations
 	}
+
+	handoffSuggestions, handoffWarnings := extractSubagentHandoffSuggestions(trace)
 
 	if err != nil {
 		status, eventType := "failed", SubagentTaskFailed
@@ -690,9 +765,11 @@ Working directory: %s`, sm.workspace)
 			Depth:         snapshot.Depth,
 			Iterations:    iterations,
 
-			Summary:   summary,
-			Error:     truncateText(errText, 1200),
-			Artifacts: buildSubagentArtifacts(trace),
+			Summary:            summary,
+			Error:              truncateText(errText, 1200),
+			HandoffSuggestions: handoffSuggestions,
+			Artifacts:          buildSubagentArtifacts(trace),
+			Warnings:           handoffWarnings,
 		}
 		payloadJSON, marshalErr := marshalSubagentPayload(payload)
 		if marshalErr != nil {
@@ -736,8 +813,10 @@ Working directory: %s`, sm.workspace)
 			Depth:         snapshot.Depth,
 			Iterations:    iterations,
 
-			Summary:   summary,
-			Artifacts: buildSubagentArtifacts(trace),
+			Summary:            summary,
+			HandoffSuggestions: handoffSuggestions,
+			Artifacts:          buildSubagentArtifacts(trace),
+			Warnings:           handoffWarnings,
 		}
 		payloadJSON, marshalErr := marshalSubagentPayload(payload)
 		if marshalErr != nil {
@@ -985,6 +1064,10 @@ func (t *SubagentTool) Execute(ctx context.Context, args map[string]any) *ToolRe
 	policyTags := copyStringMap(sm.toolPolicyTags)
 	traceOpts := sm.toolTrace
 	errorTemplateOpts := sm.toolErrorTemplate
+	toolHooks := sm.toolHooks
+	if len(toolHooks) > 0 {
+		toolHooks = append([]ToolHook(nil), toolHooks...)
+	}
 	maxToolCallsPerRun := sm.maxToolCallsPerRun
 	maxWallTimeSeconds := sm.maxWallTimeSeconds
 	maxToolResultChars := sm.maxToolResultChars
@@ -1052,6 +1135,7 @@ func (t *SubagentTool) Execute(ctx context.Context, args map[string]any) *ToolRe
 		PolicyTags:               policyTags,
 		Trace:                    traceOpts,
 		ErrorTemplate:            errorTemplateOpts,
+		Hooks:                    toolHooks,
 		ToolCallsParallelEnabled: toolCallsParallelEnabled,
 		MaxToolCallConcurrency:   maxToolCallConcurrency,
 		ParallelToolsMode:        parallelToolsMode,
@@ -1087,6 +1171,8 @@ func (t *SubagentTool) Execute(ctx context.Context, args map[string]any) *ToolRe
 		labelStr = "(unnamed)"
 	}
 
+	handoffSuggestions, handoffWarnings := extractSubagentHandoffSuggestions(trace)
+
 	payload := SubagentResultPayload{
 		Kind:   "subagent_result",
 		Status: status,
@@ -1096,10 +1182,12 @@ func (t *SubagentTool) Execute(ctx context.Context, args map[string]any) *ToolRe
 		Task:    truncateText(task, defaultSubagentMaxTaskChars),
 		AgentID: strings.TrimSpace(agentID),
 
-		Iterations: iterations,
-		Summary:    truncateText(content, defaultSubagentMaxSummaryChars),
-		Error:      truncateText(errText, 1200),
-		Artifacts:  buildSubagentArtifacts(trace),
+		Iterations:         iterations,
+		Summary:            truncateText(content, defaultSubagentMaxSummaryChars),
+		Error:              truncateText(errText, 1200),
+		HandoffSuggestions: handoffSuggestions,
+		Artifacts:          buildSubagentArtifacts(trace),
+		Warnings:           handoffWarnings,
 	}
 
 	payloadJSON, marshalErr := marshalSubagentPayload(payload)

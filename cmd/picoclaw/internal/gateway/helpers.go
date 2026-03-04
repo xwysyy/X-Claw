@@ -37,6 +37,7 @@ import (
 	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/media"
 	"github.com/sipeed/picoclaw/pkg/providers"
+	"github.com/sipeed/picoclaw/pkg/session"
 	"github.com/sipeed/picoclaw/pkg/tools"
 )
 
@@ -361,6 +362,22 @@ func registerGatewayHTTPAPI(svc *gatewayServices) {
 	})
 	if err := svc.channelManager.RegisterHTTPHandler("/api/estop", estop); err != nil {
 		fmt.Printf("⚠ Warning: failed to register /api/estop: %v\n", err)
+	}
+
+	sessionModel := httpapi.NewSessionModelHandler(httpapi.SessionModelHandlerOptions{
+		APIKey:    svc.cfg.Gateway.APIKey,
+		Workspace: svc.cfg.WorkspacePath(),
+		Sessions: func() *session.SessionManager { // avoid nil deref on startup
+			if svc.agentLoop == nil {
+				return nil
+			}
+			return svc.agentLoop.SessionManager()
+		}(),
+		Enabled:      true,
+		MaxBodyBytes: 8 << 10,
+	})
+	if err := svc.channelManager.RegisterHTTPHandler("/api/session_model", sessionModel); err != nil {
+		fmt.Printf("⚠ Warning: failed to register /api/session_model: %v\n", err)
 	}
 
 	security := httpapi.NewSecurityHandler(httpapi.SecurityHandlerOptions{

@@ -893,6 +893,11 @@ type ExecConfig struct {
 
 	Env ExecEnvConfig `json:"env,omitempty"`
 
+	// HostLimits optionally applies OS-level ulimit-style hard limits to host exec backend.
+	// NOTE: These limits are best-effort and platform dependent. Prefer docker backend for
+	// stronger isolation where available.
+	HostLimits ExecHostLimitsConfig `json:"host_limits,omitempty"`
+
 	// Backend selects the exec runtime:
 	// - "host" (default): run commands on the host directly
 	// - "docker": run commands inside a disposable docker container (workspace mounted)
@@ -908,6 +913,19 @@ type ExecEnvConfig struct {
 
 	// EnvAllow is the allow-list of environment variable names (exact match).
 	EnvAllow []string `json:"allow,omitempty" env:"PICOCLAW_TOOLS_EXEC_ENV_ALLOW"`
+}
+
+// ExecHostLimitsConfig controls optional OS-level hard limits for host exec tool backend.
+// All fields are optional; zero/negative values disable that limit.
+type ExecHostLimitsConfig struct {
+	// MemoryMB maps to ulimit -v (virtual memory) on Unix. It is approximate.
+	MemoryMB int `json:"memory_mb,omitempty" env:"PICOCLAW_TOOLS_EXEC_HOST_MEMORY_MB"`
+	// CPUSeconds maps to ulimit -t (CPU time) on Unix.
+	CPUSeconds int `json:"cpu_seconds,omitempty" env:"PICOCLAW_TOOLS_EXEC_HOST_CPU_SECONDS"`
+	// FileSizeMB maps to ulimit -f (max file size) on Unix.
+	FileSizeMB int `json:"file_size_mb,omitempty" env:"PICOCLAW_TOOLS_EXEC_HOST_FILE_SIZE_MB"`
+	// NProc maps to ulimit -u (max user processes) on Unix.
+	NProc int `json:"nproc,omitempty" env:"PICOCLAW_TOOLS_EXEC_HOST_NPROC"`
 }
 
 type ExecDockerConfig struct {
@@ -979,6 +997,7 @@ type ToolsConfig struct {
 	Web             WebToolsConfig          `json:"web"`
 	MCP             MCPConfig               `json:"mcp,omitempty"`
 	Policy          ToolPolicyConfig        `json:"policy,omitempty"`
+	Hooks           ToolHooksConfig         `json:"hooks,omitempty"`
 	PlanMode        PlanModeConfig          `json:"plan_mode,omitempty"`
 	Estop           EstopConfig             `json:"estop,omitempty"`
 	Trace           ToolTraceConfig         `json:"trace,omitempty"`
@@ -1014,6 +1033,21 @@ type ToolPolicyConfig struct {
 	Confirm     ToolPolicyConfirmConfig     `json:"confirm,omitempty"`
 	Idempotency ToolPolicyIdempotencyConfig `json:"idempotency,omitempty"`
 	Audit       ToolPolicyAuditConfig       `json:"audit,omitempty"`
+}
+
+// ToolHooksConfig enables lightweight tool call hooks/extensions (Phase N2 in ROADMAP_V2.md).
+//
+// Hooks run inside the tool executor chokepoint (same place as plan mode / tool policy),
+// and can rewrite tool arguments, deny tool calls, or scrub tool results.
+//
+// This config is intentionally limited to built-in hooks (no dynamic plugin loading).
+// Keep it small and explicit.
+type ToolHooksConfig struct {
+	Enabled bool `json:"enabled,omitempty"`
+
+	// Redact applies best-effort redaction to tool outputs even when tools.policy.enabled=false.
+	// This is useful to prevent leaking host secrets into provider prompts.
+	Redact ToolPolicyRedactConfig `json:"redact,omitempty"`
 }
 
 type ToolPolicyRedactConfig struct {

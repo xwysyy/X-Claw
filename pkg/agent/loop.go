@@ -188,6 +188,15 @@ func (al *AgentLoop) Config() *config.Config {
 	return al.cfg
 }
 
+// SessionManager returns the shared session manager used by this agent loop.
+// It may be nil if the loop is not fully initialized.
+func (al *AgentLoop) SessionManager() *session.SessionManager {
+	if al == nil {
+		return nil
+	}
+	return al.sessions
+}
+
 // SetConfig swaps the configuration pointer used by the agent loop.
 // This is used by the gateway config hot reload path.
 func (al *AgentLoop) SetConfig(cfg *config.Config) {
@@ -484,6 +493,7 @@ func registerSharedTools(
 				IncludeAvailableTools: true,
 			},
 		)
+		subagentManager.SetToolHooks(tools.BuildDefaultToolHooks(cfg))
 		if cfg != nil {
 			subagentManager.SetResourceBudgets(cfg.Limits)
 		}
@@ -2103,6 +2113,7 @@ func (al *AgentLoop) runLLMIteration(
 			Trace:                  traceOpts,
 			MaxResultChars:         maxToolResultChars,
 			ErrorTemplate:          errorTemplateOpts,
+			Hooks:                  tools.BuildDefaultToolHooks(cfg),
 			// Create async callback for tools that implement AsyncTool.
 			// Following openclaw's design, async tools do not send results directly
 			// to users. The agent handles user notification via processSystemMessage.

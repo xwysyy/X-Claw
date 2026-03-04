@@ -424,6 +424,27 @@ func DefaultConfig() *Config {
 					Tags: map[string]string{},
 				},
 			},
+			Hooks: ToolHooksConfig{
+				Enabled: true,
+				Redact: ToolPolicyRedactConfig{
+					Enabled:     true,
+					ApplyToLLM:  true,
+					ApplyToUser: false,
+					JSONFields: []string{
+						"api_key", "apikey",
+						"token", "access_token", "refresh_token",
+						"secret", "password",
+						"authorization", "cookie",
+					},
+					Patterns: []string{
+						`(?i)(authorization\s*:\s*)(bearer\s+)[^\s]+`,
+						`(?i)(api[_-]?key\s*[:=]\s*)[^\s]+`,
+						`(?i)(access[_-]?token\s*[:=]\s*)[^\s]+`,
+						`(?i)(refresh[_-]?token\s*[:=]\s*)[^\s]+`,
+						`\bsk-[A-Za-z0-9]{16,}\b`,
+					},
+				},
+			},
 			PlanMode: PlanModeConfig{
 				Enabled:     true,
 				DefaultMode: "run",

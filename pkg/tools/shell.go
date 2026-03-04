@@ -32,6 +32,11 @@ type ExecTool struct {
 	envMode  string
 	envAllow map[string]bool
 
+	hostMemoryMB   int
+	hostCPUSeconds int
+	hostFileSizeMB int
+	hostNProc      int
+
 	dockerImage          string
 	dockerNetwork        string
 	dockerReadOnlyRootFS bool
@@ -118,6 +123,10 @@ func NewExecToolWithConfig(workingDir string, restrict bool, config *config.Conf
 	backend := "host"
 	envMode := "inherit"
 	envAllow := map[string]bool{}
+	hostMemoryMB := 0
+	hostCPUSeconds := 0
+	hostFileSizeMB := 0
+	hostNProc := 0
 	dockerImage := ""
 	dockerNetwork := ""
 	dockerReadOnly := false
@@ -175,6 +184,11 @@ func NewExecToolWithConfig(workingDir string, restrict bool, config *config.Conf
 		}
 		envAllow = buildExecEnvAllowMap(execConfig.Env.EnvAllow)
 
+		hostMemoryMB = execConfig.HostLimits.MemoryMB
+		hostCPUSeconds = execConfig.HostLimits.CPUSeconds
+		hostFileSizeMB = execConfig.HostLimits.FileSizeMB
+		hostNProc = execConfig.HostLimits.NProc
+
 		dockerImage = strings.TrimSpace(execConfig.Docker.Image)
 		dockerNetwork = strings.TrimSpace(execConfig.Docker.Network)
 		if dockerNetwork == "" {
@@ -199,6 +213,10 @@ func NewExecToolWithConfig(workingDir string, restrict bool, config *config.Conf
 		backend:              backend,
 		envMode:              envMode,
 		envAllow:             envAllow,
+		hostMemoryMB:         hostMemoryMB,
+		hostCPUSeconds:       hostCPUSeconds,
+		hostFileSizeMB:       hostFileSizeMB,
+		hostNProc:            hostNProc,
 		dockerImage:          dockerImage,
 		dockerNetwork:        dockerNetwork,
 		dockerReadOnlyRootFS: dockerReadOnly,
@@ -546,7 +564,7 @@ func (t *ExecTool) executeSync(ctx context.Context, command, cwd string, timeout
 	}
 	defer cancel()
 
-	cmd := shellCommand(cmdCtx, command)
+	cmd := shellCommand(cmdCtx, t.withHostLimits(command))
 	if cwd != "" {
 		cmd.Dir = cwd
 	}
@@ -636,7 +654,7 @@ func (t *ExecTool) executeManaged(
 		cmdCtx, cancel = context.WithCancel(baseCtx)
 	}
 
-	cmd := shellCommand(cmdCtx, command)
+	cmd := shellCommand(cmdCtx, t.withHostLimits(command))
 	if cwd != "" {
 		cmd.Dir = cwd
 	}
@@ -810,6 +828,58 @@ func shellCommand(ctx context.Context, command string) *exec.Cmd {
 		return exec.CommandContext(ctx, "powershell", "-NoProfile", "-NonInteractive", "-Command", command)
 	}
 	return exec.CommandContext(ctx, "sh", "-c", command)
+}
+
+func (t *ExecTool) withHostLimits(command string) string {
+	if t == nil {
+		return command
+	}
+	if runtime.GOOS == "windows" {
+		return command
+	}
+	if !strings.EqualFold(strings.TrimSpace(t.backend), "host") {
+		return command
+	}
+
+	memMB := t.hostMemoryMB
+	cpuSeconds := t.hostCPUSeconds
+	fileSizeMB := t.hostFileSizeMB
+	nproc := t.hostNProc
+
+	parts := make([]string, 0, 4)
+	if memMB > 0 {
+		memKB := memMB * 1024
+		parts = append(parts, fmt.Sprintf(
+			"ulimit -v %d || { echo 'exec host_limits: failed to set ulimit -v' 1>&2; exit 1; }",
+			memKB,
+		))
+	}
+	if cpuSeconds > 0 {
+		parts = append(parts, fmt.Sprintf(
+			"ulimit -t %d || { echo 'exec host_limits: failed to set ulimit -t' 1>&2; exit 1; }",
+			cpuSeconds,
+		))
+	}
+	if fileSizeMB > 0 {
+		// ulimit -f uses 512-byte blocks on most shells.
+		blocks := fileSizeMB * 2048
+		parts = append(parts, fmt.Sprintf(
+			"ulimit -f %d || { echo 'exec host_limits: failed to set ulimit -f' 1>&2; exit 1; }",
+			blocks,
+		))
+	}
+	if nproc > 0 {
+		parts = append(parts, fmt.Sprintf(
+			"ulimit -u %d || { echo 'exec host_limits: failed to set ulimit -u' 1>&2; exit 1; }",
+			nproc,
+		))
+	}
+
+	if len(parts) == 0 {
+		return command
+	}
+
+	return strings.Join(parts, " && ") + " && " + command
 }
 
 func truncateExecOutput(output string) string {

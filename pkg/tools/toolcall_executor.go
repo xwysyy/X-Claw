@@ -87,6 +87,10 @@ type ToolCallExecutionOptions struct {
 	// AsyncCallbackForCall creates a callback for async-capable tools.
 	// It may be nil when async callbacks are not needed.
 	AsyncCallbackForCall func(call providers.ToolCall) AsyncCallback
+
+	// Hooks enables lightweight tool call interception/scrubbing (Phase N2).
+	// When nil/empty, no hooks are applied.
+	Hooks []ToolHook
 }
 
 // ToolCallExecution captures one tool call execution result.
@@ -117,6 +121,7 @@ func ExecuteToolCalls(
 	traceWriter := newToolTraceWriter(opts, scope)
 	policy := newToolPolicy(opts.Workspace, opts.SessionKey, opts.RunID, opts.IsResume, opts.Policy)
 	planGate := newPlanModeGate(opts.PlanMode, opts.PlanRestrictedTools, opts.PlanRestrictedPrefixes)
+	hooks := opts.Hooks
 	var estopState EstopState
 	estopEnabled := false
 	estopLoadErr := error(nil)
@@ -165,26 +170,76 @@ func ExecuteToolCalls(
 
 	runOne := func(idx int) {
 		tc := toolCalls[idx]
-		argsJSON, _ := json.Marshal(tc.Arguments)
+		originalTool := strings.TrimSpace(tc.Name)
+		originalToolCallID := strings.TrimSpace(tc.ID)
+
+		execCtx := withExecutionRunID(withExecutionSessionKey(withExecutionIsResume(ctx, opts.IsResume), opts.SessionKey), opts.RunID)
+
+		meta := ToolHookContext{
+			Workspace:  strings.TrimSpace(opts.Workspace),
+			SessionKey: strings.TrimSpace(opts.SessionKey),
+			RunID:      strings.TrimSpace(opts.RunID),
+
+			Channel:  strings.TrimSpace(opts.Channel),
+			ChatID:   strings.TrimSpace(opts.ChatID),
+			SenderID: strings.TrimSpace(opts.SenderID),
+
+			Iteration: opts.Iteration,
+			IsResume:  opts.IsResume,
+			PlanMode:  opts.PlanMode,
+
+			PolicyTags: copyStringMap(opts.PolicyTags),
+		}
+
+		hookActions := make([]ToolHookAction, 0, 2)
+		call := tc
+		var hookShortCircuit *ToolResult
+		if len(hooks) > 0 {
+			for _, h := range hooks {
+				if h == nil {
+					continue
+				}
+				updated, shortCircuit, action := h.BeforeToolCall(execCtx, call, meta)
+				if action != nil {
+					a := *action
+					a.Hook = strings.TrimSpace(h.Name())
+					if strings.TrimSpace(a.Stage) == "" {
+						a.Stage = "before"
+					}
+					hookActions = append(hookActions, a)
+				}
+				if strings.TrimSpace(updated.ID) != originalToolCallID || strings.TrimSpace(updated.Name) != originalTool {
+					hookShortCircuit = ErrorResult("tool hook attempted to change tool_call_id or tool name (unsupported)")
+					break
+				}
+				call = updated
+				if shortCircuit != nil {
+					hookShortCircuit = shortCircuit
+					break
+				}
+			}
+		}
+
+		argsJSON, _ := json.Marshal(call.Arguments)
 		redactedArgsJSON := argsJSON
 		if policy != nil && !policy.policyDisabled() {
 			redactedArgsJSON = policy.redactJSONBytes(argsJSON)
 		}
 		argsPreview := utils.Truncate(string(redactedArgsJSON), 200)
-		logger.InfoCF(scope, fmt.Sprintf("Tool call: %s(%s)", tc.Name, argsPreview),
+		logger.InfoCF(scope, fmt.Sprintf("Tool call: %s(%s)", call.Name, argsPreview),
 			map[string]any{
-				"tool":      tc.Name,
+				"tool":      call.Name,
 				"iteration": opts.Iteration,
 			})
 
 		var asyncCallback AsyncCallback
 		if opts.AsyncCallbackForCall != nil {
-			asyncCallback = opts.AsyncCallbackForCall(tc)
+			asyncCallback = opts.AsyncCallbackForCall(call)
 		}
 
 		start := time.Now()
 		if traceWriter != nil {
-			traceWriter.RecordStart(start, opts.Iteration, tc, redactedArgsJSON)
+			traceWriter.RecordStart(start, opts.Iteration, call, redactedArgsJSON)
 		}
 
 		policyDecision := ""
@@ -193,7 +248,6 @@ func ExecuteToolCalls(
 		idempotencyKey := ""
 
 		var toolResult *ToolResult
-		execCtx := withExecutionRunID(withExecutionSessionKey(withExecutionIsResume(ctx, opts.IsResume), opts.SessionKey), opts.RunID)
 		var cancel context.CancelFunc = func() {}
 		if policy != nil && !policy.policyDisabled() {
 			execCtx, cancel, policyTimeoutMS = policy.toolTimeoutContext(execCtx)
@@ -201,14 +255,20 @@ func ExecuteToolCalls(
 		defer cancel()
 
 		// Estop (ROADMAP.md:1138): global kill switch / freeze layer.
-		if toolResult == nil && estopEnabled && strings.ToLower(strings.TrimSpace(tc.Name)) != "tool_confirm" {
+		if toolResult == nil && hookShortCircuit != nil {
+			policyDecision = "hook"
+			policyReason = "hook short-circuit"
+			toolResult = hookShortCircuit
+		}
+
+		if toolResult == nil && estopEnabled && strings.ToLower(strings.TrimSpace(call.Name)) != "tool_confirm" {
 			if estopLoadErr != nil {
 				policyDecision = "estop_deny"
 				policyReason = "estop state load error: " + estopLoadErr.Error()
 				toolResult = ErrorResult("ESTOP_DENY: " + policyReason)
 			} else {
 				allowed, reason := true, ""
-				if denied, r := estopState.DeniesTool(tc.Name, tc.Arguments); denied {
+				if denied, r := estopState.DeniesTool(call.Name, call.Arguments); denied {
 					allowed, reason = false, r
 				}
 				if !allowed {
@@ -218,7 +278,7 @@ func ExecuteToolCalls(
 						fmt.Sprintf(
 							"ESTOP_DENY: tool %q blocked by estop (%s). "+
 								"If this is unexpected, disable estop via /api/estop or CLI.",
-							tc.Name,
+							call.Name,
 							strings.TrimSpace(reason),
 						),
 					)
@@ -227,22 +287,22 @@ func ExecuteToolCalls(
 		}
 
 		// Plan Mode (ROADMAP.md:1225): deny side-effect tools during planning phase.
-		if toolResult == nil && planGate != nil && planGate.Enabled() && strings.ToLower(strings.TrimSpace(tc.Name)) != "tool_confirm" {
-			allowed, reason := planGate.Allows(tc.Name)
+		if toolResult == nil && planGate != nil && planGate.Enabled() && strings.ToLower(strings.TrimSpace(call.Name)) != "tool_confirm" {
+			allowed, reason := planGate.Allows(call.Name)
 			if !allowed {
 				policyDecision = string(toolPolicyDecisionDeny)
 				policyReason = reason
-				toolResult = planGate.DeniedResult(tc.Name, reason)
+				toolResult = planGate.DeniedResult(call.Name, reason)
 			}
 		}
 
 		// Phase D2: centralized tool policy layer (allow/deny, confirm, idempotency).
-		if policy != nil && !policy.policyDisabled() && strings.ToLower(strings.TrimSpace(tc.Name)) != "tool_confirm" {
-			allowed, reason := policy.isToolAllowed(tc.Name)
+		if policy != nil && !policy.policyDisabled() && strings.ToLower(strings.TrimSpace(call.Name)) != "tool_confirm" {
+			allowed, reason := policy.isToolAllowed(call.Name)
 			if !allowed {
 				policyDecision = string(toolPolicyDecisionDeny)
 				policyReason = reason
-				toolResult = policy.buildDeniedResult(tc.Name, reason)
+				toolResult = policy.buildDeniedResult(call.Name, reason)
 			}
 		}
 
@@ -250,30 +310,30 @@ func ExecuteToolCalls(
 		//
 		// We always compute the idempotency key (so the first attempt records it),
 		// but we only replay cached outputs during resume flows.
-		if toolResult == nil && policy != nil && !policy.policyDisabled() && policy.shouldBeIdempotent(tc.Name) && strings.TrimSpace(opts.RunID) != "" {
-			idempotencyKey = toolIdempotencyKey(tc.Name, argsJSON)
+		if toolResult == nil && policy != nil && !policy.policyDisabled() && policy.shouldBeIdempotent(call.Name) && strings.TrimSpace(opts.RunID) != "" {
+			idempotencyKey = toolIdempotencyKey(call.Name, argsJSON)
 			if policy.isResume && policy.store != nil && policy.idempotencyCacheResult {
 				if cached, ok := policy.store.GetCachedExecution(idempotencyKey); ok {
 					policyDecision = string(toolPolicyDecisionIdempotentReplay)
-					toolResult = policy.buildIdempotentReplayResult(tc.Name, idempotencyKey, cached)
+					toolResult = policy.buildIdempotentReplayResult(call.Name, idempotencyKey, cached)
 				}
 			}
 		}
 
 		// Phase E2: confirmation gate for side-effect tools (two-phase commit).
-		if toolResult == nil && policy != nil && !policy.policyDisabled() && policy.shouldRequireConfirmation(tc.Name) && strings.TrimSpace(opts.RunID) != "" {
+		if toolResult == nil && policy != nil && !policy.policyDisabled() && policy.shouldRequireConfirmation(call.Name) && strings.TrimSpace(opts.RunID) != "" {
 			if idempotencyKey == "" {
-				idempotencyKey = toolIdempotencyKey(tc.Name, argsJSON)
+				idempotencyKey = toolIdempotencyKey(call.Name, argsJSON)
 			}
 			if policy.store != nil && policy.store.IsConfirmed(idempotencyKey) {
 				// confirmed; proceed
 			} else if policy.store == nil || !policy.store.enabled {
 				policyDecision = string(toolPolicyDecisionConfirmRequired)
 				policyReason = "confirmation gate is enabled but policy store is unavailable (missing run_id/session_key?)"
-				toolResult = policy.buildConfirmRequiredResult(tc.Name, idempotencyKey, argsPreview)
+				toolResult = policy.buildConfirmRequiredResult(call.Name, idempotencyKey, argsPreview)
 			} else {
 				policyDecision = string(toolPolicyDecisionConfirmRequired)
-				toolResult = policy.buildConfirmRequiredResult(tc.Name, idempotencyKey, argsPreview)
+				toolResult = policy.buildConfirmRequiredResult(call.Name, idempotencyKey, argsPreview)
 			}
 		}
 
@@ -282,8 +342,8 @@ func ExecuteToolCalls(
 			if registry != nil {
 				toolResult = registry.ExecuteWithContext(
 					execCtx,
-					tc.Name,
-					tc.Arguments,
+					call.Name,
+					call.Arguments,
 					opts.Channel,
 					opts.ChatID,
 					opts.SenderID,
@@ -304,7 +364,28 @@ func ExecuteToolCalls(
 		}
 
 		if toolResult.IsError && opts.ErrorTemplate.Enabled && !shouldSkipErrorTemplate(toolResult.ForLLM) {
-			applyToolErrorTemplate(registry, tc, redactedArgsJSON, toolResult, opts)
+			applyToolErrorTemplate(registry, call, redactedArgsJSON, toolResult, opts)
+		}
+
+		// Hooks: allow post-processing / scrubbing of tool outputs (Phase N2).
+		if len(hooks) > 0 {
+			for _, h := range hooks {
+				if h == nil {
+					continue
+				}
+				updated, action := h.AfterToolCall(execCtx, call, toolResult, meta)
+				if action != nil {
+					a := *action
+					a.Hook = strings.TrimSpace(h.Name())
+					if strings.TrimSpace(a.Stage) == "" {
+						a.Stage = "after"
+					}
+					hookActions = append(hookActions, a)
+				}
+				if updated != nil {
+					toolResult = updated
+				}
+			}
 		}
 
 		// Apply redaction (always for audit; optional for return).
@@ -322,10 +403,10 @@ func ExecuteToolCalls(
 		}
 
 		// Phase E2: record idempotent execution output for replay on resume.
-		if executed && policy != nil && !policy.policyDisabled() && policy.store != nil && policy.shouldBeIdempotent(tc.Name) && strings.TrimSpace(opts.RunID) != "" && idempotencyKey != "" && policyDecision != string(toolPolicyDecisionIdempotentReplay) {
-			if err := policy.store.RecordExecution(opts.RunID, opts.SessionKey, tc.Name, tc.ID, idempotencyKey, argsPreview, auditResult); err != nil {
+		if executed && policy != nil && !policy.policyDisabled() && policy.store != nil && policy.shouldBeIdempotent(call.Name) && strings.TrimSpace(opts.RunID) != "" && idempotencyKey != "" && policyDecision != string(toolPolicyDecisionIdempotentReplay) {
+			if err := policy.store.RecordExecution(opts.RunID, opts.SessionKey, call.Name, call.ID, idempotencyKey, argsPreview, auditResult); err != nil {
 				logger.WarnCF(scope, "Tool policy: failed to record idempotency ledger", map[string]any{
-					"tool": tc.Name,
+					"tool": call.Name,
 					"err":  err.Error(),
 				})
 			}
@@ -333,7 +414,7 @@ func ExecuteToolCalls(
 
 		duration := time.Since(start)
 		if traceWriter != nil {
-			traceWriter.RecordEnd(start.Add(duration), opts.Iteration, tc, redactedArgsJSON, auditResult, duration, policyDecision, policyReason, policyTimeoutMS, idempotencyKey)
+			traceWriter.RecordEnd(start.Add(duration), opts.Iteration, call, redactedArgsJSON, auditResult, duration, policyDecision, policyReason, policyTimeoutMS, idempotencyKey, hookActions)
 		}
 
 		// Phase H3 (ROADMAP_V2.md): append-only operational audit log (best-effort).
@@ -361,8 +442,8 @@ func ExecuteToolCalls(
 				SenderID:   strings.TrimSpace(opts.SenderID),
 				Iteration:  opts.Iteration,
 
-				Tool:       strings.TrimSpace(tc.Name),
-				ToolCallID: strings.TrimSpace(tc.ID),
+				Tool:       strings.TrimSpace(call.Name),
+				ToolCallID: strings.TrimSpace(call.ID),
 
 				PolicyDecision:  strings.TrimSpace(policyDecision),
 				PolicyReason:    utils.Truncate(strings.TrimSpace(policyReason), 400),
@@ -378,7 +459,7 @@ func ExecuteToolCalls(
 		}
 
 		results[idx] = ToolCallExecution{
-			ToolCall:   tc,
+			ToolCall:   call,
 			Result:     returnedResult,
 			DurationMS: duration.Milliseconds(),
 		}

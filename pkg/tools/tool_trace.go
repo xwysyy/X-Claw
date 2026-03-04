@@ -83,6 +83,7 @@ type toolTraceEvent struct {
 	PolicyTimeoutMS int               `json:"policy_timeout_ms,omitempty"`
 	IdempotencyKey  string            `json:"idempotency_key,omitempty"`
 	PolicyTags      map[string]string `json:"policy_tags,omitempty"`
+	HookActions     []ToolHookAction  `json:"hook_actions,omitempty"`
 
 	Args        json.RawMessage `json:"args,omitempty"`
 	ArgsPreview string          `json:"args_preview,omitempty"`
@@ -120,6 +121,7 @@ type toolTraceSnapshot struct {
 	PolicyTimeoutMS int               `json:"policy_timeout_ms,omitempty"`
 	IdempotencyKey  string            `json:"idempotency_key,omitempty"`
 	PolicyTags      map[string]string `json:"policy_tags,omitempty"`
+	HookActions     []ToolHookAction  `json:"hook_actions,omitempty"`
 
 	Args json.RawMessage `json:"args,omitempty"`
 
@@ -249,6 +251,7 @@ func (w *toolTraceWriter) RecordEnd(
 	policyReason string,
 	policyTimeoutMS int,
 	idempotencyKey string,
+	hookActions []ToolHookAction,
 ) {
 	if w == nil || !w.enabled {
 		return
@@ -299,6 +302,7 @@ func (w *toolTraceWriter) RecordEnd(
 		PolicyTimeoutMS: policyTimeoutMS,
 		IdempotencyKey:  strings.TrimSpace(idempotencyKey),
 		PolicyTags:      w.policyTags,
+		HookActions:     normalizeHookActions(hookActions),
 
 		Args:        argsJSON,
 		ArgsPreview: utils.Truncate(string(argsJSON), w.maxArgPreviewChars),
@@ -317,7 +321,7 @@ func (w *toolTraceWriter) RecordEnd(
 	w.appendEvent(event)
 
 	if w.writePerCallFiles {
-		w.writeSnapshot(ts, iteration, tc, argsJSON, result, duration, policyDecision, policyReason, policyTimeoutMS, idempotencyKey)
+		w.writeSnapshot(ts, iteration, tc, argsJSON, result, duration, policyDecision, policyReason, policyTimeoutMS, idempotencyKey, hookActions)
 	}
 }
 
@@ -369,6 +373,7 @@ func (w *toolTraceWriter) writeSnapshot(
 	policyReason string,
 	policyTimeoutMS int,
 	idempotencyKey string,
+	hookActions []ToolHookAction,
 ) {
 	if w == nil || !w.enabled || !w.writePerCallFiles {
 		return
@@ -404,6 +409,7 @@ func (w *toolTraceWriter) writeSnapshot(
 		PolicyTimeoutMS: policyTimeoutMS,
 		IdempotencyKey:  strings.TrimSpace(idempotencyKey),
 		PolicyTags:      w.policyTags,
+		HookActions:     normalizeHookActions(hookActions),
 
 		Args: argsJSON,
 
@@ -490,6 +496,9 @@ func renderToolSnapshotMarkdown(s toolTraceSnapshot) string {
 	if strings.TrimSpace(s.ErrString) != "" {
 		sb.WriteString(fmt.Sprintf("- err: %s\n", strings.TrimSpace(s.ErrString)))
 	}
+	if len(s.HookActions) > 0 {
+		sb.WriteString(fmt.Sprintf("- hook_actions: %d\n", len(s.HookActions)))
+	}
 
 	sb.WriteString("\n## Arguments\n\n```json\n")
 	if len(s.Args) > 0 {
@@ -512,7 +521,39 @@ func renderToolSnapshotMarkdown(s toolTraceSnapshot) string {
 		}
 	}
 
+	if len(s.HookActions) > 0 {
+		sb.WriteString("## Hook Actions\n\n```json\n")
+		if payload, err := json.MarshalIndent(s.HookActions, "", "  "); err == nil && len(payload) > 0 {
+			sb.Write(payload)
+		} else {
+			sb.WriteString("[]")
+		}
+		sb.WriteString("\n```\n\n")
+	}
+
 	return sb.String()
+}
+
+func normalizeHookActions(in []ToolHookAction) []ToolHookAction {
+	if len(in) == 0 {
+		return nil
+	}
+
+	out := make([]ToolHookAction, 0, len(in))
+	for _, a := range in {
+		a.Hook = strings.TrimSpace(a.Hook)
+		a.Stage = strings.TrimSpace(a.Stage)
+		a.Decision = strings.TrimSpace(a.Decision)
+		a.Reason = utils.Truncate(strings.TrimSpace(a.Reason), 400)
+		if a.Hook == "" && a.Stage == "" && a.Decision == "" && a.Reason == "" {
+			continue
+		}
+		out = append(out, a)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 var safeTokenRe = regexp.MustCompile(`[^a-zA-Z0-9._-]+`)
