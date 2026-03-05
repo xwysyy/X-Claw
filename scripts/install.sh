@@ -66,7 +66,7 @@ bin_dir="$prefix/bin"
 share_dir="$prefix/share/x-claw"
 console_dir="$share_dir/console"
 
-cfg_dir="${X_CLAW_HOME:-${PICOCLAW_HOME:-$HOME/.x-claw}}"
+cfg_dir="${X_CLAW_HOME:-$HOME/.x-claw}"
 cfg_dir="$(cd "${cfg_dir/#\~/$HOME}" 2>/dev/null && pwd -P || echo "$cfg_dir")"
 cfg_path="$cfg_dir/config.json"
 

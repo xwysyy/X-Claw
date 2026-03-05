@@ -24,9 +24,6 @@ func processExists(pid int) bool {
 
 func TestShellTool_TimeoutKillsChildProcess(t *testing.T) {
 	v := strings.TrimSpace(os.Getenv("X_CLAW_TEST_MEMLIMIT"))
-	if v == "" {
-		v = strings.TrimSpace(os.Getenv("PICOCLAW_TEST_MEMLIMIT"))
-	}
 	if v != "" {
 		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 && n < (512<<20) {
 			t.Skipf("skipping fork-heavy timeout test in constrained env (X_CLAW_TEST_MEMLIMIT=%d)", n)

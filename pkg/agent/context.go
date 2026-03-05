@@ -83,10 +83,6 @@ func NewContextBuilder(workspace string) *ContextBuilder {
 	// Use the skills/ directory under the current working directory
 	builtinSkillsDir := strings.TrimSpace(os.Getenv("X_CLAW_BUILTIN_SKILLS"))
 	if builtinSkillsDir == "" {
-		// Backward-compat with older env var name.
-		builtinSkillsDir = strings.TrimSpace(os.Getenv("PICOCLAW_BUILTIN_SKILLS"))
-	}
-	if builtinSkillsDir == "" {
 		wd, _ := os.Getwd()
 		builtinSkillsDir = filepath.Join(wd, "skills")
 	}

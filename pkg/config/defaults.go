@@ -13,12 +13,10 @@ import (
 // DefaultConfig returns the default configuration for X-Claw.
 func DefaultConfig() *Config {
 	// Determine the base path for the workspace.
-	// Priority: $X_CLAW_HOME > $PICOCLAW_HOME (legacy) > ~/.x-claw
+	// Priority: $X_CLAW_HOME > ~/.x-claw
 	var homePath string
 	if xClawHome := os.Getenv("X_CLAW_HOME"); xClawHome != "" {
 		homePath = xClawHome
-	} else if legacyHome := os.Getenv("PICOCLAW_HOME"); legacyHome != "" {
-		homePath = legacyHome
 	} else {
 		userHome, _ := os.UserHomeDir()
 		homePath = filepath.Join(userHome, ".x-claw")

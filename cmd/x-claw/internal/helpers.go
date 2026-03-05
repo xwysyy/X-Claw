@@ -26,10 +26,6 @@ func GetConfigPath() string {
 	if configPath := strings.TrimSpace(os.Getenv("X_CLAW_CONFIG_PATH")); configPath != "" {
 		return configPath
 	}
-	// Backward-compat with older env var name.
-	if configPath := strings.TrimSpace(os.Getenv("PICOCLAW_CONFIG")); configPath != "" {
-		return configPath
-	}
 	home, _ := os.UserHomeDir()
 	return filepath.Join(home, ".x-claw", "config.json")
 }

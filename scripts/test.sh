@@ -13,8 +13,7 @@ mkdir -p "$GOCACHE"
 echo "GOCACHE=$GOCACHE"
 
 # Keep the suite stable in constrained environments.
-# Prefer the new X-Claw env var, but keep the legacy env var name as backward-compat.
-export X_CLAW_TEST_MEMLIMIT="${X_CLAW_TEST_MEMLIMIT:-${PICOCLAW_TEST_MEMLIMIT:-268435456}}" # 256MiB
+export X_CLAW_TEST_MEMLIMIT="${X_CLAW_TEST_MEMLIMIT:-268435456}" # 256MiB
 # The Go compiler is also a Go program; in tight memory environments it can be
 # OOM-killed when building large packages (e.g. pkg/agent). Keep a conservative
 # memory limit and GC target to reduce peak RSS.
