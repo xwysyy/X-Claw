@@ -2,8 +2,10 @@ package feishu
 
 import (
 	"encoding/json"
+	"net/url"
 	"regexp"
 	"strings"
+	"unicode/utf8"
 
 	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
 )
@@ -83,4 +85,55 @@ func stripMentionPlaceholders(content string, mentions []*larkim.MentionEvent) s
 	// Also clean up any remaining @_user_N patterns
 	content = mentionPlaceholderRegex.ReplaceAllString(content, "")
 	return strings.TrimSpace(content)
+}
+
+func sanitizeFeishuUploadFilename(filename string) string {
+	filename = strings.TrimSpace(filename)
+	if filename == "" {
+		return "file"
+	}
+
+	// Prevent path traversal and oddities leaking into multipart headers.
+	filename = strings.ReplaceAll(filename, "/", "_")
+	filename = strings.ReplaceAll(filename, "\\", "_")
+	filename = strings.TrimSpace(filename)
+	if filename == "" {
+		return "file"
+	}
+
+	// Remove invalid UTF-8 and control characters (Feishu/lark SDK may choke).
+	filename = strings.Map(func(r rune) rune {
+		// Drop ASCII control chars. Keep standard whitespace.
+		if r < 0x20 && r != '\t' && r != '\n' && r != '\r' {
+			return -1
+		}
+		if r == 0x7f {
+			return -1
+		}
+		return r
+	}, filename)
+	filename = strings.TrimSpace(filename)
+	if filename == "" {
+		return "file"
+	}
+	if !utf8.ValidString(filename) {
+		// Best-effort fallback: percent-encode raw bytes.
+		return url.PathEscape(string([]byte(filename)))
+	}
+
+	// Keep filenames reasonably sized to avoid gigantic multipart headers.
+	const maxRunes = 120
+	r := []rune(filename)
+	if len(r) > maxRunes {
+		filename = string(r[:maxRunes])
+	}
+
+	// Multipart headers are historically ASCII-hostile; percent-encode when any
+	// non-ASCII runes exist to keep uploads reliable in more environments.
+	for _, ch := range filename {
+		if ch > 0x7f {
+			return url.PathEscape(filename)
+		}
+	}
+	return filename
 }

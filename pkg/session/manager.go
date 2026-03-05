@@ -11,28 +11,14 @@ import (
 	"sync"
 	"time"
 
+	coresession "github.com/sipeed/picoclaw/internal/core/session"
 	"github.com/sipeed/picoclaw/pkg/providers"
 	"github.com/sipeed/picoclaw/pkg/utils"
 )
 
-type Session struct {
-	Key                        string              `json:"key"`
-	Messages                   []providers.Message `json:"messages"`
-	Summary                    string              `json:"summary,omitempty"`
-	ActiveAgentID              string              `json:"active_agent_id,omitempty"`
-	CompactionCount            int                 `json:"compaction_count,omitempty"`
-	MemoryFlushAt              time.Time           `json:"memory_flush_at,omitempty"`
-	MemoryFlushCompactionCount int                 `json:"memory_flush_compaction_count,omitempty"`
-	Created                    time.Time           `json:"created"`
-	Updated                    time.Time           `json:"updated"`
-
-	ModelOverride            string `json:"model_override,omitempty"`
-	ModelOverrideExpiresAtMS *int64 `json:"model_override_expires_at_ms,omitempty"`
-
-	// LastEventID tracks the last appended JSONL session event for parent linking.
-	// It is not required for correctness, but improves tree reconstruction and reload.
-	LastEventID string `json:"last_event_id,omitempty"`
-}
+// Type aliases keep existing imports stable while moving canonical session domain
+// types into internal/core.
+type Session = coresession.Session
 
 type SessionManager struct {
 	sessions map[string]*Session

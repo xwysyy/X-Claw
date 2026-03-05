@@ -115,7 +115,7 @@ func statusCmd(opts statusOptions) error {
 	// gateway
 	report.Gateway.Host = strings.TrimSpace(cfg.Gateway.Host)
 	report.Gateway.Port = cfg.Gateway.Port
-	report.Gateway.APIKeySet = strings.TrimSpace(cfg.Gateway.APIKey) != ""
+	report.Gateway.APIKeySet = cfg.Gateway.APIKey.Present()
 
 	// last_active (best-effort)
 	if report.Workspace.Exists {
@@ -174,17 +174,17 @@ func statusCmd(opts statusOptions) error {
 	report.Model = cfg.Agents.Defaults.GetModelName()
 
 	report.Providers = append(report.Providers,
-		statusProvider{Name: "OpenRouter API", Status: boolStatus(cfg.Providers.OpenRouter.APIKey != "")},
-		statusProvider{Name: "Anthropic API", Status: boolStatus(cfg.Providers.Anthropic.APIKey != "")},
-		statusProvider{Name: "OpenAI API", Status: boolStatus(cfg.Providers.OpenAI.APIKey != "")},
-		statusProvider{Name: "Gemini API", Status: boolStatus(cfg.Providers.Gemini.APIKey != "")},
-		statusProvider{Name: "Zhipu API", Status: boolStatus(cfg.Providers.Zhipu.APIKey != "")},
-		statusProvider{Name: "Qwen API", Status: boolStatus(cfg.Providers.Qwen.APIKey != "")},
-		statusProvider{Name: "Groq API", Status: boolStatus(cfg.Providers.Groq.APIKey != "")},
-		statusProvider{Name: "Moonshot API", Status: boolStatus(cfg.Providers.Moonshot.APIKey != "")},
-		statusProvider{Name: "DeepSeek API", Status: boolStatus(cfg.Providers.DeepSeek.APIKey != "")},
-		statusProvider{Name: "VolcEngine API", Status: boolStatus(cfg.Providers.VolcEngine.APIKey != "")},
-		statusProvider{Name: "Nvidia API", Status: boolStatus(cfg.Providers.Nvidia.APIKey != "")},
+		statusProvider{Name: "OpenRouter API", Status: boolStatus(cfg.Providers.OpenRouter.APIKey.Present())},
+		statusProvider{Name: "Anthropic API", Status: boolStatus(cfg.Providers.Anthropic.APIKey.Present())},
+		statusProvider{Name: "OpenAI API", Status: boolStatus(cfg.Providers.OpenAI.APIKey.Present())},
+		statusProvider{Name: "Gemini API", Status: boolStatus(cfg.Providers.Gemini.APIKey.Present())},
+		statusProvider{Name: "Zhipu API", Status: boolStatus(cfg.Providers.Zhipu.APIKey.Present())},
+		statusProvider{Name: "Qwen API", Status: boolStatus(cfg.Providers.Qwen.APIKey.Present())},
+		statusProvider{Name: "Groq API", Status: boolStatus(cfg.Providers.Groq.APIKey.Present())},
+		statusProvider{Name: "Moonshot API", Status: boolStatus(cfg.Providers.Moonshot.APIKey.Present())},
+		statusProvider{Name: "DeepSeek API", Status: boolStatus(cfg.Providers.DeepSeek.APIKey.Present())},
+		statusProvider{Name: "VolcEngine API", Status: boolStatus(cfg.Providers.VolcEngine.APIKey.Present())},
+		statusProvider{Name: "Nvidia API", Status: boolStatus(cfg.Providers.Nvidia.APIKey.Present())},
 	)
 
 	report.Providers = append(report.Providers,

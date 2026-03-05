@@ -22,8 +22,8 @@ func TestLINEChannel_VerifySignature(t *testing.T) {
 
 	mb := bus.NewMessageBus()
 	ch, err := NewLINEChannel(config.LINEConfig{
-		ChannelSecret:      "secret",
-		ChannelAccessToken: "token",
+		ChannelSecret:      config.SecretRef{Inline: "secret"},
+		ChannelAccessToken: config.SecretRef{Inline: "token"},
 	}, mb)
 	if err != nil {
 		t.Fatalf("NewLINEChannel error: %v", err)
@@ -188,8 +188,8 @@ func TestLINEChannel_StartTyping_GroupChatIsNoop(t *testing.T) {
 
 	mb := bus.NewMessageBus()
 	ch, err := NewLINEChannel(config.LINEConfig{
-		ChannelSecret:      "secret",
-		ChannelAccessToken: "token",
+		ChannelSecret:      config.SecretRef{Inline: "secret"},
+		ChannelAccessToken: config.SecretRef{Inline: "token"},
 	}, mb)
 	if err != nil {
 		t.Fatalf("NewLINEChannel error: %v", err)
@@ -215,8 +215,8 @@ func TestLINEChannel_StartTyping_EmptyChatIDIsNoop(t *testing.T) {
 
 	mb := bus.NewMessageBus()
 	ch, err := NewLINEChannel(config.LINEConfig{
-		ChannelSecret:      "secret",
-		ChannelAccessToken: "token",
+		ChannelSecret:      config.SecretRef{Inline: "secret"},
+		ChannelAccessToken: config.SecretRef{Inline: "token"},
 	}, mb)
 	if err != nil {
 		t.Fatalf("NewLINEChannel error: %v", err)
@@ -241,8 +241,8 @@ func TestLINEChannel_CallAPI_MarshalError(t *testing.T) {
 
 	mb := bus.NewMessageBus()
 	ch, err := NewLINEChannel(config.LINEConfig{
-		ChannelSecret:      "secret",
-		ChannelAccessToken: "token",
+		ChannelSecret:      config.SecretRef{Inline: "secret"},
+		ChannelAccessToken: config.SecretRef{Inline: "token"},
 	}, mb)
 	if err != nil {
 		t.Fatalf("NewLINEChannel error: %v", err)
@@ -261,8 +261,8 @@ func TestLINEChannel_CallAPI_Non200ClassifiesError(t *testing.T) {
 
 	mb := bus.NewMessageBus()
 	ch, err := NewLINEChannel(config.LINEConfig{
-		ChannelSecret:      "secret",
-		ChannelAccessToken: "token",
+		ChannelSecret:      config.SecretRef{Inline: "secret"},
+		ChannelAccessToken: config.SecretRef{Inline: "token"},
 	}, mb)
 	if err != nil {
 		t.Fatalf("NewLINEChannel error: %v", err)

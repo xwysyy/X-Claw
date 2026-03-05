@@ -91,8 +91,10 @@ func Configure(workspace string, cfg config.AuditLogConfig) {
 	w.maxBackups = cfg.MaxBackups
 	w.path = filepath.Join(w.dir, "audit.jsonl")
 	w.hmacKey = nil
-	if strings.TrimSpace(cfg.HMACKey) != "" {
-		w.hmacKey = []byte(strings.TrimSpace(cfg.HMACKey))
+	if cfg.HMACKey.Present() {
+		if key, err := cfg.HMACKey.Resolve(""); err == nil && strings.TrimSpace(key) != "" {
+			w.hmacKey = []byte(strings.TrimSpace(key))
+		}
 	}
 	w.hmacKeyID = strings.TrimSpace(cfg.HMACKeyID)
 }

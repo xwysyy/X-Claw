@@ -14,7 +14,7 @@ func TestDiscordChannel_Send_NotRunning(t *testing.T) {
 	t.Parallel()
 
 	mb := bus.NewMessageBus()
-	ch, err := NewDiscordChannel(config.DiscordConfig{Token: "test-token"}, mb)
+	ch, err := NewDiscordChannel(config.DiscordConfig{Token: config.SecretRef{Inline: "test-token"}}, mb)
 	if err != nil {
 		t.Fatalf("NewDiscordChannel error: %v", err)
 	}
@@ -29,7 +29,7 @@ func TestDiscordChannel_Send_EmptyChannelID(t *testing.T) {
 	t.Parallel()
 
 	mb := bus.NewMessageBus()
-	ch, err := NewDiscordChannel(config.DiscordConfig{Token: "test-token"}, mb)
+	ch, err := NewDiscordChannel(config.DiscordConfig{Token: config.SecretRef{Inline: "test-token"}}, mb)
 	if err != nil {
 		t.Fatalf("NewDiscordChannel error: %v", err)
 	}
@@ -45,7 +45,7 @@ func TestDiscordChannel_Send_EmptyContentIsNoop(t *testing.T) {
 	t.Parallel()
 
 	mb := bus.NewMessageBus()
-	ch, err := NewDiscordChannel(config.DiscordConfig{Token: "test-token"}, mb)
+	ch, err := NewDiscordChannel(config.DiscordConfig{Token: config.SecretRef{Inline: "test-token"}}, mb)
 	if err != nil {
 		t.Fatalf("NewDiscordChannel error: %v", err)
 	}
@@ -61,7 +61,7 @@ func TestDiscordChannel_SendPlaceholder_DisabledIsNoop(t *testing.T) {
 
 	mb := bus.NewMessageBus()
 	ch, err := NewDiscordChannel(config.DiscordConfig{
-		Token:       "test-token",
+		Token:       config.SecretRef{Inline: "test-token"},
 		Placeholder: config.PlaceholderConfig{Enabled: false},
 	}, mb)
 	if err != nil {

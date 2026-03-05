@@ -63,6 +63,10 @@ type Config struct {
 	AuditLog      AuditLogConfig      `json:"audit_log,omitempty"`
 	Audit         AuditConfig         `json:"audit,omitempty"`
 	Security      SecurityConfig      `json:"security,omitempty"`
+
+	// SourcePath is the config.json path used to load this config (best-effort).
+	// It is not persisted when saving config.
+	SourcePath string `json:"-"`
 }
 
 // NotifyConfig controls optional notification hooks.
@@ -304,10 +308,10 @@ type EmbeddingConfig struct {
 	// - "openai_compat": OpenAI-compatible /v1/embeddings endpoint
 	Kind string `json:"kind,omitempty"`
 
-	APIKey  string `json:"api_key,omitempty"`
-	APIBase string `json:"api_base,omitempty"`
-	Model   string `json:"model,omitempty"`
-	Proxy   string `json:"proxy,omitempty"`
+	APIKey  SecretRef `json:"api_key,omitempty"`
+	APIBase string    `json:"api_base,omitempty"`
+	Model   string    `json:"model,omitempty"`
+	Proxy   string    `json:"proxy,omitempty"`
 
 	BatchSize             int `json:"batch_size,omitempty"`
 	RequestTimeoutSeconds int `json:"request_timeout_seconds,omitempty"`
@@ -404,7 +408,7 @@ type WhatsAppConfig struct {
 
 type TelegramConfig struct {
 	Enabled            bool                `json:"enabled"                 env:"PICOCLAW_CHANNELS_TELEGRAM_ENABLED"`
-	Token              string              `json:"token"                   env:"PICOCLAW_CHANNELS_TELEGRAM_TOKEN"`
+	Token              SecretRef           `json:"token"                   env:"PICOCLAW_CHANNELS_TELEGRAM_TOKEN"`
 	BaseURL            string              `json:"base_url"                env:"PICOCLAW_CHANNELS_TELEGRAM_BASE_URL"`
 	Proxy              string              `json:"proxy"                   env:"PICOCLAW_CHANNELS_TELEGRAM_PROXY"`
 	AllowFrom          FlexibleStringSlice `json:"allow_from"              env:"PICOCLAW_CHANNELS_TELEGRAM_ALLOW_FROM"`
@@ -417,9 +421,9 @@ type TelegramConfig struct {
 type FeishuConfig struct {
 	Enabled            bool                `json:"enabled"                 env:"PICOCLAW_CHANNELS_FEISHU_ENABLED"`
 	AppID              string              `json:"app_id"                  env:"PICOCLAW_CHANNELS_FEISHU_APP_ID"`
-	AppSecret          string              `json:"app_secret"              env:"PICOCLAW_CHANNELS_FEISHU_APP_SECRET"`
-	EncryptKey         string              `json:"encrypt_key"             env:"PICOCLAW_CHANNELS_FEISHU_ENCRYPT_KEY"`
-	VerificationToken  string              `json:"verification_token"      env:"PICOCLAW_CHANNELS_FEISHU_VERIFICATION_TOKEN"`
+	AppSecret          SecretRef           `json:"app_secret"              env:"PICOCLAW_CHANNELS_FEISHU_APP_SECRET"`
+	EncryptKey         SecretRef           `json:"encrypt_key"             env:"PICOCLAW_CHANNELS_FEISHU_ENCRYPT_KEY"`
+	VerificationToken  SecretRef           `json:"verification_token"      env:"PICOCLAW_CHANNELS_FEISHU_VERIFICATION_TOKEN"`
 	BotID              string              `json:"bot_id,omitempty"         env:"PICOCLAW_CHANNELS_FEISHU_BOT_ID"`
 	AllowFrom          FlexibleStringSlice `json:"allow_from"              env:"PICOCLAW_CHANNELS_FEISHU_ALLOW_FROM"`
 	GroupTrigger       GroupTriggerConfig  `json:"group_trigger,omitempty"`
@@ -430,7 +434,7 @@ type FeishuConfig struct {
 
 type DiscordConfig struct {
 	Enabled            bool                `json:"enabled"                 env:"PICOCLAW_CHANNELS_DISCORD_ENABLED"`
-	Token              string              `json:"token"                   env:"PICOCLAW_CHANNELS_DISCORD_TOKEN"`
+	Token              SecretRef           `json:"token"                   env:"PICOCLAW_CHANNELS_DISCORD_TOKEN"`
 	AllowFrom          FlexibleStringSlice `json:"allow_from"              env:"PICOCLAW_CHANNELS_DISCORD_ALLOW_FROM"`
 	MentionOnly        bool                `json:"mention_only"            env:"PICOCLAW_CHANNELS_DISCORD_MENTION_ONLY"`
 	GroupTrigger       GroupTriggerConfig  `json:"group_trigger,omitempty"`
@@ -450,7 +454,7 @@ type MaixCamConfig struct {
 type QQConfig struct {
 	Enabled            bool                `json:"enabled"                 env:"PICOCLAW_CHANNELS_QQ_ENABLED"`
 	AppID              string              `json:"app_id"                  env:"PICOCLAW_CHANNELS_QQ_APP_ID"`
-	AppSecret          string              `json:"app_secret"              env:"PICOCLAW_CHANNELS_QQ_APP_SECRET"`
+	AppSecret          SecretRef           `json:"app_secret"              env:"PICOCLAW_CHANNELS_QQ_APP_SECRET"`
 	AllowFrom          FlexibleStringSlice `json:"allow_from"              env:"PICOCLAW_CHANNELS_QQ_ALLOW_FROM"`
 	GroupTrigger       GroupTriggerConfig  `json:"group_trigger,omitempty"`
 	ReasoningChannelID string              `json:"reasoning_channel_id"    env:"PICOCLAW_CHANNELS_QQ_REASONING_CHANNEL_ID"`
@@ -459,7 +463,7 @@ type QQConfig struct {
 type DingTalkConfig struct {
 	Enabled            bool                `json:"enabled"                 env:"PICOCLAW_CHANNELS_DINGTALK_ENABLED"`
 	ClientID           string              `json:"client_id"               env:"PICOCLAW_CHANNELS_DINGTALK_CLIENT_ID"`
-	ClientSecret       string              `json:"client_secret"           env:"PICOCLAW_CHANNELS_DINGTALK_CLIENT_SECRET"`
+	ClientSecret       SecretRef           `json:"client_secret"           env:"PICOCLAW_CHANNELS_DINGTALK_CLIENT_SECRET"`
 	AllowFrom          FlexibleStringSlice `json:"allow_from"              env:"PICOCLAW_CHANNELS_DINGTALK_ALLOW_FROM"`
 	GroupTrigger       GroupTriggerConfig  `json:"group_trigger,omitempty"`
 	ReasoningChannelID string              `json:"reasoning_channel_id"    env:"PICOCLAW_CHANNELS_DINGTALK_REASONING_CHANNEL_ID"`
@@ -467,8 +471,8 @@ type DingTalkConfig struct {
 
 type SlackConfig struct {
 	Enabled            bool                `json:"enabled"                 env:"PICOCLAW_CHANNELS_SLACK_ENABLED"`
-	BotToken           string              `json:"bot_token"               env:"PICOCLAW_CHANNELS_SLACK_BOT_TOKEN"`
-	AppToken           string              `json:"app_token"               env:"PICOCLAW_CHANNELS_SLACK_APP_TOKEN"`
+	BotToken           SecretRef           `json:"bot_token"               env:"PICOCLAW_CHANNELS_SLACK_BOT_TOKEN"`
+	AppToken           SecretRef           `json:"app_token"               env:"PICOCLAW_CHANNELS_SLACK_APP_TOKEN"`
 	AllowFrom          FlexibleStringSlice `json:"allow_from"              env:"PICOCLAW_CHANNELS_SLACK_ALLOW_FROM"`
 	GroupTrigger       GroupTriggerConfig  `json:"group_trigger,omitempty"`
 	Typing             TypingConfig        `json:"typing,omitempty"`
@@ -478,8 +482,8 @@ type SlackConfig struct {
 
 type LINEConfig struct {
 	Enabled            bool                `json:"enabled"                 env:"PICOCLAW_CHANNELS_LINE_ENABLED"`
-	ChannelSecret      string              `json:"channel_secret"          env:"PICOCLAW_CHANNELS_LINE_CHANNEL_SECRET"`
-	ChannelAccessToken string              `json:"channel_access_token"    env:"PICOCLAW_CHANNELS_LINE_CHANNEL_ACCESS_TOKEN"`
+	ChannelSecret      SecretRef           `json:"channel_secret"          env:"PICOCLAW_CHANNELS_LINE_CHANNEL_SECRET"`
+	ChannelAccessToken SecretRef           `json:"channel_access_token"    env:"PICOCLAW_CHANNELS_LINE_CHANNEL_ACCESS_TOKEN"`
 	WebhookHost        string              `json:"webhook_host"            env:"PICOCLAW_CHANNELS_LINE_WEBHOOK_HOST"`
 	WebhookPort        int                 `json:"webhook_port"            env:"PICOCLAW_CHANNELS_LINE_WEBHOOK_PORT"`
 	WebhookPath        string              `json:"webhook_path"            env:"PICOCLAW_CHANNELS_LINE_WEBHOOK_PATH"`
@@ -493,7 +497,7 @@ type LINEConfig struct {
 type OneBotConfig struct {
 	Enabled            bool                `json:"enabled"                 env:"PICOCLAW_CHANNELS_ONEBOT_ENABLED"`
 	WSUrl              string              `json:"ws_url"                  env:"PICOCLAW_CHANNELS_ONEBOT_WS_URL"`
-	AccessToken        string              `json:"access_token"            env:"PICOCLAW_CHANNELS_ONEBOT_ACCESS_TOKEN"`
+	AccessToken        SecretRef           `json:"access_token"            env:"PICOCLAW_CHANNELS_ONEBOT_ACCESS_TOKEN"`
 	ReconnectInterval  int                 `json:"reconnect_interval"      env:"PICOCLAW_CHANNELS_ONEBOT_RECONNECT_INTERVAL"`
 	GroupTriggerPrefix []string            `json:"group_trigger_prefix"    env:"PICOCLAW_CHANNELS_ONEBOT_GROUP_TRIGGER_PREFIX"`
 	AllowFrom          FlexibleStringSlice `json:"allow_from"              env:"PICOCLAW_CHANNELS_ONEBOT_ALLOW_FROM"`
@@ -505,8 +509,8 @@ type OneBotConfig struct {
 
 type WeComConfig struct {
 	Enabled            bool                `json:"enabled"                 env:"PICOCLAW_CHANNELS_WECOM_ENABLED"`
-	Token              string              `json:"token"                   env:"PICOCLAW_CHANNELS_WECOM_TOKEN"`
-	EncodingAESKey     string              `json:"encoding_aes_key"        env:"PICOCLAW_CHANNELS_WECOM_ENCODING_AES_KEY"`
+	Token              SecretRef           `json:"token"                   env:"PICOCLAW_CHANNELS_WECOM_TOKEN"`
+	EncodingAESKey     SecretRef           `json:"encoding_aes_key"        env:"PICOCLAW_CHANNELS_WECOM_ENCODING_AES_KEY"`
 	WebhookURL         string              `json:"webhook_url"             env:"PICOCLAW_CHANNELS_WECOM_WEBHOOK_URL"`
 	WebhookHost        string              `json:"webhook_host"            env:"PICOCLAW_CHANNELS_WECOM_WEBHOOK_HOST"`
 	WebhookPort        int                 `json:"webhook_port"            env:"PICOCLAW_CHANNELS_WECOM_WEBHOOK_PORT"`
@@ -520,10 +524,10 @@ type WeComConfig struct {
 type WeComAppConfig struct {
 	Enabled            bool                `json:"enabled"                 env:"PICOCLAW_CHANNELS_WECOM_APP_ENABLED"`
 	CorpID             string              `json:"corp_id"                 env:"PICOCLAW_CHANNELS_WECOM_APP_CORP_ID"`
-	CorpSecret         string              `json:"corp_secret"             env:"PICOCLAW_CHANNELS_WECOM_APP_CORP_SECRET"`
+	CorpSecret         SecretRef           `json:"corp_secret"             env:"PICOCLAW_CHANNELS_WECOM_APP_CORP_SECRET"`
 	AgentID            int64               `json:"agent_id"                env:"PICOCLAW_CHANNELS_WECOM_APP_AGENT_ID"`
-	Token              string              `json:"token"                   env:"PICOCLAW_CHANNELS_WECOM_APP_TOKEN"`
-	EncodingAESKey     string              `json:"encoding_aes_key"        env:"PICOCLAW_CHANNELS_WECOM_APP_ENCODING_AES_KEY"`
+	Token              SecretRef           `json:"token"                   env:"PICOCLAW_CHANNELS_WECOM_APP_TOKEN"`
+	EncodingAESKey     SecretRef           `json:"encoding_aes_key"        env:"PICOCLAW_CHANNELS_WECOM_APP_ENCODING_AES_KEY"`
 	WebhookHost        string              `json:"webhook_host"            env:"PICOCLAW_CHANNELS_WECOM_APP_WEBHOOK_HOST"`
 	WebhookPort        int                 `json:"webhook_port"            env:"PICOCLAW_CHANNELS_WECOM_APP_WEBHOOK_PORT"`
 	WebhookPath        string              `json:"webhook_path"            env:"PICOCLAW_CHANNELS_WECOM_APP_WEBHOOK_PATH"`
@@ -535,8 +539,8 @@ type WeComAppConfig struct {
 
 type WeComAIBotConfig struct {
 	Enabled            bool                `json:"enabled"              env:"PICOCLAW_CHANNELS_WECOM_AIBOT_ENABLED"`
-	Token              string              `json:"token"                env:"PICOCLAW_CHANNELS_WECOM_AIBOT_TOKEN"`
-	EncodingAESKey     string              `json:"encoding_aes_key"     env:"PICOCLAW_CHANNELS_WECOM_AIBOT_ENCODING_AES_KEY"`
+	Token              SecretRef           `json:"token"                env:"PICOCLAW_CHANNELS_WECOM_AIBOT_TOKEN"`
+	EncodingAESKey     SecretRef           `json:"encoding_aes_key"     env:"PICOCLAW_CHANNELS_WECOM_AIBOT_ENCODING_AES_KEY"`
 	WebhookPath        string              `json:"webhook_path"         env:"PICOCLAW_CHANNELS_WECOM_AIBOT_WEBHOOK_PATH"`
 	AllowFrom          FlexibleStringSlice `json:"allow_from"           env:"PICOCLAW_CHANNELS_WECOM_AIBOT_ALLOW_FROM"`
 	ReplyTimeout       int                 `json:"reply_timeout"        env:"PICOCLAW_CHANNELS_WECOM_AIBOT_REPLY_TIMEOUT"`
@@ -547,7 +551,7 @@ type WeComAIBotConfig struct {
 
 type PicoConfig struct {
 	Enabled         bool                `json:"enabled"                     env:"PICOCLAW_CHANNELS_PICO_ENABLED"`
-	Token           string              `json:"token"                       env:"PICOCLAW_CHANNELS_PICO_TOKEN"`
+	Token           SecretRef           `json:"token"                       env:"PICOCLAW_CHANNELS_PICO_TOKEN"`
 	AllowTokenQuery bool                `json:"allow_token_query,omitempty"`
 	AllowOrigins    []string            `json:"allow_origins,omitempty"`
 	PingInterval    int                 `json:"ping_interval,omitempty"`
@@ -664,8 +668,9 @@ type AuditLogConfig struct {
 	MaxBackups int `json:"max_backups,omitempty" env:"PICOCLAW_AUDIT_LOG_MAX_BACKUPS"`
 
 	// HMACKey enables per-line HMAC signatures on audit.jsonl entries.
-	// When empty, signing is disabled. Prefer setting this via env.
-	HMACKey string `json:"hmac_key,omitempty" env:"PICOCLAW_AUDIT_LOG_HMAC_KEY"`
+	// When empty, signing is disabled. Prefer setting this via SecretRef (env/file)
+	// to avoid embedding plaintext keys in config files.
+	HMACKey SecretRef `json:"hmac_key,omitempty" env:"PICOCLAW_AUDIT_LOG_HMAC_KEY"`
 
 	// HMACKeyID is an optional identifier written into each signed line
 	// to support key rotation and log forensics.
@@ -697,25 +702,25 @@ type ProvidersConfig struct {
 // IsEmpty checks if all provider configs are empty (no API keys or API bases set)
 // Note: WebSearch is an optimization option and doesn't count as "non-empty"
 func (p ProvidersConfig) IsEmpty() bool {
-	return p.Anthropic.APIKey == "" && p.Anthropic.APIBase == "" &&
-		p.OpenAI.APIKey == "" && p.OpenAI.APIBase == "" &&
-		p.LiteLLM.APIKey == "" && p.LiteLLM.APIBase == "" &&
-		p.OpenRouter.APIKey == "" && p.OpenRouter.APIBase == "" &&
-		p.Groq.APIKey == "" && p.Groq.APIBase == "" &&
-		p.Zhipu.APIKey == "" && p.Zhipu.APIBase == "" &&
-		p.VLLM.APIKey == "" && p.VLLM.APIBase == "" &&
-		p.Gemini.APIKey == "" && p.Gemini.APIBase == "" &&
-		p.Nvidia.APIKey == "" && p.Nvidia.APIBase == "" &&
-		p.Ollama.APIKey == "" && p.Ollama.APIBase == "" &&
-		p.Moonshot.APIKey == "" && p.Moonshot.APIBase == "" &&
-		p.ShengSuanYun.APIKey == "" && p.ShengSuanYun.APIBase == "" &&
-		p.DeepSeek.APIKey == "" && p.DeepSeek.APIBase == "" &&
-		p.Cerebras.APIKey == "" && p.Cerebras.APIBase == "" &&
-		p.VolcEngine.APIKey == "" && p.VolcEngine.APIBase == "" &&
-		p.GitHubCopilot.APIKey == "" && p.GitHubCopilot.APIBase == "" &&
-		p.Antigravity.APIKey == "" && p.Antigravity.APIBase == "" &&
-		p.Qwen.APIKey == "" && p.Qwen.APIBase == "" &&
-		p.Mistral.APIKey == "" && p.Mistral.APIBase == ""
+	return p.Anthropic.APIKey.IsZero() && p.Anthropic.APIBase == "" &&
+		p.OpenAI.APIKey.IsZero() && p.OpenAI.APIBase == "" &&
+		p.LiteLLM.APIKey.IsZero() && p.LiteLLM.APIBase == "" &&
+		p.OpenRouter.APIKey.IsZero() && p.OpenRouter.APIBase == "" &&
+		p.Groq.APIKey.IsZero() && p.Groq.APIBase == "" &&
+		p.Zhipu.APIKey.IsZero() && p.Zhipu.APIBase == "" &&
+		p.VLLM.APIKey.IsZero() && p.VLLM.APIBase == "" &&
+		p.Gemini.APIKey.IsZero() && p.Gemini.APIBase == "" &&
+		p.Nvidia.APIKey.IsZero() && p.Nvidia.APIBase == "" &&
+		p.Ollama.APIKey.IsZero() && p.Ollama.APIBase == "" &&
+		p.Moonshot.APIKey.IsZero() && p.Moonshot.APIBase == "" &&
+		p.ShengSuanYun.APIKey.IsZero() && p.ShengSuanYun.APIBase == "" &&
+		p.DeepSeek.APIKey.IsZero() && p.DeepSeek.APIBase == "" &&
+		p.Cerebras.APIKey.IsZero() && p.Cerebras.APIBase == "" &&
+		p.VolcEngine.APIKey.IsZero() && p.VolcEngine.APIBase == "" &&
+		p.GitHubCopilot.APIKey.IsZero() && p.GitHubCopilot.APIBase == "" &&
+		p.Antigravity.APIKey.IsZero() && p.Antigravity.APIBase == "" &&
+		p.Qwen.APIKey.IsZero() && p.Qwen.APIBase == "" &&
+		p.Mistral.APIKey.IsZero() && p.Mistral.APIBase == ""
 }
 
 // MarshalJSON implements custom JSON marshaling for ProvidersConfig
@@ -729,12 +734,12 @@ func (p ProvidersConfig) MarshalJSON() ([]byte, error) {
 }
 
 type ProviderConfig struct {
-	APIKey         string `json:"api_key"                   env:"PICOCLAW_PROVIDERS_{{.Name}}_API_KEY"`
-	APIBase        string `json:"api_base"                  env:"PICOCLAW_PROVIDERS_{{.Name}}_API_BASE"`
-	Proxy          string `json:"proxy,omitempty"           env:"PICOCLAW_PROVIDERS_{{.Name}}_PROXY"`
-	RequestTimeout int    `json:"request_timeout,omitempty" env:"PICOCLAW_PROVIDERS_{{.Name}}_REQUEST_TIMEOUT"`
-	AuthMethod     string `json:"auth_method,omitempty"     env:"PICOCLAW_PROVIDERS_{{.Name}}_AUTH_METHOD"`
-	ConnectMode    string `json:"connect_mode,omitempty"    env:"PICOCLAW_PROVIDERS_{{.Name}}_CONNECT_MODE"` // only for Github Copilot, `stdio` or `grpc`
+	APIKey         SecretRef `json:"api_key"                   env:"PICOCLAW_PROVIDERS_{{.Name}}_API_KEY"`
+	APIBase        string    `json:"api_base"                  env:"PICOCLAW_PROVIDERS_{{.Name}}_API_BASE"`
+	Proxy          string    `json:"proxy,omitempty"           env:"PICOCLAW_PROVIDERS_{{.Name}}_PROXY"`
+	RequestTimeout int       `json:"request_timeout,omitempty" env:"PICOCLAW_PROVIDERS_{{.Name}}_REQUEST_TIMEOUT"`
+	AuthMethod     string    `json:"auth_method,omitempty"     env:"PICOCLAW_PROVIDERS_{{.Name}}_AUTH_METHOD"`
+	ConnectMode    string    `json:"connect_mode,omitempty"    env:"PICOCLAW_PROVIDERS_{{.Name}}_CONNECT_MODE"` // only for Github Copilot, `stdio` or `grpc`
 }
 
 type OpenAIProviderConfig struct {
@@ -753,9 +758,9 @@ type ModelConfig struct {
 	Model     string `json:"model"`      // Protocol/model-identifier (e.g., "openai/gpt-4o", "anthropic/claude-sonnet-4.6")
 
 	// HTTP-based providers
-	APIBase string `json:"api_base,omitempty"` // API endpoint URL
-	APIKey  string `json:"api_key"`            // API authentication key
-	Proxy   string `json:"proxy,omitempty"`    // HTTP proxy URL
+	APIBase string    `json:"api_base,omitempty"` // API endpoint URL
+	APIKey  SecretRef `json:"api_key"`            // API authentication key (supports SecretRef)
+	Proxy   string    `json:"proxy,omitempty"`    // HTTP proxy URL
 
 	// Special providers (CLI-based, OAuth, etc.)
 	AuthMethod  string `json:"auth_method,omitempty"`  // Authentication method: oauth, token
@@ -780,9 +785,9 @@ func (c *ModelConfig) Validate() error {
 }
 
 type GatewayConfig struct {
-	Host   string `json:"host"    env:"PICOCLAW_GATEWAY_HOST"`
-	Port   int    `json:"port"    env:"PICOCLAW_GATEWAY_PORT"`
-	APIKey string `json:"api_key,omitempty" env:"PICOCLAW_GATEWAY_API_KEY"`
+	Host   string    `json:"host"    env:"PICOCLAW_GATEWAY_HOST"`
+	Port   int       `json:"port"    env:"PICOCLAW_GATEWAY_PORT"`
+	APIKey SecretRef `json:"api_key,omitempty" env:"PICOCLAW_GATEWAY_API_KEY"`
 
 	// InboundQueue enables per-session serial processing with a global concurrency cap.
 	InboundQueue GatewayInboundQueueConfig `json:"inbound_queue,omitempty"`
@@ -817,18 +822,18 @@ type GatewayReloadConfig struct {
 }
 
 type BraveConfig struct {
-	Enabled    bool     `json:"enabled"     env:"PICOCLAW_TOOLS_WEB_BRAVE_ENABLED"`
-	APIKey     string   `json:"api_key"     env:"PICOCLAW_TOOLS_WEB_BRAVE_API_KEY"`
-	APIKeys    []string `json:"api_keys,omitempty"`
-	MaxResults int      `json:"max_results" env:"PICOCLAW_TOOLS_WEB_BRAVE_MAX_RESULTS"`
+	Enabled    bool        `json:"enabled"     env:"PICOCLAW_TOOLS_WEB_BRAVE_ENABLED"`
+	APIKey     SecretRef   `json:"api_key"     env:"PICOCLAW_TOOLS_WEB_BRAVE_API_KEY"`
+	APIKeys    []SecretRef `json:"api_keys,omitempty"`
+	MaxResults int         `json:"max_results" env:"PICOCLAW_TOOLS_WEB_BRAVE_MAX_RESULTS"`
 }
 
 type TavilyConfig struct {
-	Enabled    bool     `json:"enabled"     env:"PICOCLAW_TOOLS_WEB_TAVILY_ENABLED"`
-	APIKey     string   `json:"api_key"     env:"PICOCLAW_TOOLS_WEB_TAVILY_API_KEY"`
-	APIKeys    []string `json:"api_keys,omitempty"`
-	BaseURL    string   `json:"base_url"    env:"PICOCLAW_TOOLS_WEB_TAVILY_BASE_URL"`
-	MaxResults int      `json:"max_results" env:"PICOCLAW_TOOLS_WEB_TAVILY_MAX_RESULTS"`
+	Enabled    bool        `json:"enabled"     env:"PICOCLAW_TOOLS_WEB_TAVILY_ENABLED"`
+	APIKey     SecretRef   `json:"api_key"     env:"PICOCLAW_TOOLS_WEB_TAVILY_API_KEY"`
+	APIKeys    []SecretRef `json:"api_keys,omitempty"`
+	BaseURL    string      `json:"base_url"    env:"PICOCLAW_TOOLS_WEB_TAVILY_BASE_URL"`
+	MaxResults int         `json:"max_results" env:"PICOCLAW_TOOLS_WEB_TAVILY_MAX_RESULTS"`
 }
 
 type DuckDuckGoConfig struct {
@@ -837,12 +842,12 @@ type DuckDuckGoConfig struct {
 }
 
 type GrokConfig struct {
-	Enabled      bool     `json:"enabled"       env:"PICOCLAW_TOOLS_WEB_GROK_ENABLED"`
-	APIKey       string   `json:"api_key"       env:"PICOCLAW_TOOLS_WEB_GROK_API_KEY"`
-	APIKeys      []string `json:"api_keys,omitempty"`
-	Endpoint     string   `json:"endpoint"      env:"PICOCLAW_TOOLS_WEB_GROK_ENDPOINT"`
-	DefaultModel string   `json:"default_model" env:"PICOCLAW_TOOLS_WEB_GROK_DEFAULT_MODEL"`
-	MaxResults   int      `json:"max_results"   env:"PICOCLAW_TOOLS_WEB_GROK_MAX_RESULTS"`
+	Enabled      bool        `json:"enabled"       env:"PICOCLAW_TOOLS_WEB_GROK_ENABLED"`
+	APIKey       SecretRef   `json:"api_key"       env:"PICOCLAW_TOOLS_WEB_GROK_API_KEY"`
+	APIKeys      []SecretRef `json:"api_keys,omitempty"`
+	Endpoint     string      `json:"endpoint"      env:"PICOCLAW_TOOLS_WEB_GROK_ENDPOINT"`
+	DefaultModel string      `json:"default_model" env:"PICOCLAW_TOOLS_WEB_GROK_DEFAULT_MODEL"`
+	MaxResults   int         `json:"max_results"   env:"PICOCLAW_TOOLS_WEB_GROK_MAX_RESULTS"`
 }
 
 // WebEvidenceModeConfig enables "evidence mode" for web tools.
@@ -1153,15 +1158,15 @@ type SkillsRegistriesConfig struct {
 }
 
 type ClawHubRegistryConfig struct {
-	Enabled         bool   `json:"enabled"           env:"PICOCLAW_SKILLS_REGISTRIES_CLAWHUB_ENABLED"`
-	BaseURL         string `json:"base_url"          env:"PICOCLAW_SKILLS_REGISTRIES_CLAWHUB_BASE_URL"`
-	AuthToken       string `json:"auth_token"        env:"PICOCLAW_SKILLS_REGISTRIES_CLAWHUB_AUTH_TOKEN"`
-	SearchPath      string `json:"search_path"       env:"PICOCLAW_SKILLS_REGISTRIES_CLAWHUB_SEARCH_PATH"`
-	SkillsPath      string `json:"skills_path"       env:"PICOCLAW_SKILLS_REGISTRIES_CLAWHUB_SKILLS_PATH"`
-	DownloadPath    string `json:"download_path"     env:"PICOCLAW_SKILLS_REGISTRIES_CLAWHUB_DOWNLOAD_PATH"`
-	Timeout         int    `json:"timeout"           env:"PICOCLAW_SKILLS_REGISTRIES_CLAWHUB_TIMEOUT"`
-	MaxZipSize      int    `json:"max_zip_size"      env:"PICOCLAW_SKILLS_REGISTRIES_CLAWHUB_MAX_ZIP_SIZE"`
-	MaxResponseSize int    `json:"max_response_size" env:"PICOCLAW_SKILLS_REGISTRIES_CLAWHUB_MAX_RESPONSE_SIZE"`
+	Enabled         bool      `json:"enabled"           env:"PICOCLAW_SKILLS_REGISTRIES_CLAWHUB_ENABLED"`
+	BaseURL         string    `json:"base_url"          env:"PICOCLAW_SKILLS_REGISTRIES_CLAWHUB_BASE_URL"`
+	AuthToken       SecretRef `json:"auth_token"        env:"PICOCLAW_SKILLS_REGISTRIES_CLAWHUB_AUTH_TOKEN"`
+	SearchPath      string    `json:"search_path"       env:"PICOCLAW_SKILLS_REGISTRIES_CLAWHUB_SEARCH_PATH"`
+	SkillsPath      string    `json:"skills_path"       env:"PICOCLAW_SKILLS_REGISTRIES_CLAWHUB_SKILLS_PATH"`
+	DownloadPath    string    `json:"download_path"     env:"PICOCLAW_SKILLS_REGISTRIES_CLAWHUB_DOWNLOAD_PATH"`
+	Timeout         int       `json:"timeout"           env:"PICOCLAW_SKILLS_REGISTRIES_CLAWHUB_TIMEOUT"`
+	MaxZipSize      int       `json:"max_zip_size"      env:"PICOCLAW_SKILLS_REGISTRIES_CLAWHUB_MAX_ZIP_SIZE"`
+	MaxResponseSize int       `json:"max_response_size" env:"PICOCLAW_SKILLS_REGISTRIES_CLAWHUB_MAX_RESPONSE_SIZE"`
 }
 
 // MCPServerConfig defines configuration for a single MCP server
@@ -1209,6 +1214,7 @@ func loadConfigUnvalidated(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
+			cfg.SourcePath = path
 			return cfg, nil
 		}
 		return nil, err
@@ -1239,6 +1245,9 @@ func loadConfigUnvalidated(path string) (*Config, error) {
 	if len(cfg.ModelList) == 0 && cfg.HasProvidersConfig() {
 		cfg.ModelList = ConvertProvidersToModelList(cfg)
 	}
+
+	cfg.SourcePath = path
+	cfg.NormalizeSecretRefs()
 
 	return cfg, nil
 }

@@ -370,7 +370,7 @@ func (m *Manager) initChannel(name, displayName string) {
 func (m *Manager) initChannels() error {
 	logger.InfoC("channels", "Initializing channel manager")
 
-	if m.config.Channels.Telegram.Enabled && m.config.Channels.Telegram.Token != "" {
+	if m.config.Channels.Telegram.Enabled && m.config.Channels.Telegram.Token.Present() {
 		m.initChannel("telegram", "Telegram")
 	}
 
@@ -387,7 +387,7 @@ func (m *Manager) initChannels() error {
 		m.initChannel("feishu", "Feishu")
 	}
 
-	if m.config.Channels.Discord.Enabled && m.config.Channels.Discord.Token != "" {
+	if m.config.Channels.Discord.Enabled && m.config.Channels.Discord.Token.Present() {
 		m.initChannel("discord", "Discord")
 	}
 
@@ -399,11 +399,11 @@ func (m *Manager) initChannels() error {
 		m.initChannel("dingtalk", "DingTalk")
 	}
 
-	if m.config.Channels.Slack.Enabled && m.config.Channels.Slack.BotToken != "" {
+	if m.config.Channels.Slack.Enabled && m.config.Channels.Slack.BotToken.Present() {
 		m.initChannel("slack", "Slack")
 	}
 
-	if m.config.Channels.LINE.Enabled && m.config.Channels.LINE.ChannelAccessToken != "" {
+	if m.config.Channels.LINE.Enabled && m.config.Channels.LINE.ChannelAccessToken.Present() {
 		m.initChannel("line", "LINE")
 	}
 
@@ -411,11 +411,11 @@ func (m *Manager) initChannels() error {
 		m.initChannel("onebot", "OneBot")
 	}
 
-	if m.config.Channels.WeCom.Enabled && m.config.Channels.WeCom.Token != "" {
+	if m.config.Channels.WeCom.Enabled && m.config.Channels.WeCom.Token.Present() {
 		m.initChannel("wecom", "WeCom")
 	}
 
-	if m.config.Channels.WeComAIBot.Enabled && m.config.Channels.WeComAIBot.Token != "" {
+	if m.config.Channels.WeComAIBot.Enabled && m.config.Channels.WeComAIBot.Token.Present() {
 		m.initChannel("wecom_aibot", "WeCom AI Bot")
 	}
 
@@ -423,7 +423,7 @@ func (m *Manager) initChannels() error {
 		m.initChannel("wecom_app", "WeCom App")
 	}
 
-	if m.config.Channels.Pico.Enabled && m.config.Channels.Pico.Token != "" {
+	if m.config.Channels.Pico.Enabled && m.config.Channels.Pico.Token.Present() {
 		m.initChannel("pico", "Pico")
 	}
 

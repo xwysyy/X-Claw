@@ -51,6 +51,7 @@ func (pc *picoConn) close() {
 type PicoChannel struct {
 	*channels.BaseChannel
 	config      config.PicoConfig
+	token       string
 	upgrader    websocket.Upgrader
 	connections sync.Map // connID → *picoConn
 	connCount   atomic.Int32
@@ -60,8 +61,16 @@ type PicoChannel struct {
 
 // NewPicoChannel creates a new Pico Protocol channel.
 func NewPicoChannel(cfg config.PicoConfig, messageBus *bus.MessageBus) (*PicoChannel, error) {
-	if cfg.Token == "" {
+	if !cfg.Token.Present() {
 		return nil, fmt.Errorf("pico token is required")
+	}
+	token, err := cfg.Token.Resolve("")
+	if err != nil {
+		return nil, fmt.Errorf("resolve pico token: %w", err)
+	}
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return nil, fmt.Errorf("pico token is empty")
 	}
 
 	base := channels.NewBaseChannel("pico", cfg, messageBus, cfg.AllowFrom,
@@ -85,6 +94,7 @@ func NewPicoChannel(cfg config.PicoConfig, messageBus *bus.MessageBus) (*PicoCha
 	return &PicoChannel{
 		BaseChannel: base,
 		config:      cfg,
+		token:       token,
 		upgrader: websocket.Upgrader{
 			CheckOrigin:     checkOrigin,
 			ReadBufferSize:  1024,
@@ -287,7 +297,7 @@ func (c *PicoChannel) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 // authenticate checks the Bearer token from the Authorization header.
 // Query parameter authentication is only allowed when AllowTokenQuery is explicitly enabled.
 func (c *PicoChannel) authenticate(r *http.Request) bool {
-	token := c.config.Token
+	token := strings.TrimSpace(c.token)
 	if token == "" {
 		return false
 	}

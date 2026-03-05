@@ -17,6 +17,34 @@ import (
 
 const skillsSearchMaxResults = 20
 
+func toSkillsClawHubConfig(cfg *config.Config) (skills.ClawHubConfig, error) {
+	if cfg == nil {
+		return skills.ClawHubConfig{}, nil
+	}
+
+	in := cfg.Tools.Skills.Registries.ClawHub
+	authToken := ""
+	if in.AuthToken.Present() {
+		v, err := in.AuthToken.Resolve("")
+		if err != nil {
+			return skills.ClawHubConfig{}, err
+		}
+		authToken = strings.TrimSpace(v)
+	}
+
+	return skills.ClawHubConfig{
+		Enabled:         in.Enabled,
+		BaseURL:         strings.TrimSpace(in.BaseURL),
+		AuthToken:       authToken,
+		SearchPath:      strings.TrimSpace(in.SearchPath),
+		SkillsPath:      strings.TrimSpace(in.SkillsPath),
+		DownloadPath:    strings.TrimSpace(in.DownloadPath),
+		Timeout:         in.Timeout,
+		MaxZipSize:      in.MaxZipSize,
+		MaxResponseSize: in.MaxResponseSize,
+	}, nil
+}
+
 func skillsListCmd(loader *skills.SkillsLoader) {
 	allSkills := loader.ListSkills()
 
@@ -64,9 +92,14 @@ func skillsInstallFromRegistry(cfg *config.Config, registryName, slug string) er
 
 	fmt.Printf("Installing skill '%s' from %s registry...\n", slug, registryName)
 
+	clawHub, err := toSkillsClawHubConfig(cfg)
+	if err != nil {
+		return fmt.Errorf("resolve tools.skills.registries.clawhub.auth_token: %w", err)
+	}
+
 	registryMgr := skills.NewRegistryManagerFromConfig(skills.RegistryConfig{
 		MaxConcurrentSearches: cfg.Tools.Skills.MaxConcurrentSearches,
-		ClawHub:               skills.ClawHubConfig(cfg.Tools.Skills.Registries.ClawHub),
+		ClawHub:               clawHub,
 	})
 
 	registry := registryMgr.GetRegistry(registryName)
@@ -226,9 +259,15 @@ func skillsSearchCmd(query string) {
 		return
 	}
 
+	clawHub, err := toSkillsClawHubConfig(cfg)
+	if err != nil {
+		fmt.Printf("✗ Failed to resolve clawhub auth token: %v\n", err)
+		return
+	}
+
 	registryMgr := skills.NewRegistryManagerFromConfig(skills.RegistryConfig{
 		MaxConcurrentSearches: cfg.Tools.Skills.MaxConcurrentSearches,
-		ClawHub:               skills.ClawHubConfig(cfg.Tools.Skills.Registries.ClawHub),
+		ClawHub:               clawHub,
 	})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)

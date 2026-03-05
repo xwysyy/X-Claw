@@ -87,7 +87,7 @@ func DefaultConfig() *Config {
 			},
 			Telegram: TelegramConfig{
 				Enabled:   false,
-				Token:     "",
+				Token:     SecretRef{},
 				AllowFrom: FlexibleStringSlice{},
 				GroupTrigger: GroupTriggerConfig{
 					CommandBypass:   true,
@@ -103,9 +103,9 @@ func DefaultConfig() *Config {
 			Feishu: FeishuConfig{
 				Enabled:           false,
 				AppID:             "",
-				AppSecret:         "",
-				EncryptKey:        "",
-				VerificationToken: "",
+				AppSecret:         SecretRef{},
+				EncryptKey:        SecretRef{},
+				VerificationToken: SecretRef{},
 				AllowFrom:         FlexibleStringSlice{},
 				GroupTrigger: GroupTriggerConfig{
 					// Safe-by-default in groups: require @mention.
@@ -121,7 +121,7 @@ func DefaultConfig() *Config {
 			},
 			Discord: DiscordConfig{
 				Enabled:     false,
-				Token:       "",
+				Token:       SecretRef{},
 				AllowFrom:   FlexibleStringSlice{},
 				MentionOnly: false,
 				Placeholder: PlaceholderConfig{Enabled: false, DelayMS: 2500},
@@ -129,19 +129,19 @@ func DefaultConfig() *Config {
 			QQ: QQConfig{
 				Enabled:   false,
 				AppID:     "",
-				AppSecret: "",
+				AppSecret: SecretRef{},
 				AllowFrom: FlexibleStringSlice{},
 			},
 			DingTalk: DingTalkConfig{
 				Enabled:      false,
 				ClientID:     "",
-				ClientSecret: "",
+				ClientSecret: SecretRef{},
 				AllowFrom:    FlexibleStringSlice{},
 			},
 			Slack: SlackConfig{
 				Enabled:   false,
-				BotToken:  "",
-				AppToken:  "",
+				BotToken:  SecretRef{},
+				AppToken:  SecretRef{},
 				AllowFrom: FlexibleStringSlice{},
 				Placeholder: PlaceholderConfig{
 					Enabled: false,
@@ -150,8 +150,8 @@ func DefaultConfig() *Config {
 			},
 			LINE: LINEConfig{
 				Enabled:            false,
-				ChannelSecret:      "",
-				ChannelAccessToken: "",
+				ChannelSecret:      SecretRef{},
+				ChannelAccessToken: SecretRef{},
 				WebhookHost:        "0.0.0.0",
 				WebhookPort:        18791,
 				WebhookPath:        "/webhook/line",
@@ -162,7 +162,7 @@ func DefaultConfig() *Config {
 			OneBot: OneBotConfig{
 				Enabled:            false,
 				WSUrl:              "ws://127.0.0.1:3001",
-				AccessToken:        "",
+				AccessToken:        SecretRef{},
 				ReconnectInterval:  5,
 				GroupTriggerPrefix: []string{},
 				AllowFrom:          FlexibleStringSlice{},
@@ -170,8 +170,8 @@ func DefaultConfig() *Config {
 			},
 			WeCom: WeComConfig{
 				Enabled:        false,
-				Token:          "",
-				EncodingAESKey: "",
+				Token:          SecretRef{},
+				EncodingAESKey: SecretRef{},
 				WebhookURL:     "",
 				WebhookHost:    "0.0.0.0",
 				WebhookPort:    18793,
@@ -182,10 +182,10 @@ func DefaultConfig() *Config {
 			WeComApp: WeComAppConfig{
 				Enabled:        false,
 				CorpID:         "",
-				CorpSecret:     "",
+				CorpSecret:     SecretRef{},
 				AgentID:        0,
-				Token:          "",
-				EncodingAESKey: "",
+				Token:          SecretRef{},
+				EncodingAESKey: SecretRef{},
 				WebhookHost:    "0.0.0.0",
 				WebhookPort:    18792,
 				WebhookPath:    "/webhook/wecom-app",
@@ -194,8 +194,8 @@ func DefaultConfig() *Config {
 			},
 			WeComAIBot: WeComAIBotConfig{
 				Enabled:        false,
-				Token:          "",
-				EncodingAESKey: "",
+				Token:          SecretRef{},
+				EncodingAESKey: SecretRef{},
 				WebhookPath:    "/webhook/wecom-aibot",
 				AllowFrom:      FlexibleStringSlice{},
 				ReplyTimeout:   5,
@@ -204,7 +204,7 @@ func DefaultConfig() *Config {
 			},
 			Pico: PicoConfig{
 				Enabled:        false,
-				Token:          "",
+				Token:          SecretRef{},
 				PingInterval:   30,
 				ReadTimeout:    60,
 				WriteTimeout:   10,
@@ -226,7 +226,7 @@ func DefaultConfig() *Config {
 				ModelName: "glm-4.7",
 				Model:     "zhipu/glm-4.7",
 				APIBase:   "https://open.bigmodel.cn/api/paas/v4",
-				APIKey:    "",
+				APIKey:    SecretRef{},
 			},
 
 			// OpenAI - https://platform.openai.com/api-keys
@@ -234,7 +234,7 @@ func DefaultConfig() *Config {
 				ModelName: "gpt-5.2",
 				Model:     "openai/gpt-5.2",
 				APIBase:   "https://api.openai.com/v1",
-				APIKey:    "",
+				APIKey:    SecretRef{},
 			},
 
 			// Anthropic Claude - https://console.anthropic.com/settings/keys
@@ -242,7 +242,7 @@ func DefaultConfig() *Config {
 				ModelName: "claude-sonnet-4.6",
 				Model:     "anthropic/claude-sonnet-4.6",
 				APIBase:   "https://api.anthropic.com/v1",
-				APIKey:    "",
+				APIKey:    SecretRef{},
 			},
 
 			// DeepSeek - https://platform.deepseek.com/
@@ -250,7 +250,7 @@ func DefaultConfig() *Config {
 				ModelName: "deepseek-chat",
 				Model:     "deepseek/deepseek-chat",
 				APIBase:   "https://api.deepseek.com/v1",
-				APIKey:    "",
+				APIKey:    SecretRef{},
 			},
 
 			// Google Gemini - https://ai.google.dev/
@@ -258,7 +258,7 @@ func DefaultConfig() *Config {
 				ModelName: "gemini-2.0-flash",
 				Model:     "gemini/gemini-2.0-flash-exp",
 				APIBase:   "https://generativelanguage.googleapis.com/v1beta",
-				APIKey:    "",
+				APIKey:    SecretRef{},
 			},
 
 			// Qwen (通义千问) - https://dashscope.console.aliyun.com/apiKey
@@ -266,7 +266,7 @@ func DefaultConfig() *Config {
 				ModelName: "qwen-plus",
 				Model:     "qwen/qwen-plus",
 				APIBase:   "https://dashscope.aliyuncs.com/compatible-mode/v1",
-				APIKey:    "",
+				APIKey:    SecretRef{},
 			},
 
 			// Moonshot (月之暗面) - https://platform.moonshot.cn/console/api-keys
@@ -274,7 +274,7 @@ func DefaultConfig() *Config {
 				ModelName: "moonshot-v1-8k",
 				Model:     "moonshot/moonshot-v1-8k",
 				APIBase:   "https://api.moonshot.cn/v1",
-				APIKey:    "",
+				APIKey:    SecretRef{},
 			},
 
 			// Groq - https://console.groq.com/keys
@@ -282,7 +282,7 @@ func DefaultConfig() *Config {
 				ModelName: "llama-3.3-70b",
 				Model:     "groq/llama-3.3-70b-versatile",
 				APIBase:   "https://api.groq.com/openai/v1",
-				APIKey:    "",
+				APIKey:    SecretRef{},
 			},
 
 			// OpenRouter (100+ models) - https://openrouter.ai/keys
@@ -290,13 +290,13 @@ func DefaultConfig() *Config {
 				ModelName: "openrouter-auto",
 				Model:     "openrouter/auto",
 				APIBase:   "https://openrouter.ai/api/v1",
-				APIKey:    "",
+				APIKey:    SecretRef{},
 			},
 			{
 				ModelName: "openrouter-gpt-5.2",
 				Model:     "openrouter/openai/gpt-5.2",
 				APIBase:   "https://openrouter.ai/api/v1",
-				APIKey:    "",
+				APIKey:    SecretRef{},
 			},
 
 			// NVIDIA - https://build.nvidia.com/
@@ -304,7 +304,7 @@ func DefaultConfig() *Config {
 				ModelName: "nemotron-4-340b",
 				Model:     "nvidia/nemotron-4-340b-instruct",
 				APIBase:   "https://integrate.api.nvidia.com/v1",
-				APIKey:    "",
+				APIKey:    SecretRef{},
 			},
 
 			// Cerebras - https://inference.cerebras.ai/
@@ -312,7 +312,7 @@ func DefaultConfig() *Config {
 				ModelName: "cerebras-llama-3.3-70b",
 				Model:     "cerebras/llama-3.3-70b",
 				APIBase:   "https://api.cerebras.ai/v1",
-				APIKey:    "",
+				APIKey:    SecretRef{},
 			},
 
 			// Volcengine (火山引擎) - https://console.volcengine.com/ark
@@ -320,7 +320,7 @@ func DefaultConfig() *Config {
 				ModelName: "doubao-pro",
 				Model:     "volcengine/doubao-pro-32k",
 				APIBase:   "https://ark.cn-beijing.volces.com/api/v3",
-				APIKey:    "",
+				APIKey:    SecretRef{},
 			},
 
 			// ShengsuanYun (神算云)
@@ -328,7 +328,7 @@ func DefaultConfig() *Config {
 				ModelName: "deepseek-v3",
 				Model:     "shengsuanyun/deepseek-v3",
 				APIBase:   "https://api.shengsuanyun.com/v1",
-				APIKey:    "",
+				APIKey:    SecretRef{},
 			},
 
 			// Antigravity (Google Cloud Code Assist) - OAuth only
@@ -351,7 +351,7 @@ func DefaultConfig() *Config {
 				ModelName: "llama3",
 				Model:     "ollama/llama3",
 				APIBase:   "http://localhost:11434/v1",
-				APIKey:    "ollama",
+				APIKey:    SecretRef{Inline: "ollama"},
 			},
 
 			// Mistral AI - https://console.mistral.ai/api-keys
@@ -359,7 +359,7 @@ func DefaultConfig() *Config {
 				ModelName: "mistral-small",
 				Model:     "mistral/mistral-small-latest",
 				APIBase:   "https://api.mistral.ai/v1",
-				APIKey:    "",
+				APIKey:    SecretRef{},
 			},
 
 			// VLLM (local) - http://localhost:8000
@@ -367,13 +367,13 @@ func DefaultConfig() *Config {
 				ModelName: "local-model",
 				Model:     "vllm/custom-model",
 				APIBase:   "http://localhost:8000/v1",
-				APIKey:    "",
+				APIKey:    SecretRef{},
 			},
 		},
 		Gateway: GatewayConfig{
 			Host:   "127.0.0.1",
 			Port:   18790,
-			APIKey: "",
+			APIKey: SecretRef{},
 			InboundQueue: GatewayInboundQueueConfig{
 				Enabled:          true,
 				MaxConcurrency:   4,
@@ -494,7 +494,7 @@ func DefaultConfig() *Config {
 				},
 				Brave: BraveConfig{
 					Enabled:    false,
-					APIKey:     "",
+					APIKey:     SecretRef{},
 					MaxResults: 5,
 				},
 				DuckDuckGo: DuckDuckGoConfig{
@@ -507,7 +507,7 @@ func DefaultConfig() *Config {
 				},
 				Grok: GrokConfig{
 					Enabled:      false,
-					APIKey:       "",
+					APIKey:       SecretRef{},
 					Endpoint:     "https://api.x.ai/v1/chat/completions",
 					DefaultModel: "grok-4",
 					MaxResults:   5,

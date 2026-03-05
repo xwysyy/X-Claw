@@ -20,14 +20,12 @@ const defaultFeishuCalendarTimezone = "Asia/Shanghai"
 
 // FeishuCalendarTool creates calendar events in Feishu/Lark.
 type FeishuCalendarTool struct {
-	cfg    config.FeishuConfig
-	client *lark.Client
+	cfg config.FeishuConfig
 }
 
 func NewFeishuCalendarTool(cfg config.FeishuConfig) *FeishuCalendarTool {
 	return &FeishuCalendarTool{
-		cfg:    cfg,
-		client: lark.NewClient(cfg.AppID, cfg.AppSecret),
+		cfg: cfg,
 	}
 }
 
@@ -103,9 +101,15 @@ func (t *FeishuCalendarTool) Parameters() map[string]any {
 }
 
 func (t *FeishuCalendarTool) Execute(ctx context.Context, args map[string]any) *ToolResult {
-	if strings.TrimSpace(t.cfg.AppID) == "" || strings.TrimSpace(t.cfg.AppSecret) == "" {
+	if strings.TrimSpace(t.cfg.AppID) == "" || !t.cfg.AppSecret.Present() {
 		return ErrorResult("feishu app_id/app_secret is missing in config.channels.feishu")
 	}
+
+	appSecret, err := t.cfg.AppSecret.Resolve("")
+	if err != nil {
+		return ErrorResult(fmt.Sprintf("resolve feishu app_secret: %v", err))
+	}
+	client := lark.NewClient(t.cfg.AppID, appSecret)
 
 	summary, ok := getStringArg(args, "summary")
 	if !ok || strings.TrimSpace(summary) == "" {
@@ -155,7 +159,7 @@ func (t *FeishuCalendarTool) Execute(ctx context.Context, args map[string]any) *
 	calendarID, _ := getStringArg(args, "calendar_id")
 	calendarID = strings.TrimSpace(calendarID)
 	if shouldUseFeishuPrimaryCalendar(calendarID) {
-		resolvedID, err := t.resolvePrimaryCalendarID(ctx)
+		resolvedID, err := t.resolvePrimaryCalendarID(ctx, client)
 		if err != nil {
 			return ErrorResult(fmt.Sprintf("resolve primary calendar failed: %v", err))
 		}
@@ -226,7 +230,7 @@ func (t *FeishuCalendarTool) Execute(ctx context.Context, args map[string]any) *
 		CalendarEvent(eventBuilder.Build()).
 		Build()
 
-	resp, err := t.client.Calendar.V4.CalendarEvent.Create(ctx, req)
+	resp, err := client.Calendar.V4.CalendarEvent.Create(ctx, req)
 	if err != nil {
 		logger.ErrorCF("tools.feishu_calendar", "Create Feishu calendar event request failed", map[string]any{
 			"calendar_id": calendarID,
@@ -266,7 +270,7 @@ func (t *FeishuCalendarTool) Execute(ctx context.Context, args map[string]any) *
 	if len(inviteeUserIDs) > 0 {
 		if strings.TrimSpace(eventID) == "" {
 			attendeeWarning = "event_id missing, unable to add attendees"
-		} else if err := t.addFeishuEventAttendees(ctx, calendarID, eventID, inviteeUserIDs, needNotification); err != nil {
+		} else if err := t.addFeishuEventAttendees(ctx, client, calendarID, eventID, inviteeUserIDs, needNotification); err != nil {
 			attendeeWarning = err.Error()
 		} else {
 			attendeesAdded = true
@@ -311,8 +315,11 @@ func (t *FeishuCalendarTool) Execute(ctx context.Context, args map[string]any) *
 	return SilentResult(result)
 }
 
-func (t *FeishuCalendarTool) resolvePrimaryCalendarID(ctx context.Context) (string, error) {
-	resp, err := t.client.Calendar.V4.Calendar.Primary(
+func (t *FeishuCalendarTool) resolvePrimaryCalendarID(ctx context.Context, client *lark.Client) (string, error) {
+	if client == nil {
+		return "", fmt.Errorf("client is nil")
+	}
+	resp, err := client.Calendar.V4.Calendar.Primary(
 		ctx,
 		larkcalendar.NewPrimaryCalendarReqBuilder().Build(),
 	)
@@ -510,11 +517,15 @@ func buildFeishuInviteeUserIDs(
 
 func (t *FeishuCalendarTool) addFeishuEventAttendees(
 	ctx context.Context,
+	client *lark.Client,
 	calendarID string,
 	eventID string,
 	inviteeUserIDs []string,
 	needNotification bool,
 ) error {
+	if client == nil {
+		return fmt.Errorf("client is nil")
+	}
 	if len(inviteeUserIDs) == 0 {
 		return nil
 	}
@@ -537,7 +548,7 @@ func (t *FeishuCalendarTool) addFeishuEventAttendees(
 			Build()).
 		Build()
 
-	resp, err := t.client.Calendar.V4.CalendarEventAttendee.Create(ctx, req)
+	resp, err := client.Calendar.V4.CalendarEventAttendee.Create(ctx, req)
 	if err != nil {
 		return fmt.Errorf("add attendees request failed: %w", err)
 	}

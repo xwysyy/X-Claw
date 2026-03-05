@@ -31,9 +31,10 @@ import (
 
 type FeishuChannel struct {
 	*channels.BaseChannel
-	config   config.FeishuConfig
-	client   *lark.Client
-	wsClient *larkws.Client
+	config    config.FeishuConfig
+	client    *lark.Client
+	wsClient  *larkws.Client
+	appSecret string
 
 	botOpenID atomic.Value // stores string; populated lazily for @mention detection
 
@@ -46,21 +47,35 @@ func NewFeishuChannel(cfg config.FeishuConfig, bus *bus.MessageBus) (*FeishuChan
 		channels.WithGroupTrigger(cfg.GroupTrigger),
 		channels.WithPlaceholder(cfg.Placeholder),
 		channels.WithReasoningChannelID(cfg.ReasoningChannelID),
+		// Message splitting is handled by channels.Manager. Keep a conservative
+		// cap for markdown payloads to avoid Feishu API rejections.
+		channels.WithMaxMessageLength(feishuPostChunkLimit),
 	)
 
 	ch := &FeishuChannel{
 		BaseChannel: base,
 		config:      cfg,
-		client:      lark.NewClient(cfg.AppID, cfg.AppSecret),
+		client:      nil,
 	}
 	ch.SetOwner(ch)
 	return ch, nil
 }
 
 func (c *FeishuChannel) Start(ctx context.Context) error {
-	if c.config.AppID == "" || c.config.AppSecret == "" {
+	if strings.TrimSpace(c.config.AppID) == "" || !c.config.AppSecret.Present() {
 		return fmt.Errorf("feishu app_id or app_secret is empty")
 	}
+
+	appSecret, err := c.config.AppSecret.Resolve("")
+	if err != nil {
+		return fmt.Errorf("resolve feishu app_secret: %w", err)
+	}
+	appSecret = strings.TrimSpace(appSecret)
+	if appSecret == "" {
+		return fmt.Errorf("feishu app_secret is empty")
+	}
+	c.appSecret = appSecret
+	c.client = lark.NewClient(c.config.AppID, appSecret)
 
 	// Fetch bot open_id via API for reliable @mention detection.
 	if err := c.fetchBotOpenID(ctx); err != nil {
@@ -69,7 +84,24 @@ func (c *FeishuChannel) Start(ctx context.Context) error {
 		})
 	}
 
-	dispatcher := larkdispatcher.NewEventDispatcher(c.config.VerificationToken, c.config.EncryptKey).
+	verificationToken := ""
+	if c.config.VerificationToken.Present() {
+		if v, err := c.config.VerificationToken.Resolve(""); err == nil {
+			verificationToken = strings.TrimSpace(v)
+		} else {
+			return fmt.Errorf("resolve feishu verification_token: %w", err)
+		}
+	}
+	encryptKey := ""
+	if c.config.EncryptKey.Present() {
+		if v, err := c.config.EncryptKey.Resolve(""); err == nil {
+			encryptKey = strings.TrimSpace(v)
+		} else {
+			return fmt.Errorf("resolve feishu encrypt_key: %w", err)
+		}
+	}
+
+	dispatcher := larkdispatcher.NewEventDispatcher(verificationToken, encryptKey).
 		OnP2MessageReceiveV1(c.handleMessageReceive)
 
 	runCtx, cancel := context.WithCancel(ctx)
@@ -78,7 +110,7 @@ func (c *FeishuChannel) Start(ctx context.Context) error {
 	c.cancel = cancel
 	c.wsClient = larkws.NewClient(
 		c.config.AppID,
-		c.config.AppSecret,
+		appSecret,
 		larkws.WithEventHandler(dispatcher),
 	)
 	wsClient := c.wsClient
@@ -122,8 +154,10 @@ func (c *FeishuChannel) Send(ctx context.Context, msg bus.OutboundMessage) error
 		return fmt.Errorf("chat ID is empty: %w", channels.ErrSendFailed)
 	}
 
+	content := normalizeFeishuMarkdownLinks(msg.Content)
+
 	// Build interactive card with markdown content
-	cardContent, err := buildMarkdownCard(msg.Content)
+	cardContent, err := buildMarkdownCard(content)
 	if err != nil {
 		return fmt.Errorf("feishu send: card build failed: %w", err)
 	}
@@ -133,7 +167,7 @@ func (c *FeishuChannel) Send(ctx context.Context, msg bus.OutboundMessage) error
 // EditMessage implements channels.MessageEditor.
 // Uses Message.Patch to update an interactive card message.
 func (c *FeishuChannel) EditMessage(ctx context.Context, chatID, messageID, content string) error {
-	cardContent, err := buildMarkdownCard(content)
+	cardContent, err := buildMarkdownCard(normalizeFeishuMarkdownLinks(content))
 	if err != nil {
 		return fmt.Errorf("feishu edit: card build failed: %w", err)
 	}
@@ -168,7 +202,7 @@ func (c *FeishuChannel) SendPlaceholder(ctx context.Context, chatID string) (str
 		text = "Thinking..."
 	}
 
-	cardContent, err := buildMarkdownCard(text)
+	cardContent, err := buildMarkdownCard(normalizeFeishuMarkdownLinks(text))
 	if err != nil {
 		return "", fmt.Errorf("feishu placeholder: card build failed: %w", err)
 	}
@@ -398,17 +432,27 @@ func (c *FeishuChannel) handleMessageReceive(ctx context.Context, event *larkim.
 	}
 
 	var peer bus.Peer
-	if chatType == "p2p" {
+	// Lark may report private chats as chat_type="private" instead of "p2p".
+	// Treat any non-group chat as a direct message to avoid breaking DM UX.
+	if chatType != "group" {
 		peer = bus.Peer{Kind: "direct", ID: senderID}
 	} else {
 		peer = bus.Peer{Kind: "group", ID: chatID}
 
-		// Check if bot was mentioned
-		isMentioned := c.isBotMentioned(message)
+		knownID, _ := c.botOpenID.Load().(string)
 
-		// Strip mention placeholders from content before group trigger check
-		if len(message.Mentions) > 0 {
-			content = stripMentionPlaceholders(content, message.Mentions)
+		isMentioned := false
+		switch messageType {
+		case larkim.MsgTypeText:
+			// Preserve mention semantics in content ("@Name") while stripping bot mentions
+			// (or leading mentions when bot id is unknown) for trigger detection.
+			var mentioned bool
+			content, mentioned = feishuCleanTextMentions(content, message.Mentions, knownID)
+			isMentioned = mentioned
+		default:
+			// For non-text messages (post/json etc), we cannot reliably rewrite mention
+			// placeholders, but we can still detect mention hits.
+			isMentioned, content = feishuDetectAndStripBotMention(message, content, knownID)
 		}
 
 		// In group chats, apply unified group trigger filtering
@@ -763,6 +807,8 @@ func (c *FeishuChannel) sendImage(ctx context.Context, chatID string, file *os.F
 
 // sendFile uploads a file and sends it as a message.
 func (c *FeishuChannel) sendFile(ctx context.Context, chatID string, file *os.File, filename, fileType string) error {
+	filename = sanitizeFeishuUploadFilename(filename)
+
 	// Map part type to Feishu file type
 	feishuFileType := "stream"
 	switch fileType {

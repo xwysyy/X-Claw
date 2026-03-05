@@ -39,6 +39,10 @@ type WeComAppChannel struct {
 	ctx           context.Context
 	cancel        context.CancelFunc
 	processedMsgs *MessageDeduplicator
+
+	corpSecret string
+	token      string
+	aesKey     string
 }
 
 // WeComXMLMessage represents the XML message structure from WeCom
@@ -119,8 +123,45 @@ type PKCS7Padding struct{}
 
 // NewWeComAppChannel creates a new WeCom App channel instance
 func NewWeComAppChannel(cfg config.WeComAppConfig, messageBus *bus.MessageBus) (*WeComAppChannel, error) {
-	if cfg.CorpID == "" || cfg.CorpSecret == "" || cfg.AgentID == 0 {
+	if cfg.CorpID == "" || !cfg.CorpSecret.Present() || cfg.AgentID == 0 {
 		return nil, fmt.Errorf("wecom_app corp_id, corp_secret and agent_id are required")
+	}
+
+	corpSecret, err := cfg.CorpSecret.Resolve("")
+	if err != nil {
+		return nil, fmt.Errorf("resolve wecom_app corp_secret: %w", err)
+	}
+
+	token := ""
+	if cfg.Token.Present() {
+		v, err := cfg.Token.Resolve("")
+		if err != nil {
+			return nil, fmt.Errorf("resolve wecom_app token: %w", err)
+		}
+		token = v
+	}
+
+	aesKey := ""
+	if cfg.EncodingAESKey.Present() {
+		v, err := cfg.EncodingAESKey.Resolve("")
+		if err != nil {
+			return nil, fmt.Errorf("resolve wecom_app encoding_aes_key: %w", err)
+		}
+		aesKey = v
+	}
+
+	corpSecret = strings.TrimSpace(corpSecret)
+	token = strings.TrimSpace(token)
+	aesKey = strings.TrimSpace(aesKey)
+	if corpSecret == "" {
+		return nil, fmt.Errorf("wecom_app corp_secret must be non-empty")
+	}
+	// Allow token/aesKey to be unset. When set, they must be non-empty.
+	if cfg.Token.Present() && token == "" {
+		return nil, fmt.Errorf("wecom_app token must be non-empty when set")
+	}
+	if cfg.EncodingAESKey.Present() && aesKey == "" {
+		return nil, fmt.Errorf("wecom_app encoding_aes_key must be non-empty when set")
 	}
 
 	base := channels.NewBaseChannel("wecom_app", cfg, messageBus, cfg.AllowFrom,
@@ -144,6 +185,9 @@ func NewWeComAppChannel(cfg config.WeComAppConfig, messageBus *bus.MessageBus) (
 		ctx:           ctx,
 		cancel:        cancel,
 		processedMsgs: NewMessageDeduplicator(wecomMaxProcessedMessages),
+		corpSecret:    corpSecret,
+		token:         token,
+		aesKey:        aesKey,
 	}, nil
 }
 
@@ -479,9 +523,8 @@ func (c *WeComAppChannel) handleVerification(ctx context.Context, w http.Respons
 	}
 
 	// Verify signature
-	if !verifySignature(c.config.Token, msgSignature, timestamp, nonce, echostr) {
+	if !verifySignature(c.token, msgSignature, timestamp, nonce, echostr) {
 		logger.WarnCF("wecom_app", "Signature verification failed", map[string]any{
-			"token":         c.config.Token,
 			"msg_signature": msgSignature,
 			"timestamp":     timestamp,
 			"nonce":         nonce,
@@ -495,15 +538,13 @@ func (c *WeComAppChannel) handleVerification(ctx context.Context, w http.Respons
 	// Decrypt echostr with CorpID verification
 	// For WeCom App (自建应用), receiveid should be corp_id
 	logger.DebugCF("wecom_app", "Attempting to decrypt echostr", map[string]any{
-		"encoding_aes_key": c.config.EncodingAESKey,
-		"corp_id":          c.config.CorpID,
+		"corp_id": c.config.CorpID,
 	})
-	decryptedEchoStr, err := decryptMessageWithVerify(echostr, c.config.EncodingAESKey, c.config.CorpID)
+	decryptedEchoStr, err := decryptMessageWithVerify(echostr, c.aesKey, c.config.CorpID)
 	if err != nil {
 		logger.ErrorCF("wecom_app", "Failed to decrypt echostr", map[string]any{
-			"error":            err.Error(),
-			"encoding_aes_key": c.config.EncodingAESKey,
-			"corp_id":          c.config.CorpID,
+			"error":   err.Error(),
+			"corp_id": c.config.CorpID,
 		})
 		http.Error(w, "Decryption failed", http.StatusInternalServerError)
 		return
@@ -557,7 +598,7 @@ func (c *WeComAppChannel) handleMessageCallback(ctx context.Context, w http.Resp
 	}
 
 	// Verify signature
-	if !verifySignature(c.config.Token, msgSignature, timestamp, nonce, encryptedMsg.Encrypt) {
+	if !verifySignature(c.token, msgSignature, timestamp, nonce, encryptedMsg.Encrypt) {
 		logger.WarnC("wecom_app", "Message signature verification failed")
 		http.Error(w, "Invalid signature", http.StatusForbidden)
 		return
@@ -565,7 +606,7 @@ func (c *WeComAppChannel) handleMessageCallback(ctx context.Context, w http.Resp
 
 	// Decrypt message with CorpID verification
 	// For WeCom App (自建应用), receiveid should be corp_id
-	decryptedMsg, err := decryptMessageWithVerify(encryptedMsg.Encrypt, c.config.EncodingAESKey, c.config.CorpID)
+	decryptedMsg, err := decryptMessageWithVerify(encryptedMsg.Encrypt, c.aesKey, c.config.CorpID)
 	if err != nil {
 		logger.ErrorCF("wecom_app", "Failed to decrypt message", map[string]any{
 			"error": err.Error(),
@@ -671,7 +712,7 @@ func (c *WeComAppChannel) tokenRefreshLoop() {
 // refreshAccessToken gets a new access token from WeCom API
 func (c *WeComAppChannel) refreshAccessToken() error {
 	apiURL := fmt.Sprintf("%s/cgi-bin/gettoken?corpid=%s&corpsecret=%s",
-		wecomAPIBase, url.QueryEscape(c.config.CorpID), url.QueryEscape(c.config.CorpSecret))
+		wecomAPIBase, url.QueryEscape(c.config.CorpID), url.QueryEscape(c.corpSecret))
 
 	resp, err := http.Get(apiURL)
 	if err != nil {

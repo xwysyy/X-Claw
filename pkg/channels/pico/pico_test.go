@@ -23,7 +23,7 @@ func TestNewPicoChannel_RequiresToken(t *testing.T) {
 func TestPicoChannel_Authenticate(t *testing.T) {
 	t.Parallel()
 
-	ch, err := NewPicoChannel(config.PicoConfig{Token: "t"}, bus.NewMessageBus())
+	ch, err := NewPicoChannel(config.PicoConfig{Token: config.SecretRef{Inline: "t"}}, bus.NewMessageBus())
 	if err != nil {
 		t.Fatalf("NewPicoChannel error: %v", err)
 	}
@@ -50,7 +50,7 @@ func TestPicoChannel_CheckOrigin(t *testing.T) {
 	t.Parallel()
 
 	t.Run("allow_all_when_not_configured", func(t *testing.T) {
-		ch, err := NewPicoChannel(config.PicoConfig{Token: "t"}, bus.NewMessageBus())
+		ch, err := NewPicoChannel(config.PicoConfig{Token: config.SecretRef{Inline: "t"}}, bus.NewMessageBus())
 		if err != nil {
 			t.Fatalf("NewPicoChannel error: %v", err)
 		}
@@ -64,7 +64,7 @@ func TestPicoChannel_CheckOrigin(t *testing.T) {
 
 	t.Run("allow_specific_origin", func(t *testing.T) {
 		ch, err := NewPicoChannel(config.PicoConfig{
-			Token:        "t",
+			Token:        config.SecretRef{Inline: "t"},
 			AllowOrigins: []string{"https://ok.example"},
 		}, bus.NewMessageBus())
 		if err != nil {
@@ -86,7 +86,7 @@ func TestPicoChannel_CheckOrigin(t *testing.T) {
 
 	t.Run("wildcard", func(t *testing.T) {
 		ch, err := NewPicoChannel(config.PicoConfig{
-			Token:        "t",
+			Token:        config.SecretRef{Inline: "t"},
 			AllowOrigins: []string{"*"},
 		}, bus.NewMessageBus())
 		if err != nil {
@@ -104,7 +104,7 @@ func TestPicoChannel_CheckOrigin(t *testing.T) {
 func TestPicoChannel_BroadcastToSession_NoConnections(t *testing.T) {
 	t.Parallel()
 
-	ch, err := NewPicoChannel(config.PicoConfig{Token: "t"}, bus.NewMessageBus())
+	ch, err := NewPicoChannel(config.PicoConfig{Token: config.SecretRef{Inline: "t"}}, bus.NewMessageBus())
 	if err != nil {
 		t.Fatalf("NewPicoChannel error: %v", err)
 	}
@@ -122,7 +122,7 @@ func TestPicoChannel_BroadcastToSession_NoConnections(t *testing.T) {
 func TestPicoChannel_Send_NotRunning(t *testing.T) {
 	t.Parallel()
 
-	ch, err := NewPicoChannel(config.PicoConfig{Token: "t"}, bus.NewMessageBus())
+	ch, err := NewPicoChannel(config.PicoConfig{Token: config.SecretRef{Inline: "t"}}, bus.NewMessageBus())
 	if err != nil {
 		t.Fatalf("NewPicoChannel error: %v", err)
 	}

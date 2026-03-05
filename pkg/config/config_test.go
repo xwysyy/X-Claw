@@ -259,13 +259,13 @@ func TestDefaultConfig_Gateway(t *testing.T) {
 func TestDefaultConfig_Providers(t *testing.T) {
 	cfg := DefaultConfig()
 
-	if cfg.Providers.Anthropic.APIKey != "" {
+	if cfg.Providers.Anthropic.APIKey.Present() {
 		t.Error("Anthropic API key should be empty by default")
 	}
-	if cfg.Providers.OpenAI.APIKey != "" {
+	if cfg.Providers.OpenAI.APIKey.Present() {
 		t.Error("OpenAI API key should be empty by default")
 	}
-	if cfg.Providers.OpenRouter.APIKey != "" {
+	if cfg.Providers.OpenRouter.APIKey.Present() {
 		t.Error("OpenRouter API key should be empty by default")
 	}
 }
@@ -293,7 +293,7 @@ func TestDefaultConfig_WebTools(t *testing.T) {
 	if cfg.Tools.Web.Brave.MaxResults != 5 {
 		t.Error("Expected Brave MaxResults 5, got ", cfg.Tools.Web.Brave.MaxResults)
 	}
-	if cfg.Tools.Web.Brave.APIKey != "" {
+	if cfg.Tools.Web.Brave.APIKey.Present() {
 		t.Error("Brave API key should be empty by default")
 	}
 	if cfg.Tools.Web.DuckDuckGo.MaxResults != 5 {

@@ -30,7 +30,7 @@ type AgentInstance struct {
 	Temperature     float64
 	ContextWindow   int
 	Provider        providers.LLMProvider
-	Sessions        *session.SessionManager
+	Sessions        session.Store
 	ContextBuilder  *ContextBuilder
 	Tools           *tools.ToolRegistry
 	SubagentManager *tools.SubagentManager
@@ -104,6 +104,14 @@ func resolveContextPruning(c config.AgentContextPruningConfig) ContextPruningSet
 
 // resolveMemoryVector resolves memory vector settings from config with defaults.
 func resolveMemoryVector(c config.AgentMemoryVectorConfig) MemoryVectorSettings {
+	apiKey := ""
+	if c.Embedding.APIKey.Present() {
+		// Best-effort resolution. If the secret is missing, the embedder will
+		// either operate without auth (local endpoints) or fail with a clear HTTP error.
+		if v, err := c.Embedding.APIKey.Resolve(""); err == nil {
+			apiKey = v
+		}
+	}
 	return MemoryVectorSettings{
 		Enabled:         c.Enabled,
 		Dimensions:      intDefault(c.Dimensions, defaultMemoryVectorDimensions),
@@ -113,7 +121,7 @@ func resolveMemoryVector(c config.AgentMemoryVectorConfig) MemoryVectorSettings 
 		RecentDailyDays: intDefault(c.RecentDailyDays, defaultMemoryVectorRecentDailyDays),
 		Embedding: MemoryVectorEmbeddingSettings{
 			Kind:                  c.Embedding.Kind,
-			APIKey:                c.Embedding.APIKey,
+			APIKey:                apiKey,
 			APIBase:               c.Embedding.APIBase,
 			Model:                 c.Embedding.Model,
 			Proxy:                 c.Embedding.Proxy,

@@ -22,6 +22,7 @@ import (
 type SlackChannel struct {
 	*channels.BaseChannel
 	config       config.SlackConfig
+	botToken     string
 	api          *slack.Client
 	socketClient *socketmode.Client
 	botUserID    string
@@ -37,13 +38,22 @@ type slackMessageRef struct {
 }
 
 func NewSlackChannel(cfg config.SlackConfig, messageBus *bus.MessageBus) (*SlackChannel, error) {
-	if cfg.BotToken == "" || cfg.AppToken == "" {
+	if !cfg.BotToken.Present() || !cfg.AppToken.Present() {
 		return nil, fmt.Errorf("slack bot_token and app_token are required")
 	}
 
+	botToken, err := cfg.BotToken.Resolve("")
+	if err != nil {
+		return nil, fmt.Errorf("resolve slack bot_token: %w", err)
+	}
+	appToken, err := cfg.AppToken.Resolve("")
+	if err != nil {
+		return nil, fmt.Errorf("resolve slack app_token: %w", err)
+	}
+
 	api := slack.New(
-		cfg.BotToken,
-		slack.OptionAppLevelToken(cfg.AppToken),
+		botToken,
+		slack.OptionAppLevelToken(appToken),
 	)
 
 	socketClient := socketmode.New(api)
@@ -58,6 +68,7 @@ func NewSlackChannel(cfg config.SlackConfig, messageBus *bus.MessageBus) (*Slack
 	return &SlackChannel{
 		BaseChannel:  base,
 		config:       cfg,
+		botToken:     botToken,
 		api:          api,
 		socketClient: socketClient,
 	}, nil
@@ -512,7 +523,7 @@ func (c *SlackChannel) downloadSlackFile(file slack.File) string {
 	return utils.DownloadFile(downloadURL, file.Name, utils.DownloadOptions{
 		LoggerPrefix: "slack",
 		ExtraHeaders: map[string]string{
-			"Authorization": "Bearer " + c.config.BotToken,
+			"Authorization": "Bearer " + c.botToken,
 		},
 	})
 }

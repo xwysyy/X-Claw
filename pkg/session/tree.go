@@ -6,31 +6,18 @@ import (
 	"strings"
 	"time"
 
-	"github.com/sipeed/picoclaw/pkg/providers"
 	"github.com/sipeed/picoclaw/pkg/utils"
+
+	coresession "github.com/sipeed/picoclaw/internal/core/session"
+	"github.com/sipeed/picoclaw/pkg/providers"
 )
 
-type TreeNode struct {
-	ID       string    `json:"id"`
-	ParentID string    `json:"parent_id,omitempty"`
-	Type     EventType `json:"type"`
-
-	TS   string `json:"ts,omitempty"`
-	TSMS int64  `json:"ts_ms,omitempty"`
-
-	Role    string `json:"role,omitempty"`
-	Preview string `json:"preview,omitempty"`
-
-	OnBranch bool `json:"on_branch,omitempty"`
-	IsLeaf   bool `json:"is_leaf,omitempty"`
-}
-
-type SessionTree struct {
-	SessionKey string     `json:"session_key"`
-	LeafID     string     `json:"leaf_id,omitempty"`
-	Total      int        `json:"total"`
-	Nodes      []TreeNode `json:"nodes,omitempty"`
-}
+// Type aliases keep existing imports stable while moving canonical session domain
+// types into internal/core.
+type (
+	TreeNode    = coresession.TreeNode
+	SessionTree = coresession.SessionTree
+)
 
 func (sm *SessionManager) LeafEventID(key string) string {
 	key = utils.CanonicalSessionKey(key)

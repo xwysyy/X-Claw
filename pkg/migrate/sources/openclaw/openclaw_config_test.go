@@ -574,7 +574,11 @@ func TestToStandardConfig(t *testing.T) {
 	for _, m := range stdCfg.ModelList {
 		if m.ModelName == "claude-sonnet-4-20250514" {
 			foundModel = true
-			foundAPIKey = m.APIKey
+			v, err := m.APIKey.Resolve("")
+			if err != nil {
+				t.Fatalf("resolve api key: %v", err)
+			}
+			foundAPIKey = v
 			break
 		}
 	}
@@ -588,8 +592,12 @@ func TestToStandardConfig(t *testing.T) {
 	if !stdCfg.Channels.Telegram.Enabled {
 		t.Error("telegram should be enabled")
 	}
-	if stdCfg.Channels.Telegram.Token != "test-token" {
-		t.Errorf("expected token 'test-token', got '%s'", stdCfg.Channels.Telegram.Token)
+	token, err := stdCfg.Channels.Telegram.Token.Resolve("")
+	if err != nil {
+		t.Fatalf("resolve telegram token: %v", err)
+	}
+	if token != "test-token" {
+		t.Errorf("expected token 'test-token', got '%s'", token)
 	}
 
 	if stdCfg.Gateway.Port != 8080 {

@@ -7,72 +7,30 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"time"
 
 	"github.com/google/uuid"
 
+	coresession "github.com/sipeed/picoclaw/internal/core/session"
 	"github.com/sipeed/picoclaw/pkg/fileutil"
-	"github.com/sipeed/picoclaw/pkg/providers"
 )
 
-type EventType string
+// Type aliases keep existing imports stable while moving canonical session domain
+// types into internal/core.
+type (
+	EventType    = coresession.EventType
+	SessionEvent = coresession.SessionEvent
+	SessionMeta  = coresession.SessionMeta
+)
 
 const (
-	EventSessionMessage       EventType = "session.message"
-	EventSessionSummary       EventType = "session.summary"
-	EventSessionActiveAgent   EventType = "session.active_agent"
-	EventSessionCompactionInc EventType = "session.compaction_inc"
-	EventSessionMemoryFlush   EventType = "session.memory_flush"
-	EventSessionHistorySet    EventType = "session.history_set"
-	EventSessionHistoryTrunc  EventType = "session.history_truncate"
+	EventSessionMessage       EventType = coresession.EventSessionMessage
+	EventSessionSummary       EventType = coresession.EventSessionSummary
+	EventSessionActiveAgent   EventType = coresession.EventSessionActiveAgent
+	EventSessionCompactionInc EventType = coresession.EventSessionCompactionInc
+	EventSessionMemoryFlush   EventType = coresession.EventSessionMemoryFlush
+	EventSessionHistorySet    EventType = coresession.EventSessionHistorySet
+	EventSessionHistoryTrunc  EventType = coresession.EventSessionHistoryTrunc
 )
-
-type SessionEvent struct {
-	Type EventType `json:"type"`
-
-	ID       string `json:"id"`
-	ParentID string `json:"parent_id,omitempty"`
-
-	TS   string `json:"ts"`
-	TSMS int64  `json:"ts_ms"`
-
-	SessionKey string `json:"session_key,omitempty"`
-
-	// Message payload.
-	Message *providers.Message `json:"message,omitempty"`
-
-	// Summary payload.
-	Summary string `json:"summary,omitempty"`
-
-	// Active agent payload (Phase F: Swarm-style handoff persistence).
-	ActiveAgentID string `json:"active_agent_id,omitempty"`
-
-	// State payload.
-	CompactionCount            int       `json:"compaction_count,omitempty"`
-	MemoryFlushAt              time.Time `json:"memory_flush_at,omitempty"`
-	MemoryFlushCompactionCount int       `json:"memory_flush_compaction_count,omitempty"`
-
-	// History ops.
-	KeepLast int                 `json:"keep_last,omitempty"`
-	History  []providers.Message `json:"history,omitempty"`
-}
-
-type SessionMeta struct {
-	Key     string `json:"key"`
-	Summary string `json:"summary,omitempty"`
-	// ActiveAgentID stores the current active agent id for this conversation session.
-	// It is used by Swarm-style `handoff` to persist who should respond next.
-	ActiveAgentID string    `json:"active_agent_id,omitempty"`
-	Created       time.Time `json:"created"`
-	Updated       time.Time `json:"updated"`
-
-	LastEventID string `json:"last_event_id,omitempty"`
-
-	MessagesCount int `json:"messages_count,omitempty"`
-
-	ModelOverride            string `json:"model_override,omitempty"`
-	ModelOverrideExpiresAtMS *int64 `json:"model_override_expires_at_ms,omitempty"`
-}
 
 func newEventID() string { return uuid.NewString() }
 

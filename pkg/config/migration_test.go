@@ -15,7 +15,7 @@ func TestConvertProvidersToModelList_OpenAI(t *testing.T) {
 		Providers: ProvidersConfig{
 			OpenAI: OpenAIProviderConfig{
 				ProviderConfig: ProviderConfig{
-					APIKey:  "sk-test-key",
+					APIKey:  SecretRef{Inline: "sk-test-key"},
 					APIBase: "https://custom.api.com/v1",
 				},
 			},
@@ -34,8 +34,8 @@ func TestConvertProvidersToModelList_OpenAI(t *testing.T) {
 	if result[0].Model != "openai/gpt-5.2" {
 		t.Errorf("Model = %q, want %q", result[0].Model, "openai/gpt-5.2")
 	}
-	if result[0].APIKey != "sk-test-key" {
-		t.Errorf("APIKey = %q, want %q", result[0].APIKey, "sk-test-key")
+	if result[0].APIKey.Inline != "sk-test-key" {
+		t.Errorf("APIKey = %q, want %q", result[0].APIKey.Inline, "sk-test-key")
 	}
 }
 
@@ -43,7 +43,7 @@ func TestConvertProvidersToModelList_Anthropic(t *testing.T) {
 	cfg := &Config{
 		Providers: ProvidersConfig{
 			Anthropic: ProviderConfig{
-				APIKey:  "ant-key",
+				APIKey:  SecretRef{Inline: "ant-key"},
 				APIBase: "https://custom.anthropic.com",
 			},
 		},
@@ -67,7 +67,7 @@ func TestConvertProvidersToModelList_LiteLLM(t *testing.T) {
 	cfg := &Config{
 		Providers: ProvidersConfig{
 			LiteLLM: ProviderConfig{
-				APIKey:  "litellm-key",
+				APIKey:  SecretRef{Inline: "litellm-key"},
 				APIBase: "http://localhost:4000/v1",
 			},
 		},
@@ -93,9 +93,9 @@ func TestConvertProvidersToModelList_LiteLLM(t *testing.T) {
 func TestConvertProvidersToModelList_Multiple(t *testing.T) {
 	cfg := &Config{
 		Providers: ProvidersConfig{
-			OpenAI: OpenAIProviderConfig{ProviderConfig: ProviderConfig{APIKey: "openai-key"}},
-			Groq:   ProviderConfig{APIKey: "groq-key"},
-			Zhipu:  ProviderConfig{APIKey: "zhipu-key"},
+			OpenAI: OpenAIProviderConfig{ProviderConfig: ProviderConfig{APIKey: SecretRef{Inline: "openai-key"}}},
+			Groq:   ProviderConfig{APIKey: SecretRef{Inline: "groq-key"}},
+			Zhipu:  ProviderConfig{APIKey: SecretRef{Inline: "zhipu-key"}},
 		},
 	}
 
@@ -141,25 +141,25 @@ func TestConvertProvidersToModelList_Nil(t *testing.T) {
 func TestConvertProvidersToModelList_AllProviders(t *testing.T) {
 	cfg := &Config{
 		Providers: ProvidersConfig{
-			OpenAI:        OpenAIProviderConfig{ProviderConfig: ProviderConfig{APIKey: "key1"}},
-			LiteLLM:       ProviderConfig{APIKey: "key-litellm", APIBase: "http://localhost:4000/v1"},
-			Anthropic:     ProviderConfig{APIKey: "key2"},
-			OpenRouter:    ProviderConfig{APIKey: "key3"},
-			Groq:          ProviderConfig{APIKey: "key4"},
-			Zhipu:         ProviderConfig{APIKey: "key5"},
-			VLLM:          ProviderConfig{APIKey: "key6"},
-			Gemini:        ProviderConfig{APIKey: "key7"},
-			Nvidia:        ProviderConfig{APIKey: "key8"},
-			Ollama:        ProviderConfig{APIKey: "key9"},
-			Moonshot:      ProviderConfig{APIKey: "key10"},
-			ShengSuanYun:  ProviderConfig{APIKey: "key11"},
-			DeepSeek:      ProviderConfig{APIKey: "key12"},
-			Cerebras:      ProviderConfig{APIKey: "key13"},
-			VolcEngine:    ProviderConfig{APIKey: "key14"},
+			OpenAI:        OpenAIProviderConfig{ProviderConfig: ProviderConfig{APIKey: SecretRef{Inline: "key1"}}},
+			LiteLLM:       ProviderConfig{APIKey: SecretRef{Inline: "key-litellm"}, APIBase: "http://localhost:4000/v1"},
+			Anthropic:     ProviderConfig{APIKey: SecretRef{Inline: "key2"}},
+			OpenRouter:    ProviderConfig{APIKey: SecretRef{Inline: "key3"}},
+			Groq:          ProviderConfig{APIKey: SecretRef{Inline: "key4"}},
+			Zhipu:         ProviderConfig{APIKey: SecretRef{Inline: "key5"}},
+			VLLM:          ProviderConfig{APIKey: SecretRef{Inline: "key6"}},
+			Gemini:        ProviderConfig{APIKey: SecretRef{Inline: "key7"}},
+			Nvidia:        ProviderConfig{APIKey: SecretRef{Inline: "key8"}},
+			Ollama:        ProviderConfig{APIKey: SecretRef{Inline: "key9"}},
+			Moonshot:      ProviderConfig{APIKey: SecretRef{Inline: "key10"}},
+			ShengSuanYun:  ProviderConfig{APIKey: SecretRef{Inline: "key11"}},
+			DeepSeek:      ProviderConfig{APIKey: SecretRef{Inline: "key12"}},
+			Cerebras:      ProviderConfig{APIKey: SecretRef{Inline: "key13"}},
+			VolcEngine:    ProviderConfig{APIKey: SecretRef{Inline: "key14"}},
 			GitHubCopilot: ProviderConfig{ConnectMode: "grpc"},
 			Antigravity:   ProviderConfig{AuthMethod: "oauth"},
-			Qwen:          ProviderConfig{APIKey: "key17"},
-			Mistral:       ProviderConfig{APIKey: "key18"},
+			Qwen:          ProviderConfig{APIKey: SecretRef{Inline: "key17"}},
+			Mistral:       ProviderConfig{APIKey: SecretRef{Inline: "key18"}},
 		},
 	}
 
@@ -176,7 +176,7 @@ func TestConvertProvidersToModelList_Proxy(t *testing.T) {
 		Providers: ProvidersConfig{
 			OpenAI: OpenAIProviderConfig{
 				ProviderConfig: ProviderConfig{
-					APIKey: "key",
+					APIKey: SecretRef{Inline: "key"},
 					Proxy:  "http://proxy:8080",
 				},
 			},
@@ -198,7 +198,7 @@ func TestConvertProvidersToModelList_RequestTimeout(t *testing.T) {
 	cfg := &Config{
 		Providers: ProvidersConfig{
 			Ollama: ProviderConfig{
-				APIKey:         "ollama-key",
+				APIKey:         SecretRef{Inline: "ollama-key"},
 				RequestTimeout: 300,
 			},
 		},
@@ -244,7 +244,7 @@ func TestConvertProvidersToModelList_PreservesUserModel_DeepSeek(t *testing.T) {
 			},
 		},
 		Providers: ProvidersConfig{
-			DeepSeek: ProviderConfig{APIKey: "sk-deepseek"},
+			DeepSeek: ProviderConfig{APIKey: SecretRef{Inline: "sk-deepseek"}},
 		},
 	}
 
@@ -269,7 +269,7 @@ func TestConvertProvidersToModelList_PreservesUserModel_OpenAI(t *testing.T) {
 			},
 		},
 		Providers: ProvidersConfig{
-			OpenAI: OpenAIProviderConfig{ProviderConfig: ProviderConfig{APIKey: "sk-openai"}},
+			OpenAI: OpenAIProviderConfig{ProviderConfig: ProviderConfig{APIKey: SecretRef{Inline: "sk-openai"}}},
 		},
 	}
 
@@ -293,7 +293,7 @@ func TestConvertProvidersToModelList_PreservesUserModel_Anthropic(t *testing.T) 
 			},
 		},
 		Providers: ProvidersConfig{
-			Anthropic: ProviderConfig{APIKey: "sk-ant"},
+			Anthropic: ProviderConfig{APIKey: SecretRef{Inline: "sk-ant"}},
 		},
 	}
 
@@ -317,7 +317,7 @@ func TestConvertProvidersToModelList_PreservesUserModel_Qwen(t *testing.T) {
 			},
 		},
 		Providers: ProvidersConfig{
-			Qwen: ProviderConfig{APIKey: "sk-qwen"},
+			Qwen: ProviderConfig{APIKey: SecretRef{Inline: "sk-qwen"}},
 		},
 	}
 
@@ -341,7 +341,7 @@ func TestConvertProvidersToModelList_UsesDefaultWhenNoUserModel(t *testing.T) {
 			},
 		},
 		Providers: ProvidersConfig{
-			DeepSeek: ProviderConfig{APIKey: "sk-deepseek"},
+			DeepSeek: ProviderConfig{APIKey: SecretRef{Inline: "sk-deepseek"}},
 		},
 	}
 
@@ -366,8 +366,8 @@ func TestConvertProvidersToModelList_MultipleProviders_PreservesUserModel(t *tes
 			},
 		},
 		Providers: ProvidersConfig{
-			OpenAI:   OpenAIProviderConfig{ProviderConfig: ProviderConfig{APIKey: "sk-openai"}},
-			DeepSeek: ProviderConfig{APIKey: "sk-deepseek"},
+			OpenAI:   OpenAIProviderConfig{ProviderConfig: ProviderConfig{APIKey: SecretRef{Inline: "sk-openai"}}},
+			DeepSeek: ProviderConfig{APIKey: SecretRef{Inline: "sk-deepseek"}},
 		},
 	}
 
@@ -398,11 +398,11 @@ func TestConvertProvidersToModelList_ProviderNameAliases(t *testing.T) {
 		expectedModel string
 		provider      ProviderConfig
 	}{
-		{"gpt", "openai/gpt-4-custom", ProviderConfig{APIKey: "key"}},
-		{"claude", "anthropic/claude-custom", ProviderConfig{APIKey: "key"}},
-		{"doubao", "volcengine/doubao-custom", ProviderConfig{APIKey: "key"}},
-		{"tongyi", "qwen/qwen-custom", ProviderConfig{APIKey: "key"}},
-		{"kimi", "moonshot/kimi-custom", ProviderConfig{APIKey: "key"}},
+		{"gpt", "openai/gpt-4-custom", ProviderConfig{APIKey: SecretRef{Inline: "key"}}},
+		{"claude", "anthropic/claude-custom", ProviderConfig{APIKey: SecretRef{Inline: "key"}}},
+		{"doubao", "volcengine/doubao-custom", ProviderConfig{APIKey: SecretRef{Inline: "key"}}},
+		{"tongyi", "qwen/qwen-custom", ProviderConfig{APIKey: SecretRef{Inline: "key"}}},
+		{"kimi", "moonshot/kimi-custom", ProviderConfig{APIKey: SecretRef{Inline: "key"}}},
 	}
 
 	for _, tt := range tests {
@@ -470,7 +470,7 @@ func TestConvertProvidersToModelList_NoProviderField_SingleProvider(t *testing.T
 			},
 		},
 		Providers: ProvidersConfig{
-			Zhipu: ProviderConfig{APIKey: "test-zhipu-key"},
+			Zhipu: ProviderConfig{APIKey: SecretRef{Inline: "test-zhipu-key"}},
 		},
 	}
 
@@ -503,8 +503,8 @@ func TestConvertProvidersToModelList_NoProviderField_MultipleProviders(t *testin
 			},
 		},
 		Providers: ProvidersConfig{
-			OpenAI: OpenAIProviderConfig{ProviderConfig: ProviderConfig{APIKey: "openai-key"}},
-			Zhipu:  ProviderConfig{APIKey: "zhipu-key"},
+			OpenAI: OpenAIProviderConfig{ProviderConfig: ProviderConfig{APIKey: SecretRef{Inline: "openai-key"}}},
+			Zhipu:  ProviderConfig{APIKey: SecretRef{Inline: "zhipu-key"}},
 		},
 	}
 
@@ -536,7 +536,7 @@ func TestConvertProvidersToModelList_NoProviderField_NoModel(t *testing.T) {
 			},
 		},
 		Providers: ProvidersConfig{
-			Zhipu: ProviderConfig{APIKey: "zhipu-key"},
+			Zhipu: ProviderConfig{APIKey: SecretRef{Inline: "zhipu-key"}},
 		},
 	}
 
@@ -589,7 +589,7 @@ func TestConvertProvidersToModelList_LegacyModelWithProtocolPrefix(t *testing.T)
 			},
 		},
 		Providers: ProvidersConfig{
-			OpenRouter: ProviderConfig{APIKey: "sk-or-test"},
+			OpenRouter: ProviderConfig{APIKey: SecretRef{Inline: "sk-or-test"}},
 		},
 	}
 

@@ -28,6 +28,9 @@ type WeComBotChannel struct {
 	ctx           context.Context
 	cancel        context.CancelFunc
 	processedMsgs *MessageDeduplicator
+
+	token  string
+	aesKey string
 }
 
 // WeComBotMessage represents the JSON message structure from WeCom Bot (AIBOT)
@@ -82,8 +85,32 @@ type WeComBotReplyMessage struct {
 
 // NewWeComBotChannel creates a new WeCom Bot channel instance
 func NewWeComBotChannel(cfg config.WeComConfig, messageBus *bus.MessageBus) (*WeComBotChannel, error) {
-	if cfg.Token == "" || cfg.WebhookURL == "" {
+	if !cfg.Token.Present() || cfg.WebhookURL == "" {
 		return nil, fmt.Errorf("wecom token and webhook_url are required")
+	}
+
+	token, err := cfg.Token.Resolve("")
+	if err != nil {
+		return nil, fmt.Errorf("resolve wecom token: %w", err)
+	}
+
+	aesKey := ""
+	if cfg.EncodingAESKey.Present() {
+		v, err := cfg.EncodingAESKey.Resolve("")
+		if err != nil {
+			return nil, fmt.Errorf("resolve wecom encoding_aes_key: %w", err)
+		}
+		aesKey = v
+	}
+
+	token = strings.TrimSpace(token)
+	aesKey = strings.TrimSpace(aesKey)
+	if token == "" {
+		return nil, fmt.Errorf("wecom token must be non-empty")
+	}
+	// Allow encoding_aes_key to be unset (no encryption). When set, it must be non-empty.
+	if cfg.EncodingAESKey.Present() && aesKey == "" {
+		return nil, fmt.Errorf("wecom encoding_aes_key must be non-empty when set")
 	}
 
 	base := channels.NewBaseChannel("wecom", cfg, messageBus, cfg.AllowFrom,
@@ -107,6 +134,8 @@ func NewWeComBotChannel(cfg config.WeComConfig, messageBus *bus.MessageBus) (*We
 		ctx:           ctx,
 		cancel:        cancel,
 		processedMsgs: NewMessageDeduplicator(wecomMaxProcessedMessages),
+		token:         token,
+		aesKey:        aesKey,
 	}, nil
 }
 
@@ -216,7 +245,7 @@ func (c *WeComBotChannel) handleVerification(ctx context.Context, w http.Respons
 	}
 
 	// Verify signature
-	if !verifySignature(c.config.Token, msgSignature, timestamp, nonce, echostr) {
+	if !verifySignature(c.token, msgSignature, timestamp, nonce, echostr) {
 		logger.WarnC("wecom", "Signature verification failed")
 		http.Error(w, "Invalid signature", http.StatusForbidden)
 		return
@@ -225,7 +254,7 @@ func (c *WeComBotChannel) handleVerification(ctx context.Context, w http.Respons
 	// Decrypt echostr
 	// For AIBOT (智能机器人), receiveid should be empty string ""
 	// Reference: https://developer.work.weixin.qq.com/document/path/101033
-	decryptedEchoStr, err := decryptMessageWithVerify(echostr, c.config.EncodingAESKey, "")
+	decryptedEchoStr, err := decryptMessageWithVerify(echostr, c.aesKey, "")
 	if err != nil {
 		logger.ErrorCF("wecom", "Failed to decrypt echostr", map[string]any{
 			"error": err.Error(),
@@ -278,7 +307,7 @@ func (c *WeComBotChannel) handleMessageCallback(ctx context.Context, w http.Resp
 	}
 
 	// Verify signature
-	if !verifySignature(c.config.Token, msgSignature, timestamp, nonce, encryptedMsg.Encrypt) {
+	if !verifySignature(c.token, msgSignature, timestamp, nonce, encryptedMsg.Encrypt) {
 		logger.WarnC("wecom", "Message signature verification failed")
 		http.Error(w, "Invalid signature", http.StatusForbidden)
 		return
@@ -287,7 +316,7 @@ func (c *WeComBotChannel) handleMessageCallback(ctx context.Context, w http.Resp
 	// Decrypt message
 	// For AIBOT (智能机器人), receiveid should be empty string ""
 	// Reference: https://developer.work.weixin.qq.com/document/path/101033
-	decryptedMsg, err := decryptMessageWithVerify(encryptedMsg.Encrypt, c.config.EncodingAESKey, "")
+	decryptedMsg, err := decryptMessageWithVerify(encryptedMsg.Encrypt, c.aesKey, "")
 	if err != nil {
 		logger.ErrorCF("wecom", "Failed to decrypt message", map[string]any{
 			"error": err.Error(),

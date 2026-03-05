@@ -152,7 +152,7 @@ func (h *SecurityHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 		resp.Gateway.Host = strings.TrimSpace(cfg.Gateway.Host)
 		resp.Gateway.Port = cfg.Gateway.Port
-		resp.Gateway.APIKeySet = strings.TrimSpace(cfg.Gateway.APIKey) != ""
+		resp.Gateway.APIKeySet = cfg.Gateway.APIKey.Present()
 		resp.Gateway.PublicBind = !isLoopbackHost(resp.Gateway.Host)
 
 		resp.Sandbox.RestrictToWorkspace = cfg.Agents.Defaults.RestrictToWorkspace

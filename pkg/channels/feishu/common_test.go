@@ -2,6 +2,7 @@ package feishu
 
 import (
 	"encoding/json"
+	"net/url"
 	"testing"
 
 	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
@@ -286,6 +287,29 @@ func TestStripMentionPlaceholders(t *testing.T) {
 			got := stripMentionPlaceholders(tt.content, tt.mentions)
 			if got != tt.want {
 				t.Errorf("stripMentionPlaceholders(%q, ...) = %q, want %q", tt.content, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestSanitizeFeishuUploadFilename(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{name: "empty", in: "", want: "file"},
+		{name: "ascii", in: "report-final.pdf", want: "report-final.pdf"},
+		{name: "path separators", in: "a/b\\c.txt", want: "a_b_c.txt"},
+		{name: "control chars dropped", in: "a\u0007b.txt", want: "ab.txt"},
+		{name: "non-ascii encoded", in: "报告(最终).pdf", want: url.PathEscape("报告(最终).pdf")},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := sanitizeFeishuUploadFilename(tt.in)
+			if got != tt.want {
+				t.Fatalf("sanitizeFeishuUploadFilename(%q) = %q, want %q", tt.in, got, tt.want)
 			}
 		})
 	}

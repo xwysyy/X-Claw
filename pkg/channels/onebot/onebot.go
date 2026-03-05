@@ -24,6 +24,7 @@ import (
 type OneBotChannel struct {
 	*channels.BaseChannel
 	config        config.OneBotConfig
+	accessToken   string
 	conn          *websocket.Conn
 	ctx           context.Context
 	cancel        context.CancelFunc
@@ -97,6 +98,15 @@ type oneBotMessageSegment struct {
 }
 
 func NewOneBotChannel(cfg config.OneBotConfig, messageBus *bus.MessageBus) (*OneBotChannel, error) {
+	accessToken := ""
+	if cfg.AccessToken.Present() {
+		v, err := cfg.AccessToken.Resolve("")
+		if err != nil {
+			return nil, fmt.Errorf("resolve onebot access_token: %w", err)
+		}
+		accessToken = strings.TrimSpace(v)
+	}
+
 	base := channels.NewBaseChannel("onebot", cfg, messageBus, cfg.AllowFrom,
 		channels.WithGroupTrigger(cfg.GroupTrigger),
 		channels.WithPlaceholder(cfg.Placeholder),
@@ -107,6 +117,7 @@ func NewOneBotChannel(cfg config.OneBotConfig, messageBus *bus.MessageBus) (*One
 	return &OneBotChannel{
 		BaseChannel: base,
 		config:      cfg,
+		accessToken: accessToken,
 		dedup:       make(map[string]struct{}, dedupSize),
 		dedupRing:   make([]string, dedupSize),
 		dedupIdx:    0,
@@ -185,8 +196,8 @@ func (c *OneBotChannel) connect() error {
 	dialer.HandshakeTimeout = 10 * time.Second
 
 	header := make(map[string][]string)
-	if c.config.AccessToken != "" {
-		header["Authorization"] = []string{"Bearer " + c.config.AccessToken}
+	if strings.TrimSpace(c.accessToken) != "" {
+		header["Authorization"] = []string{"Bearer " + strings.TrimSpace(c.accessToken)}
 	}
 
 	conn, resp, err := dialer.Dial(c.config.WSUrl, header)

@@ -66,6 +66,15 @@ func CreateProviderFromConfig(cfg *config.ModelConfig) (LLMProvider, string, err
 
 	protocol, modelID := ExtractProtocol(cfg.Model)
 
+	apiKey := ""
+	if cfg.APIKey.Present() {
+		v, err := cfg.APIKey.Resolve("")
+		if err != nil {
+			return nil, "", fmt.Errorf("resolve api_key for model %q: %w", strings.TrimSpace(cfg.ModelName), err)
+		}
+		apiKey = v
+	}
+
 	switch protocol {
 	case "openai":
 		// OpenAI with OAuth/token auth (Codex-style)
@@ -77,7 +86,7 @@ func CreateProviderFromConfig(cfg *config.ModelConfig) (LLMProvider, string, err
 			return provider, modelID, nil
 		}
 		// OpenAI with API key
-		if cfg.APIKey == "" && cfg.APIBase == "" {
+		if apiKey == "" && cfg.APIBase == "" {
 			return nil, "", fmt.Errorf("api_key or api_base is required for HTTP-based protocol %q", protocol)
 		}
 		apiBase := cfg.APIBase
@@ -85,7 +94,7 @@ func CreateProviderFromConfig(cfg *config.ModelConfig) (LLMProvider, string, err
 			apiBase = getDefaultAPIBase(protocol)
 		}
 		return NewHTTPProviderWithMaxTokensFieldAndRequestTimeout(
-			cfg.APIKey,
+			apiKey,
 			apiBase,
 			cfg.Proxy,
 			cfg.MaxTokensField,
@@ -96,7 +105,7 @@ func CreateProviderFromConfig(cfg *config.ModelConfig) (LLMProvider, string, err
 		"ollama", "moonshot", "shengsuanyun", "deepseek", "cerebras",
 		"volcengine", "vllm", "qwen", "mistral":
 		// All other OpenAI-compatible HTTP providers
-		if cfg.APIKey == "" && cfg.APIBase == "" {
+		if apiKey == "" && cfg.APIBase == "" {
 			return nil, "", fmt.Errorf("api_key or api_base is required for HTTP-based protocol %q", protocol)
 		}
 		apiBase := cfg.APIBase
@@ -104,7 +113,7 @@ func CreateProviderFromConfig(cfg *config.ModelConfig) (LLMProvider, string, err
 			apiBase = getDefaultAPIBase(protocol)
 		}
 		return NewHTTPProviderWithMaxTokensFieldAndRequestTimeout(
-			cfg.APIKey,
+			apiKey,
 			apiBase,
 			cfg.Proxy,
 			cfg.MaxTokensField,
@@ -125,11 +134,11 @@ func CreateProviderFromConfig(cfg *config.ModelConfig) (LLMProvider, string, err
 		if apiBase == "" {
 			apiBase = "https://api.anthropic.com/v1"
 		}
-		if cfg.APIKey == "" {
+		if apiKey == "" {
 			return nil, "", fmt.Errorf("api_key is required for anthropic protocol (model: %s)", cfg.Model)
 		}
 		return NewHTTPProviderWithMaxTokensFieldAndRequestTimeout(
-			cfg.APIKey,
+			apiKey,
 			apiBase,
 			cfg.Proxy,
 			cfg.MaxTokensField,

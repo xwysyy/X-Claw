@@ -27,6 +27,7 @@ type SessionKeyParams struct {
 	Channel       string
 	AccountID     string
 	Peer          *RoutePeer
+	ThreadID      string // optional: thread/topic identifier (Telegram forum topic, Slack thread, etc)
 	DMScope       DMScope
 	IdentityLinks map[string][]string
 }
@@ -105,7 +106,11 @@ func BuildAgentPeerSessionKey(params SessionKeyParams) string {
 	if peerID == "" {
 		peerID = "unknown"
 	}
-	return fmt.Sprintf("agent:%s:%s:%s:%s", agentID, channel, peerKind, peerID)
+	key := fmt.Sprintf("agent:%s:%s:%s:%s", agentID, channel, peerKind, peerID)
+	if threadID := strings.ToLower(strings.TrimSpace(params.ThreadID)); threadID != "" {
+		key += ":thread:" + threadID
+	}
+	return key
 }
 
 // BuildConversationPeerSessionKey constructs a session key based on channel, peer, and DM scope,
@@ -170,7 +175,11 @@ func BuildConversationPeerSessionKey(params SessionKeyParams) string {
 	if peerID == "" {
 		peerID = "unknown"
 	}
-	return fmt.Sprintf("conv:%s:%s:%s", channel, peerKind, peerID)
+	key := fmt.Sprintf("conv:%s:%s:%s", channel, peerKind, peerID)
+	if threadID := strings.ToLower(strings.TrimSpace(params.ThreadID)); threadID != "" {
+		key += ":thread:" + threadID
+	}
+	return key
 }
 
 // ParseAgentSessionKey extracts agentId and rest from "agent:<agentId>:<rest>".

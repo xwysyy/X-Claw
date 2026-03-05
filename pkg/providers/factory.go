@@ -37,13 +37,22 @@ type providerSelection struct {
 
 // applyProviderConfig copies the standard provider config fields into the selection.
 // If the resolved apiBase is empty, defaultBase is used as fallback.
-func applyProviderConfig(sel *providerSelection, pc config.ProviderConfig, defaultBase string) {
-	sel.apiKey = pc.APIKey
+func applyProviderConfig(sel *providerSelection, pc config.ProviderConfig, defaultBase string) error {
+	key := ""
+	if pc.APIKey.Present() {
+		v, err := pc.APIKey.Resolve("")
+		if err != nil {
+			return err
+		}
+		key = v
+	}
+	sel.apiKey = key
 	sel.apiBase = pc.APIBase
 	sel.proxy = pc.Proxy
 	if sel.apiBase == "" && defaultBase != "" {
 		sel.apiBase = defaultBase
 	}
+	return nil
 }
 
 func resolveProviderSelection(cfg *config.Config) (providerSelection, error) {
@@ -60,11 +69,13 @@ func resolveProviderSelection(cfg *config.Config) (providerSelection, error) {
 	if providerName != "" {
 		switch providerName {
 		case "groq":
-			if cfg.Providers.Groq.APIKey != "" {
-				applyProviderConfig(&sel, cfg.Providers.Groq, "https://api.groq.com/openai/v1")
+			if cfg.Providers.Groq.APIKey.Present() {
+				if err := applyProviderConfig(&sel, cfg.Providers.Groq, "https://api.groq.com/openai/v1"); err != nil {
+					return providerSelection{}, err
+				}
 			}
 		case "openai", "gpt":
-			if cfg.Providers.OpenAI.APIKey != "" || cfg.Providers.OpenAI.AuthMethod != "" {
+			if cfg.Providers.OpenAI.APIKey.Present() || cfg.Providers.OpenAI.AuthMethod != "" {
 				sel.enableWebSearch = cfg.Providers.OpenAI.WebSearch
 				if cfg.Providers.OpenAI.AuthMethod == "codex-cli" {
 					sel.providerType = providerTypeCodexCLIToken
@@ -74,10 +85,12 @@ func resolveProviderSelection(cfg *config.Config) (providerSelection, error) {
 					sel.providerType = providerTypeCodexAuth
 					return sel, nil
 				}
-				applyProviderConfig(&sel, cfg.Providers.OpenAI.ProviderConfig, "https://api.openai.com/v1")
+				if err := applyProviderConfig(&sel, cfg.Providers.OpenAI.ProviderConfig, "https://api.openai.com/v1"); err != nil {
+					return providerSelection{}, err
+				}
 			}
 		case "anthropic", "claude":
-			if cfg.Providers.Anthropic.APIKey != "" || cfg.Providers.Anthropic.AuthMethod != "" {
+			if cfg.Providers.Anthropic.APIKey.Present() || cfg.Providers.Anthropic.AuthMethod != "" {
 				if cfg.Providers.Anthropic.AuthMethod == "oauth" || cfg.Providers.Anthropic.AuthMethod == "token" {
 					sel.apiBase = cfg.Providers.Anthropic.APIBase
 					if sel.apiBase == "" {
@@ -86,15 +99,25 @@ func resolveProviderSelection(cfg *config.Config) (providerSelection, error) {
 					sel.providerType = providerTypeClaudeAuth
 					return sel, nil
 				}
-				applyProviderConfig(&sel, cfg.Providers.Anthropic, defaultAnthropicAPIBase)
+				if err := applyProviderConfig(&sel, cfg.Providers.Anthropic, defaultAnthropicAPIBase); err != nil {
+					return providerSelection{}, err
+				}
 			}
 		case "openrouter":
-			if cfg.Providers.OpenRouter.APIKey != "" {
-				applyProviderConfig(&sel, cfg.Providers.OpenRouter, "https://openrouter.ai/api/v1")
+			if cfg.Providers.OpenRouter.APIKey.Present() {
+				if err := applyProviderConfig(&sel, cfg.Providers.OpenRouter, "https://openrouter.ai/api/v1"); err != nil {
+					return providerSelection{}, err
+				}
 			}
 		case "litellm":
-			if cfg.Providers.LiteLLM.APIKey != "" || cfg.Providers.LiteLLM.APIBase != "" {
-				sel.apiKey = cfg.Providers.LiteLLM.APIKey
+			if cfg.Providers.LiteLLM.APIKey.Present() || cfg.Providers.LiteLLM.APIBase != "" {
+				if cfg.Providers.LiteLLM.APIKey.Present() {
+					v, err := cfg.Providers.LiteLLM.APIKey.Resolve("")
+					if err != nil {
+						return providerSelection{}, err
+					}
+					sel.apiKey = v
+				}
 				sel.apiBase = cfg.Providers.LiteLLM.APIBase
 				sel.proxy = cfg.Providers.LiteLLM.Proxy
 				if sel.apiBase == "" {
@@ -102,24 +125,34 @@ func resolveProviderSelection(cfg *config.Config) (providerSelection, error) {
 				}
 			}
 		case "zhipu", "glm":
-			if cfg.Providers.Zhipu.APIKey != "" {
-				applyProviderConfig(&sel, cfg.Providers.Zhipu, "https://open.bigmodel.cn/api/paas/v4")
+			if cfg.Providers.Zhipu.APIKey.Present() {
+				if err := applyProviderConfig(&sel, cfg.Providers.Zhipu, "https://open.bigmodel.cn/api/paas/v4"); err != nil {
+					return providerSelection{}, err
+				}
 			}
 		case "gemini", "google":
-			if cfg.Providers.Gemini.APIKey != "" {
-				applyProviderConfig(&sel, cfg.Providers.Gemini, "https://generativelanguage.googleapis.com/v1beta")
+			if cfg.Providers.Gemini.APIKey.Present() {
+				if err := applyProviderConfig(&sel, cfg.Providers.Gemini, "https://generativelanguage.googleapis.com/v1beta"); err != nil {
+					return providerSelection{}, err
+				}
 			}
 		case "vllm":
 			if cfg.Providers.VLLM.APIBase != "" {
-				applyProviderConfig(&sel, cfg.Providers.VLLM, "")
+				if err := applyProviderConfig(&sel, cfg.Providers.VLLM, ""); err != nil {
+					return providerSelection{}, err
+				}
 			}
 		case "shengsuanyun":
-			if cfg.Providers.ShengSuanYun.APIKey != "" {
-				applyProviderConfig(&sel, cfg.Providers.ShengSuanYun, "https://router.shengsuanyun.com/api/v1")
+			if cfg.Providers.ShengSuanYun.APIKey.Present() {
+				if err := applyProviderConfig(&sel, cfg.Providers.ShengSuanYun, "https://router.shengsuanyun.com/api/v1"); err != nil {
+					return providerSelection{}, err
+				}
 			}
 		case "nvidia":
-			if cfg.Providers.Nvidia.APIKey != "" {
-				applyProviderConfig(&sel, cfg.Providers.Nvidia, "https://integrate.api.nvidia.com/v1")
+			if cfg.Providers.Nvidia.APIKey.Present() {
+				if err := applyProviderConfig(&sel, cfg.Providers.Nvidia, "https://integrate.api.nvidia.com/v1"); err != nil {
+					return providerSelection{}, err
+				}
 			}
 		case "claude-cli", "claude-code", "claudecode":
 			workspace := cfg.WorkspacePath()
@@ -138,15 +171,19 @@ func resolveProviderSelection(cfg *config.Config) (providerSelection, error) {
 			sel.workspace = workspace
 			return sel, nil
 		case "deepseek":
-			if cfg.Providers.DeepSeek.APIKey != "" {
-				applyProviderConfig(&sel, cfg.Providers.DeepSeek, "https://api.deepseek.com/v1")
+			if cfg.Providers.DeepSeek.APIKey.Present() {
+				if err := applyProviderConfig(&sel, cfg.Providers.DeepSeek, "https://api.deepseek.com/v1"); err != nil {
+					return providerSelection{}, err
+				}
 				if model != "deepseek-chat" && model != "deepseek-reasoner" {
 					sel.model = "deepseek-chat"
 				}
 			}
 		case "mistral":
-			if cfg.Providers.Mistral.APIKey != "" {
-				applyProviderConfig(&sel, cfg.Providers.Mistral, "https://api.mistral.ai/v1")
+			if cfg.Providers.Mistral.APIKey.Present() {
+				if err := applyProviderConfig(&sel, cfg.Providers.Mistral, "https://api.mistral.ai/v1"); err != nil {
+					return providerSelection{}, err
+				}
 			}
 		case "github_copilot", "copilot":
 			sel.providerType = providerTypeGitHubCopilot
@@ -163,8 +200,10 @@ func resolveProviderSelection(cfg *config.Config) (providerSelection, error) {
 	// Fallback: infer provider from model and configured keys.
 	if sel.apiKey == "" && sel.apiBase == "" {
 		switch {
-		case (strings.Contains(lowerModel, "kimi") || strings.Contains(lowerModel, "moonshot") || strings.HasPrefix(model, "moonshot/")) && cfg.Providers.Moonshot.APIKey != "":
-			applyProviderConfig(&sel, cfg.Providers.Moonshot, "https://api.moonshot.cn/v1")
+		case (strings.Contains(lowerModel, "kimi") || strings.Contains(lowerModel, "moonshot") || strings.HasPrefix(model, "moonshot/")) && cfg.Providers.Moonshot.APIKey.Present():
+			if err := applyProviderConfig(&sel, cfg.Providers.Moonshot, "https://api.moonshot.cn/v1"); err != nil {
+				return providerSelection{}, err
+			}
 		case strings.HasPrefix(model, "openrouter/") ||
 			strings.HasPrefix(model, "anthropic/") ||
 			strings.HasPrefix(model, "openai/") ||
@@ -173,7 +212,7 @@ func resolveProviderSelection(cfg *config.Config) (providerSelection, error) {
 			strings.HasPrefix(model, "google/"):
 			applyProviderConfig(&sel, cfg.Providers.OpenRouter, "https://openrouter.ai/api/v1")
 		case (strings.Contains(lowerModel, "claude") || strings.HasPrefix(model, "anthropic/")) &&
-			(cfg.Providers.Anthropic.APIKey != "" || cfg.Providers.Anthropic.AuthMethod != ""):
+			(cfg.Providers.Anthropic.APIKey.Present() || cfg.Providers.Anthropic.AuthMethod != ""):
 			if cfg.Providers.Anthropic.AuthMethod == "oauth" || cfg.Providers.Anthropic.AuthMethod == "token" {
 				sel.apiBase = cfg.Providers.Anthropic.APIBase
 				if sel.apiBase == "" {
@@ -182,9 +221,11 @@ func resolveProviderSelection(cfg *config.Config) (providerSelection, error) {
 				sel.providerType = providerTypeClaudeAuth
 				return sel, nil
 			}
-			applyProviderConfig(&sel, cfg.Providers.Anthropic, defaultAnthropicAPIBase)
+			if err := applyProviderConfig(&sel, cfg.Providers.Anthropic, defaultAnthropicAPIBase); err != nil {
+				return providerSelection{}, err
+			}
 		case (strings.Contains(lowerModel, "gpt") || strings.HasPrefix(model, "openai/")) &&
-			(cfg.Providers.OpenAI.APIKey != "" || cfg.Providers.OpenAI.AuthMethod != ""):
+			(cfg.Providers.OpenAI.APIKey.Present() || cfg.Providers.OpenAI.AuthMethod != ""):
 			sel.enableWebSearch = cfg.Providers.OpenAI.WebSearch
 			if cfg.Providers.OpenAI.AuthMethod == "codex-cli" {
 				sel.providerType = providerTypeCodexCLIToken
@@ -194,24 +235,42 @@ func resolveProviderSelection(cfg *config.Config) (providerSelection, error) {
 				sel.providerType = providerTypeCodexAuth
 				return sel, nil
 			}
-			applyProviderConfig(&sel, cfg.Providers.OpenAI.ProviderConfig, "https://api.openai.com/v1")
-		case (strings.Contains(lowerModel, "gemini") || strings.HasPrefix(model, "google/")) && cfg.Providers.Gemini.APIKey != "":
-			applyProviderConfig(&sel, cfg.Providers.Gemini, "https://generativelanguage.googleapis.com/v1beta")
-		case (strings.Contains(lowerModel, "glm") || strings.Contains(lowerModel, "zhipu") || strings.Contains(lowerModel, "zai")) && cfg.Providers.Zhipu.APIKey != "":
-			applyProviderConfig(&sel, cfg.Providers.Zhipu, "https://open.bigmodel.cn/api/paas/v4")
-		case (strings.Contains(lowerModel, "groq") || strings.HasPrefix(model, "groq/")) && cfg.Providers.Groq.APIKey != "":
-			applyProviderConfig(&sel, cfg.Providers.Groq, "https://api.groq.com/openai/v1")
-		case (strings.Contains(lowerModel, "nvidia") || strings.HasPrefix(model, "nvidia/")) && cfg.Providers.Nvidia.APIKey != "":
-			applyProviderConfig(&sel, cfg.Providers.Nvidia, "https://integrate.api.nvidia.com/v1")
-		case (strings.Contains(lowerModel, "ollama") || strings.HasPrefix(model, "ollama/")) && cfg.Providers.Ollama.APIKey != "":
-			applyProviderConfig(&sel, cfg.Providers.Ollama, "http://localhost:11434/v1")
-		case (strings.Contains(lowerModel, "mistral") || strings.HasPrefix(model, "mistral/")) && cfg.Providers.Mistral.APIKey != "":
-			applyProviderConfig(&sel, cfg.Providers.Mistral, "https://api.mistral.ai/v1")
+			if err := applyProviderConfig(&sel, cfg.Providers.OpenAI.ProviderConfig, "https://api.openai.com/v1"); err != nil {
+				return providerSelection{}, err
+			}
+		case (strings.Contains(lowerModel, "gemini") || strings.HasPrefix(model, "google/")) && cfg.Providers.Gemini.APIKey.Present():
+			if err := applyProviderConfig(&sel, cfg.Providers.Gemini, "https://generativelanguage.googleapis.com/v1beta"); err != nil {
+				return providerSelection{}, err
+			}
+		case (strings.Contains(lowerModel, "glm") || strings.Contains(lowerModel, "zhipu") || strings.Contains(lowerModel, "zai")) && cfg.Providers.Zhipu.APIKey.Present():
+			if err := applyProviderConfig(&sel, cfg.Providers.Zhipu, "https://open.bigmodel.cn/api/paas/v4"); err != nil {
+				return providerSelection{}, err
+			}
+		case (strings.Contains(lowerModel, "groq") || strings.HasPrefix(model, "groq/")) && cfg.Providers.Groq.APIKey.Present():
+			if err := applyProviderConfig(&sel, cfg.Providers.Groq, "https://api.groq.com/openai/v1"); err != nil {
+				return providerSelection{}, err
+			}
+		case (strings.Contains(lowerModel, "nvidia") || strings.HasPrefix(model, "nvidia/")) && cfg.Providers.Nvidia.APIKey.Present():
+			if err := applyProviderConfig(&sel, cfg.Providers.Nvidia, "https://integrate.api.nvidia.com/v1"); err != nil {
+				return providerSelection{}, err
+			}
+		case (strings.Contains(lowerModel, "ollama") || strings.HasPrefix(model, "ollama/")) && cfg.Providers.Ollama.APIKey.Present():
+			if err := applyProviderConfig(&sel, cfg.Providers.Ollama, "http://localhost:11434/v1"); err != nil {
+				return providerSelection{}, err
+			}
+		case (strings.Contains(lowerModel, "mistral") || strings.HasPrefix(model, "mistral/")) && cfg.Providers.Mistral.APIKey.Present():
+			if err := applyProviderConfig(&sel, cfg.Providers.Mistral, "https://api.mistral.ai/v1"); err != nil {
+				return providerSelection{}, err
+			}
 		case cfg.Providers.VLLM.APIBase != "":
-			applyProviderConfig(&sel, cfg.Providers.VLLM, "")
+			if err := applyProviderConfig(&sel, cfg.Providers.VLLM, ""); err != nil {
+				return providerSelection{}, err
+			}
 		default:
-			if cfg.Providers.OpenRouter.APIKey != "" {
-				applyProviderConfig(&sel, cfg.Providers.OpenRouter, "https://openrouter.ai/api/v1")
+			if cfg.Providers.OpenRouter.APIKey.Present() {
+				if err := applyProviderConfig(&sel, cfg.Providers.OpenRouter, "https://openrouter.ai/api/v1"); err != nil {
+					return providerSelection{}, err
+				}
 			} else {
 				return providerSelection{}, fmt.Errorf("no API key configured for model: %s", model)
 			}

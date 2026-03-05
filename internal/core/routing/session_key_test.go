@@ -84,6 +84,20 @@ func TestBuildAgentPeerSessionKey_GroupPeer(t *testing.T) {
 	}
 }
 
+func TestBuildAgentPeerSessionKey_GroupPeer_WithThread(t *testing.T) {
+	got := BuildAgentPeerSessionKey(SessionKeyParams{
+		AgentID:  "main",
+		Channel:  "telegram",
+		Peer:     &RoutePeer{Kind: "group", ID: "chat456"},
+		ThreadID: "123",
+		DMScope:  DMScopePerPeer,
+	})
+	want := "agent:main:telegram:group:chat456:thread:123"
+	if got != want {
+		t.Errorf("GroupPeer+Thread = %q, want %q", got, want)
+	}
+}
+
 func TestBuildAgentPeerSessionKey_NilPeer(t *testing.T) {
 	got := BuildAgentPeerSessionKey(SessionKeyParams{
 		AgentID: "main",
@@ -203,5 +217,17 @@ func TestIsSubagentSessionKey(t *testing.T) {
 		if got := IsSubagentSessionKey(tt.input); got != tt.want {
 			t.Errorf("IsSubagentSessionKey(%q) = %v, want %v", tt.input, got, tt.want)
 		}
+	}
+}
+
+func TestBuildConversationPeerSessionKey_GroupPeer_WithThread(t *testing.T) {
+	got := BuildConversationPeerSessionKey(SessionKeyParams{
+		Channel:  "telegram",
+		Peer:     &RoutePeer{Kind: "group", ID: "chat456"},
+		ThreadID: "123",
+	})
+	want := "conv:telegram:group:chat456:thread:123"
+	if got != want {
+		t.Errorf("GroupPeer+Thread = %q, want %q", got, want)
 	}
 }

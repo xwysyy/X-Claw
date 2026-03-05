@@ -15,8 +15,8 @@ import (
 func TestGetModelConfig_Found(t *testing.T) {
 	cfg := &Config{
 		ModelList: []ModelConfig{
-			{ModelName: "test-model", Model: "openai/gpt-4o", APIKey: "key1"},
-			{ModelName: "other-model", Model: "anthropic/claude", APIKey: "key2"},
+			{ModelName: "test-model", Model: "openai/gpt-4o", APIKey: SecretRef{Inline: "key1"}},
+			{ModelName: "other-model", Model: "anthropic/claude", APIKey: SecretRef{Inline: "key2"}},
 		},
 	}
 
@@ -32,7 +32,7 @@ func TestGetModelConfig_Found(t *testing.T) {
 func TestGetModelConfig_NotFound(t *testing.T) {
 	cfg := &Config{
 		ModelList: []ModelConfig{
-			{ModelName: "test-model", Model: "openai/gpt-4o", APIKey: "key1"},
+			{ModelName: "test-model", Model: "openai/gpt-4o", APIKey: SecretRef{Inline: "key1"}},
 		},
 	}
 
@@ -56,9 +56,9 @@ func TestGetModelConfig_EmptyList(t *testing.T) {
 func TestGetModelConfig_RoundRobin(t *testing.T) {
 	cfg := &Config{
 		ModelList: []ModelConfig{
-			{ModelName: "lb-model", Model: "openai/gpt-4o-1", APIKey: "key1"},
-			{ModelName: "lb-model", Model: "openai/gpt-4o-2", APIKey: "key2"},
-			{ModelName: "lb-model", Model: "openai/gpt-4o-3", APIKey: "key3"},
+			{ModelName: "lb-model", Model: "openai/gpt-4o-1", APIKey: SecretRef{Inline: "key1"}},
+			{ModelName: "lb-model", Model: "openai/gpt-4o-2", APIKey: SecretRef{Inline: "key2"}},
+			{ModelName: "lb-model", Model: "openai/gpt-4o-3", APIKey: SecretRef{Inline: "key3"}},
 		},
 	}
 
@@ -83,8 +83,8 @@ func TestGetModelConfig_RoundRobin(t *testing.T) {
 func TestGetModelConfig_Concurrent(t *testing.T) {
 	cfg := &Config{
 		ModelList: []ModelConfig{
-			{ModelName: "concurrent-model", Model: "openai/gpt-4o-1", APIKey: "key1"},
-			{ModelName: "concurrent-model", Model: "openai/gpt-4o-2", APIKey: "key2"},
+			{ModelName: "concurrent-model", Model: "openai/gpt-4o-1", APIKey: SecretRef{Inline: "key1"}},
+			{ModelName: "concurrent-model", Model: "openai/gpt-4o-2", APIKey: SecretRef{Inline: "key2"}},
 		},
 	}
 
@@ -329,8 +329,8 @@ func TestConfig_ValidateModelList(t *testing.T) {
 			name: "duplicate model_name for load balancing",
 			config: &Config{
 				ModelList: []ModelConfig{
-					{ModelName: "gpt-4", Model: "openai/gpt-4o", APIKey: "key1"},
-					{ModelName: "gpt-4", Model: "openai/gpt-4-turbo", APIKey: "key2"},
+					{ModelName: "gpt-4", Model: "openai/gpt-4o", APIKey: SecretRef{Inline: "key1"}},
+					{ModelName: "gpt-4", Model: "openai/gpt-4-turbo", APIKey: SecretRef{Inline: "key2"}},
 				},
 			},
 			wantErr: false, // Changed: duplicates are allowed for load balancing

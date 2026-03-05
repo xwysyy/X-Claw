@@ -66,7 +66,13 @@ func verifyCmd(opts verifyOptions) error {
 
 	key := strings.TrimSpace(opts.Key)
 	if key == "" {
-		key = strings.TrimSpace(cfg.AuditLog.HMACKey)
+		if cfg.AuditLog.HMACKey.Present() {
+			v, err := cfg.AuditLog.HMACKey.Resolve("")
+			if err != nil {
+				return fmt.Errorf("resolve audit_log.hmac_key: %w", err)
+			}
+			key = strings.TrimSpace(v)
+		}
 	}
 	if key == "" {
 		return fmt.Errorf("missing HMAC key (set audit_log.hmac_key or pass --key)")

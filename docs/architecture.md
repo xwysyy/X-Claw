@@ -28,12 +28,26 @@ accidental coupling and long-term "big-ball-of-mud" drift.
 - `internal/core/ports/media.go`
   - `MediaResolver` resolves `media://...` refs to local paths + metadata.
   - `pkg/media.AsMediaResolver(store)` adapts `media.MediaStore` to this port.
+- `internal/core/ports/session_store.go`
+  - `SessionStore` is the durable conversation state surface (history/summary/active agent/model override/tree).
+  - `pkg/session.SessionManager` implements it.
+- `internal/core/ports/event_sink.go`
+  - `EventSink` is a generic event consumer interface (JSONL trace, SSE/ws, channel placeholder, etc).
 
 ## Core Algorithms Moved So Far
 
 - `internal/core/routing/*`
   - Agent ID/account ID normalization and session key construction now live in core.
   - `pkg/routing` remains as a thin facade to keep existing imports stable during migration.
+
+## Core Domain Types Moved So Far
+
+- `internal/core/provider/*`
+  - canonical provider protocol types live at `internal/core/provider/protocoltypes`
+  - `pkg/providers/protocoltypes` is a thin facade to preserve import paths
+- `internal/core/session/*`
+  - canonical session domain types live at `internal/core/session`
+  - `pkg/session` re-exports these via type aliases to preserve import paths
 
 ## Canonical Event Taxonomy
 

@@ -56,7 +56,7 @@ func ConvertProvidersToModelList(cfg *Config) []ModelConfig {
 			providerNames: []string{"openai", "gpt"},
 			protocol:      "openai",
 			buildConfig: func(p ProvidersConfig) (ModelConfig, bool) {
-				if p.OpenAI.APIKey == "" && p.OpenAI.APIBase == "" {
+				if p.OpenAI.APIKey.IsZero() && p.OpenAI.APIBase == "" {
 					return ModelConfig{}, false
 				}
 				return ModelConfig{
@@ -74,7 +74,7 @@ func ConvertProvidersToModelList(cfg *Config) []ModelConfig {
 			providerNames: []string{"anthropic", "claude"},
 			protocol:      "anthropic",
 			buildConfig: func(p ProvidersConfig) (ModelConfig, bool) {
-				if p.Anthropic.APIKey == "" && p.Anthropic.APIBase == "" {
+				if p.Anthropic.APIKey.IsZero() && p.Anthropic.APIBase == "" {
 					return ModelConfig{}, false
 				}
 				return ModelConfig{
@@ -92,7 +92,7 @@ func ConvertProvidersToModelList(cfg *Config) []ModelConfig {
 			providerNames: []string{"litellm"},
 			protocol:      "litellm",
 			buildConfig: func(p ProvidersConfig) (ModelConfig, bool) {
-				if p.LiteLLM.APIKey == "" && p.LiteLLM.APIBase == "" {
+				if p.LiteLLM.APIKey.IsZero() && p.LiteLLM.APIBase == "" {
 					return ModelConfig{}, false
 				}
 				return ModelConfig{
@@ -109,7 +109,7 @@ func ConvertProvidersToModelList(cfg *Config) []ModelConfig {
 			providerNames: []string{"openrouter"},
 			protocol:      "openrouter",
 			buildConfig: func(p ProvidersConfig) (ModelConfig, bool) {
-				if p.OpenRouter.APIKey == "" && p.OpenRouter.APIBase == "" {
+				if p.OpenRouter.APIKey.IsZero() && p.OpenRouter.APIBase == "" {
 					return ModelConfig{}, false
 				}
 				return ModelConfig{
@@ -126,7 +126,7 @@ func ConvertProvidersToModelList(cfg *Config) []ModelConfig {
 			providerNames: []string{"groq"},
 			protocol:      "groq",
 			buildConfig: func(p ProvidersConfig) (ModelConfig, bool) {
-				if p.Groq.APIKey == "" && p.Groq.APIBase == "" {
+				if p.Groq.APIKey.IsZero() && p.Groq.APIBase == "" {
 					return ModelConfig{}, false
 				}
 				return ModelConfig{
@@ -143,7 +143,7 @@ func ConvertProvidersToModelList(cfg *Config) []ModelConfig {
 			providerNames: []string{"zhipu", "glm"},
 			protocol:      "zhipu",
 			buildConfig: func(p ProvidersConfig) (ModelConfig, bool) {
-				if p.Zhipu.APIKey == "" && p.Zhipu.APIBase == "" {
+				if p.Zhipu.APIKey.IsZero() && p.Zhipu.APIBase == "" {
 					return ModelConfig{}, false
 				}
 				return ModelConfig{
@@ -160,7 +160,7 @@ func ConvertProvidersToModelList(cfg *Config) []ModelConfig {
 			providerNames: []string{"vllm"},
 			protocol:      "vllm",
 			buildConfig: func(p ProvidersConfig) (ModelConfig, bool) {
-				if p.VLLM.APIKey == "" && p.VLLM.APIBase == "" {
+				if p.VLLM.APIKey.IsZero() && p.VLLM.APIBase == "" {
 					return ModelConfig{}, false
 				}
 				return ModelConfig{
@@ -177,7 +177,7 @@ func ConvertProvidersToModelList(cfg *Config) []ModelConfig {
 			providerNames: []string{"gemini", "google"},
 			protocol:      "gemini",
 			buildConfig: func(p ProvidersConfig) (ModelConfig, bool) {
-				if p.Gemini.APIKey == "" && p.Gemini.APIBase == "" {
+				if p.Gemini.APIKey.IsZero() && p.Gemini.APIBase == "" {
 					return ModelConfig{}, false
 				}
 				return ModelConfig{
@@ -194,7 +194,7 @@ func ConvertProvidersToModelList(cfg *Config) []ModelConfig {
 			providerNames: []string{"nvidia"},
 			protocol:      "nvidia",
 			buildConfig: func(p ProvidersConfig) (ModelConfig, bool) {
-				if p.Nvidia.APIKey == "" && p.Nvidia.APIBase == "" {
+				if p.Nvidia.APIKey.IsZero() && p.Nvidia.APIBase == "" {
 					return ModelConfig{}, false
 				}
 				return ModelConfig{
@@ -211,7 +211,7 @@ func ConvertProvidersToModelList(cfg *Config) []ModelConfig {
 			providerNames: []string{"ollama"},
 			protocol:      "ollama",
 			buildConfig: func(p ProvidersConfig) (ModelConfig, bool) {
-				if p.Ollama.APIKey == "" && p.Ollama.APIBase == "" {
+				if p.Ollama.APIKey.IsZero() && p.Ollama.APIBase == "" {
 					return ModelConfig{}, false
 				}
 				return ModelConfig{
@@ -228,7 +228,7 @@ func ConvertProvidersToModelList(cfg *Config) []ModelConfig {
 			providerNames: []string{"moonshot", "kimi"},
 			protocol:      "moonshot",
 			buildConfig: func(p ProvidersConfig) (ModelConfig, bool) {
-				if p.Moonshot.APIKey == "" && p.Moonshot.APIBase == "" {
+				if p.Moonshot.APIKey.IsZero() && p.Moonshot.APIBase == "" {
 					return ModelConfig{}, false
 				}
 				return ModelConfig{
@@ -245,7 +245,7 @@ func ConvertProvidersToModelList(cfg *Config) []ModelConfig {
 			providerNames: []string{"shengsuanyun"},
 			protocol:      "shengsuanyun",
 			buildConfig: func(p ProvidersConfig) (ModelConfig, bool) {
-				if p.ShengSuanYun.APIKey == "" && p.ShengSuanYun.APIBase == "" {
+				if p.ShengSuanYun.APIKey.IsZero() && p.ShengSuanYun.APIBase == "" {
 					return ModelConfig{}, false
 				}
 				return ModelConfig{
@@ -262,7 +262,7 @@ func ConvertProvidersToModelList(cfg *Config) []ModelConfig {
 			providerNames: []string{"deepseek"},
 			protocol:      "deepseek",
 			buildConfig: func(p ProvidersConfig) (ModelConfig, bool) {
-				if p.DeepSeek.APIKey == "" && p.DeepSeek.APIBase == "" {
+				if p.DeepSeek.APIKey.IsZero() && p.DeepSeek.APIBase == "" {
 					return ModelConfig{}, false
 				}
 				return ModelConfig{
@@ -279,7 +279,7 @@ func ConvertProvidersToModelList(cfg *Config) []ModelConfig {
 			providerNames: []string{"cerebras"},
 			protocol:      "cerebras",
 			buildConfig: func(p ProvidersConfig) (ModelConfig, bool) {
-				if p.Cerebras.APIKey == "" && p.Cerebras.APIBase == "" {
+				if p.Cerebras.APIKey.IsZero() && p.Cerebras.APIBase == "" {
 					return ModelConfig{}, false
 				}
 				return ModelConfig{
@@ -296,7 +296,7 @@ func ConvertProvidersToModelList(cfg *Config) []ModelConfig {
 			providerNames: []string{"volcengine", "doubao"},
 			protocol:      "volcengine",
 			buildConfig: func(p ProvidersConfig) (ModelConfig, bool) {
-				if p.VolcEngine.APIKey == "" && p.VolcEngine.APIBase == "" {
+				if p.VolcEngine.APIKey.IsZero() && p.VolcEngine.APIBase == "" {
 					return ModelConfig{}, false
 				}
 				return ModelConfig{
@@ -313,7 +313,7 @@ func ConvertProvidersToModelList(cfg *Config) []ModelConfig {
 			providerNames: []string{"github_copilot", "copilot"},
 			protocol:      "github-copilot",
 			buildConfig: func(p ProvidersConfig) (ModelConfig, bool) {
-				if p.GitHubCopilot.APIKey == "" && p.GitHubCopilot.APIBase == "" && p.GitHubCopilot.ConnectMode == "" {
+				if p.GitHubCopilot.APIKey.IsZero() && p.GitHubCopilot.APIBase == "" && p.GitHubCopilot.ConnectMode == "" {
 					return ModelConfig{}, false
 				}
 				return ModelConfig{
@@ -328,7 +328,7 @@ func ConvertProvidersToModelList(cfg *Config) []ModelConfig {
 			providerNames: []string{"antigravity"},
 			protocol:      "antigravity",
 			buildConfig: func(p ProvidersConfig) (ModelConfig, bool) {
-				if p.Antigravity.APIKey == "" && p.Antigravity.AuthMethod == "" {
+				if p.Antigravity.APIKey.IsZero() && p.Antigravity.AuthMethod == "" {
 					return ModelConfig{}, false
 				}
 				return ModelConfig{
@@ -343,7 +343,7 @@ func ConvertProvidersToModelList(cfg *Config) []ModelConfig {
 			providerNames: []string{"qwen", "tongyi"},
 			protocol:      "qwen",
 			buildConfig: func(p ProvidersConfig) (ModelConfig, bool) {
-				if p.Qwen.APIKey == "" && p.Qwen.APIBase == "" {
+				if p.Qwen.APIKey.IsZero() && p.Qwen.APIBase == "" {
 					return ModelConfig{}, false
 				}
 				return ModelConfig{
@@ -360,7 +360,7 @@ func ConvertProvidersToModelList(cfg *Config) []ModelConfig {
 			providerNames: []string{"mistral"},
 			protocol:      "mistral",
 			buildConfig: func(p ProvidersConfig) (ModelConfig, bool) {
-				if p.Mistral.APIKey == "" && p.Mistral.APIBase == "" {
+				if p.Mistral.APIKey.IsZero() && p.Mistral.APIBase == "" {
 					return ModelConfig{}, false
 				}
 				return ModelConfig{

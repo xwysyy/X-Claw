@@ -154,7 +154,9 @@ func runGateway(svc *gatewayServices) error {
 
 	addr := fmt.Sprintf("%s:%d", svc.cfg.Gateway.Host, svc.cfg.Gateway.Port)
 	svc.channelManager.SetupHTTPServer(addr, svc.healthServer)
-	registerGatewayHTTPAPI(svc)
+	if err := registerGatewayHTTPAPI(svc); err != nil {
+		return fmt.Errorf("register http api: %w", err)
+	}
 
 	if err := svc.channelManager.StartAll(ctx); err != nil {
 		fmt.Printf("Error starting channels: %v\n", err)
@@ -257,6 +259,13 @@ func (svc *gatewayServices) reload(ctx context.Context, reason string) error {
 		return fmt.Errorf("reload config: %w", err)
 	}
 
+	// Fail-fast: if gateway.api_key is configured but cannot be resolved, abort reload
+	// before stopping the currently running channels. This avoids silently dropping
+	// authentication or leaving the gateway in a partially-restarted state.
+	if _, err := resolveGatewayAPIKey(newCfg); err != nil {
+		return fmt.Errorf("reload: resolve gateway api_key: %w", err)
+	}
+
 	// Preflight: ensure new config enables at least one channel, otherwise keep the current gateway running.
 	preflightCM, err := channels.NewManager(newCfg, svc.msgBus, svc.mediaStore)
 	if err != nil {
@@ -290,7 +299,9 @@ func (svc *gatewayServices) reload(ctx context.Context, reason string) error {
 
 	addr := fmt.Sprintf("%s:%d", newCfg.Gateway.Host, newCfg.Gateway.Port)
 	svc.channelManager.SetupHTTPServer(addr, svc.healthServer)
-	registerGatewayHTTPAPI(svc)
+	if err := registerGatewayHTTPAPI(svc); err != nil {
+		return fmt.Errorf("reload: register http api: %w", err)
+	}
 
 	if err := svc.channelManager.StartAll(ctx); err != nil {
 		return fmt.Errorf("reload: start channels: %w", err)
@@ -318,14 +329,37 @@ func (svc *gatewayServices) reload(ctx context.Context, reason string) error {
 	return nil
 }
 
-func registerGatewayHTTPAPI(svc *gatewayServices) {
+func resolveGatewayAPIKey(cfg *config.Config) (string, error) {
+	if cfg == nil {
+		return "", nil
+	}
+	if !cfg.Gateway.APIKey.Present() {
+		return "", nil
+	}
+	v, err := cfg.Gateway.APIKey.Resolve("")
+	if err != nil {
+		return "", err
+	}
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return "", fmt.Errorf("secret resolved empty")
+	}
+	return v, nil
+}
+
+func registerGatewayHTTPAPI(svc *gatewayServices) error {
 	if svc == nil || svc.channelManager == nil {
-		return
+		return nil
+	}
+
+	apiKey, err := resolveGatewayAPIKey(svc.cfg)
+	if err != nil {
+		return fmt.Errorf("gateway.api_key: %w", err)
 	}
 
 	notify := httpapi.NewNotifyHandler(httpapi.NotifyHandlerOptions{
 		Sender: svc.channelManager,
-		APIKey: svc.cfg.Gateway.APIKey,
+		APIKey: apiKey,
 		LastActive: func() (string, string) {
 			if svc.agentLoop == nil {
 				return "", ""
@@ -339,7 +373,7 @@ func registerGatewayHTTPAPI(svc *gatewayServices) {
 	}
 
 	resume := httpapi.NewResumeLastTaskHandler(httpapi.ResumeLastTaskHandlerOptions{
-		APIKey:  svc.cfg.Gateway.APIKey,
+		APIKey:  apiKey,
 		Timeout: 2 * time.Minute,
 		Resume: func(ctx context.Context) (any, string, error) {
 			if svc.agentLoop == nil {
@@ -354,7 +388,7 @@ func registerGatewayHTTPAPI(svc *gatewayServices) {
 	}
 
 	estop := httpapi.NewEstopHandler(httpapi.EstopHandlerOptions{
-		APIKey:       svc.cfg.Gateway.APIKey,
+		APIKey:       apiKey,
 		Workspace:    svc.cfg.WorkspacePath(),
 		Enabled:      svc.cfg.Tools.Estop.Enabled,
 		FailClosed:   svc.cfg.Tools.Estop.FailClosed,
@@ -365,13 +399,13 @@ func registerGatewayHTTPAPI(svc *gatewayServices) {
 	}
 
 	sessionModel := httpapi.NewSessionModelHandler(httpapi.SessionModelHandlerOptions{
-		APIKey:    svc.cfg.Gateway.APIKey,
+		APIKey:    apiKey,
 		Workspace: svc.cfg.WorkspacePath(),
-		Sessions: func() *session.SessionManager { // avoid nil deref on startup
+		Sessions: func() session.Store { // avoid nil deref on startup
 			if svc.agentLoop == nil {
 				return nil
 			}
-			return svc.agentLoop.SessionManager()
+			return svc.agentLoop.SessionStore()
 		}(),
 		Enabled:      true,
 		MaxBodyBytes: 8 << 10,
@@ -381,7 +415,7 @@ func registerGatewayHTTPAPI(svc *gatewayServices) {
 	}
 
 	security := httpapi.NewSecurityHandler(httpapi.SecurityHandlerOptions{
-		APIKey:    svc.cfg.Gateway.APIKey,
+		APIKey:    apiKey,
 		Workspace: svc.cfg.WorkspacePath(),
 		Config:    svc.cfg,
 	})
@@ -391,7 +425,7 @@ func registerGatewayHTTPAPI(svc *gatewayServices) {
 
 	console := httpapi.NewConsoleHandler(httpapi.ConsoleHandlerOptions{
 		Workspace: svc.cfg.WorkspacePath(),
-		APIKey:    svc.cfg.Gateway.APIKey,
+		APIKey:    apiKey,
 		LastActive: func() (string, string) {
 			if svc.agentLoop == nil {
 				return "", ""
@@ -415,6 +449,8 @@ func registerGatewayHTTPAPI(svc *gatewayServices) {
 	if err := svc.channelManager.RegisterHTTPHandler("/api/console/", console); err != nil {
 		fmt.Printf("⚠ Warning: failed to register /api/console/: %v\n", err)
 	}
+
+	return nil
 }
 
 // shutdownGateway performs graceful shutdown of all services.

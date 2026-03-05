@@ -20,7 +20,7 @@ type SessionModelHandlerOptions struct {
 	Workspace string
 
 	// Sessions is required to read/write per-session model overrides.
-	Sessions *session.SessionManager
+	Sessions session.Store
 
 	// Enabled allows turning the handler on/off via config.
 	Enabled bool
@@ -32,7 +32,7 @@ type SessionModelHandlerOptions struct {
 type SessionModelHandler struct {
 	apiKey    string
 	workspace string
-	sessions  *session.SessionManager
+	sessions  session.Store
 	enabled   bool
 	maxBody   int64
 }

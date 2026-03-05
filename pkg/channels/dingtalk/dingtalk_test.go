@@ -31,7 +31,7 @@ func TestDingTalkChannel_Send_NotRunning(t *testing.T) {
 	mb := bus.NewMessageBus()
 	ch, err := NewDingTalkChannel(config.DingTalkConfig{
 		ClientID:     "id",
-		ClientSecret: "secret",
+		ClientSecret: config.SecretRef{Inline: "secret"},
 	}, mb)
 	if err != nil {
 		t.Fatalf("NewDingTalkChannel error: %v", err)
@@ -49,7 +49,7 @@ func TestDingTalkChannel_Send_MissingWebhook(t *testing.T) {
 	mb := bus.NewMessageBus()
 	ch, err := NewDingTalkChannel(config.DingTalkConfig{
 		ClientID:     "id",
-		ClientSecret: "secret",
+		ClientSecret: config.SecretRef{Inline: "secret"},
 	}, mb)
 	if err != nil {
 		t.Fatalf("NewDingTalkChannel error: %v", err)
@@ -68,7 +68,7 @@ func TestDingTalkChannel_Send_InvalidWebhookType(t *testing.T) {
 	mb := bus.NewMessageBus()
 	ch, err := NewDingTalkChannel(config.DingTalkConfig{
 		ClientID:     "id",
-		ClientSecret: "secret",
+		ClientSecret: config.SecretRef{Inline: "secret"},
 	}, mb)
 	if err != nil {
 		t.Fatalf("NewDingTalkChannel error: %v", err)
@@ -88,7 +88,7 @@ func TestDingTalkChannel_OnChatBotMessageReceived_EmptyContentIgnored(t *testing
 	mb := bus.NewMessageBus()
 	ch, err := NewDingTalkChannel(config.DingTalkConfig{
 		ClientID:     "id",
-		ClientSecret: "secret",
+		ClientSecret: config.SecretRef{Inline: "secret"},
 	}, mb)
 	if err != nil {
 		t.Fatalf("NewDingTalkChannel error: %v", err)
@@ -112,7 +112,7 @@ func TestDingTalkChannel_OnChatBotMessageReceived_DirectPublishesAndStoresWebhoo
 	mb := bus.NewMessageBus()
 	ch, err := NewDingTalkChannel(config.DingTalkConfig{
 		ClientID:     "id",
-		ClientSecret: "secret",
+		ClientSecret: config.SecretRef{Inline: "secret"},
 	}, mb)
 	if err != nil {
 		t.Fatalf("NewDingTalkChannel error: %v", err)
@@ -177,7 +177,7 @@ func TestDingTalkChannel_OnChatBotMessageReceived_GroupTriggerMentionOnlyIgnores
 	mb := bus.NewMessageBus()
 	ch, err := NewDingTalkChannel(config.DingTalkConfig{
 		ClientID:     "id",
-		ClientSecret: "secret",
+		ClientSecret: config.SecretRef{Inline: "secret"},
 		GroupTrigger: config.GroupTriggerConfig{MentionOnly: true},
 	}, mb)
 	if err != nil {
@@ -211,7 +211,7 @@ func TestDingTalkChannel_OnChatBotMessageReceived_GroupTriggerPrefixStripsPrefix
 	mb := bus.NewMessageBus()
 	ch, err := NewDingTalkChannel(config.DingTalkConfig{
 		ClientID:     "id",
-		ClientSecret: "secret",
+		ClientSecret: config.SecretRef{Inline: "secret"},
 		GroupTrigger: config.GroupTriggerConfig{Prefixes: []string{"!"}},
 	}, mb)
 	if err != nil {
@@ -255,7 +255,7 @@ func TestDingTalkChannel_OnChatBotMessageReceived_AllowFromBlocks(t *testing.T) 
 	mb := bus.NewMessageBus()
 	ch, err := NewDingTalkChannel(config.DingTalkConfig{
 		ClientID:     "id",
-		ClientSecret: "secret",
+		ClientSecret: config.SecretRef{Inline: "secret"},
 		AllowFrom:    config.FlexibleStringSlice{"dingtalk:someone-else"},
 	}, mb)
 	if err != nil {

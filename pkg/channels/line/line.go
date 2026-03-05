@@ -45,6 +45,8 @@ type replyTokenEntry struct {
 type LINEChannel struct {
 	*channels.BaseChannel
 	config         config.LINEConfig
+	channelSecret  string
+	accessToken    string
 	infoClient     *http.Client // for bot info lookups (short timeout)
 	apiClient      *http.Client // for messaging API calls
 	botUserID      string       // Bot's user ID
@@ -58,8 +60,16 @@ type LINEChannel struct {
 
 // NewLINEChannel creates a new LINE channel instance.
 func NewLINEChannel(cfg config.LINEConfig, messageBus *bus.MessageBus) (*LINEChannel, error) {
-	if cfg.ChannelSecret == "" || cfg.ChannelAccessToken == "" {
+	if !cfg.ChannelSecret.Present() || !cfg.ChannelAccessToken.Present() {
 		return nil, fmt.Errorf("line channel_secret and channel_access_token are required")
+	}
+	channelSecret, err := cfg.ChannelSecret.Resolve("")
+	if err != nil {
+		return nil, fmt.Errorf("resolve line channel_secret: %w", err)
+	}
+	accessToken, err := cfg.ChannelAccessToken.Resolve("")
+	if err != nil {
+		return nil, fmt.Errorf("resolve line channel_access_token: %w", err)
 	}
 
 	base := channels.NewBaseChannel("line", cfg, messageBus, cfg.AllowFrom,
@@ -70,10 +80,12 @@ func NewLINEChannel(cfg config.LINEConfig, messageBus *bus.MessageBus) (*LINECha
 	)
 
 	return &LINEChannel{
-		BaseChannel: base,
-		config:      cfg,
-		infoClient:  &http.Client{Timeout: 10 * time.Second},
-		apiClient:   &http.Client{Timeout: 30 * time.Second},
+		BaseChannel:   base,
+		config:        cfg,
+		channelSecret: channelSecret,
+		accessToken:   accessToken,
+		infoClient:    &http.Client{Timeout: 10 * time.Second},
+		apiClient:     &http.Client{Timeout: 30 * time.Second},
 	}, nil
 }
 
@@ -107,7 +119,7 @@ func (c *LINEChannel) fetchBotInfo() error {
 	if err != nil {
 		return err
 	}
-	req.Header.Set("Authorization", "Bearer "+c.config.ChannelAccessToken)
+	req.Header.Set("Authorization", "Bearer "+c.accessToken)
 
 	resp, err := c.infoClient.Do(req)
 	if err != nil {
@@ -208,7 +220,7 @@ func (c *LINEChannel) verifySignature(body []byte, signature string) bool {
 		return false
 	}
 
-	mac := hmac.New(sha256.New, []byte(c.config.ChannelSecret))
+	mac := hmac.New(sha256.New, []byte(c.channelSecret))
 	mac.Write(body)
 	expected := base64.StdEncoding.EncodeToString(mac.Sum(nil))
 
@@ -646,7 +658,7 @@ func (c *LINEChannel) callAPI(ctx context.Context, endpoint string, payload any)
 	}
 
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+c.config.ChannelAccessToken)
+	req.Header.Set("Authorization", "Bearer "+c.accessToken)
 
 	resp, err := c.apiClient.Do(req)
 	if err != nil {
@@ -668,7 +680,7 @@ func (c *LINEChannel) downloadContent(messageID, filename string) string {
 	return utils.DownloadFile(url, filename, utils.DownloadOptions{
 		LoggerPrefix: "line",
 		ExtraHeaders: map[string]string{
-			"Authorization": "Bearer " + c.config.ChannelAccessToken,
+			"Authorization": "Bearer " + c.accessToken,
 		},
 	})
 }

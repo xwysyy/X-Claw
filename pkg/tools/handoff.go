@@ -14,12 +14,12 @@ type AgentLookupFunc func(agentID string) (AgentInfo, bool)
 
 type HandoffTool struct {
 	currentAgentID string
-	sessions       *session.SessionManager
+	sessions       session.Store
 	lookup         AgentLookupFunc
 	allow          func(fromAgentID, toAgentID string) bool
 }
 
-func NewHandoffTool(currentAgentID string, sessions *session.SessionManager, lookup AgentLookupFunc) *HandoffTool {
+func NewHandoffTool(currentAgentID string, sessions session.Store, lookup AgentLookupFunc) *HandoffTool {
 	return &HandoffTool{
 		currentAgentID: strings.TrimSpace(currentAgentID),
 		sessions:       sessions,

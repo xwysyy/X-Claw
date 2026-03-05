@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"math"
 	"strings"
 	"time"
 
@@ -23,10 +22,10 @@ const (
 )
 
 type SessionsListTool struct {
-	sessions *session.SessionManager
+	sessions session.Store
 }
 
-func NewSessionsListTool(sm *session.SessionManager) *SessionsListTool {
+func NewSessionsListTool(sm session.Store) *SessionsListTool {
 	return &SessionsListTool{sessions: sm}
 }
 
@@ -166,10 +165,10 @@ func (t *SessionsListTool) Execute(_ context.Context, args map[string]any) *Tool
 }
 
 type SessionsHistoryTool struct {
-	sessions *session.SessionManager
+	sessions session.Store
 }
 
-func NewSessionsHistoryTool(sm *session.SessionManager) *SessionsHistoryTool {
+func NewSessionsHistoryTool(sm session.Store) *SessionsHistoryTool {
 	return &SessionsHistoryTool{sessions: sm}
 }
 
@@ -337,126 +336,4 @@ func tailMessages(messages []providers.Message, limit int, includeTools bool) []
 		selected[i], selected[j] = selected[j], selected[i]
 	}
 	return selected
-}
-
-func parseIntArg(args map[string]any, key string, defaultVal, minVal, maxVal int) (int, error) {
-	val, exists := args[key]
-	if !exists {
-		return defaultVal, nil
-	}
-
-	n, err := toInt(val)
-	if err != nil {
-		return 0, fmt.Errorf("%s must be an integer", key)
-	}
-	if n < minVal || n > maxVal {
-		return 0, fmt.Errorf("%s must be between %d and %d", key, minVal, maxVal)
-	}
-	return n, nil
-}
-
-func parseOptionalIntArg(args map[string]any, key string, defaultVal, minVal, maxVal int) (int, error) {
-	val, exists := args[key]
-	if !exists {
-		return defaultVal, nil
-	}
-
-	n, err := toInt(val)
-	if err != nil {
-		return 0, fmt.Errorf("%s must be an integer", key)
-	}
-	if n < minVal || n > maxVal {
-		return 0, fmt.Errorf("%s must be between %d and %d", key, minVal, maxVal)
-	}
-	return n, nil
-}
-
-func parseBoolArg(args map[string]any, key string, defaultVal bool) (bool, error) {
-	val, exists := args[key]
-	if !exists {
-		return defaultVal, nil
-	}
-	b, ok := val.(bool)
-	if !ok {
-		return false, fmt.Errorf("%s must be a boolean", key)
-	}
-	return b, nil
-}
-
-func parseStringSliceArg(args map[string]any, key string) ([]string, error) {
-	val, exists := args[key]
-	if !exists {
-		return nil, nil
-	}
-
-	switch v := val.(type) {
-	case []string:
-		out := make([]string, 0, len(v))
-		for _, s := range v {
-			if trimmed := strings.TrimSpace(s); trimmed != "" {
-				out = append(out, trimmed)
-			}
-		}
-		return out, nil
-	case []any:
-		out := make([]string, 0, len(v))
-		for _, item := range v {
-			s, ok := item.(string)
-			if !ok {
-				return nil, fmt.Errorf("%s must be an array of strings", key)
-			}
-			if trimmed := strings.TrimSpace(s); trimmed != "" {
-				out = append(out, trimmed)
-			}
-		}
-		return out, nil
-	default:
-		return nil, fmt.Errorf("%s must be an array of strings", key)
-	}
-}
-
-func getStringArg(args map[string]any, key string) (string, bool) {
-	v, ok := args[key]
-	if !ok {
-		return "", false
-	}
-	s, ok := v.(string)
-	return s, ok
-}
-
-func toInt(v any) (int, error) {
-	switch n := v.(type) {
-	case int:
-		return n, nil
-	case int8:
-		return int(n), nil
-	case int16:
-		return int(n), nil
-	case int32:
-		return int(n), nil
-	case int64:
-		return int(n), nil
-	case uint:
-		return int(n), nil
-	case uint8:
-		return int(n), nil
-	case uint16:
-		return int(n), nil
-	case uint32:
-		return int(n), nil
-	case uint64:
-		return int(n), nil
-	case float64:
-		if n != math.Trunc(n) {
-			return 0, fmt.Errorf("not an integer")
-		}
-		return int(n), nil
-	case float32:
-		if float64(n) != math.Trunc(float64(n)) {
-			return 0, fmt.Errorf("not an integer")
-		}
-		return int(n), nil
-	default:
-		return 0, fmt.Errorf("not an integer")
-	}
 }

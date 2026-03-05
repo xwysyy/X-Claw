@@ -38,7 +38,7 @@ type AgentLoop struct {
 	cfgMu            sync.RWMutex
 	cfg              *config.Config
 	registry         *AgentRegistry
-	sessions         *session.SessionManager
+	sessions         session.Store
 	state            *state.Manager
 	taskLedger       *tools.TaskLedger
 	running          atomic.Bool
@@ -196,9 +196,9 @@ func (al *AgentLoop) Config() *config.Config {
 	return al.cfg
 }
 
-// SessionManager returns the shared session manager used by this agent loop.
+// SessionStore returns the shared session store used by this agent loop.
 // It may be nil if the loop is not fully initialized.
-func (al *AgentLoop) SessionManager() *session.SessionManager {
+func (al *AgentLoop) SessionStore() session.Store {
 	if al == nil {
 		return nil
 	}
@@ -589,17 +589,47 @@ func registerSharedTools(
 		currentAgentID := agentID
 
 		// Web tools
+		resolveKey := func(label string, ref config.SecretRef) string {
+			if !ref.Present() {
+				return ""
+			}
+			v, err := ref.Resolve("")
+			if err != nil {
+				logger.WarnCF("agent", "Secret resolve failed (best-effort)", map[string]any{
+					"secret": label,
+					"error":  err.Error(),
+				})
+				return ""
+			}
+			return strings.TrimSpace(v)
+		}
+		resolveKeyList := func(label string, refs []config.SecretRef) []string {
+			if len(refs) == 0 {
+				return nil
+			}
+			out := make([]string, 0, len(refs))
+			for _, ref := range refs {
+				v := resolveKey(label, ref)
+				if v != "" {
+					out = append(out, v)
+				}
+			}
+			return out
+		}
 		webOpts := tools.WebSearchToolOptions{
-			BraveAPIKey:          cfg.Tools.Web.Brave.APIKey,
+			BraveAPIKey:          resolveKey("tools.web.brave.api_key", cfg.Tools.Web.Brave.APIKey),
+			BraveAPIKeys:         resolveKeyList("tools.web.brave.api_keys", cfg.Tools.Web.Brave.APIKeys),
 			BraveMaxResults:      cfg.Tools.Web.Brave.MaxResults,
 			BraveEnabled:         cfg.Tools.Web.Brave.Enabled,
-			TavilyAPIKey:         cfg.Tools.Web.Tavily.APIKey,
+			TavilyAPIKey:         resolveKey("tools.web.tavily.api_key", cfg.Tools.Web.Tavily.APIKey),
+			TavilyAPIKeys:        resolveKeyList("tools.web.tavily.api_keys", cfg.Tools.Web.Tavily.APIKeys),
 			TavilyBaseURL:        cfg.Tools.Web.Tavily.BaseURL,
 			TavilyMaxResults:     cfg.Tools.Web.Tavily.MaxResults,
 			TavilyEnabled:        cfg.Tools.Web.Tavily.Enabled,
 			DuckDuckGoMaxResults: cfg.Tools.Web.DuckDuckGo.MaxResults,
 			DuckDuckGoEnabled:    cfg.Tools.Web.DuckDuckGo.Enabled,
-			GrokAPIKey:           cfg.Tools.Web.Grok.APIKey,
+			GrokAPIKey:           resolveKey("tools.web.grok.api_key", cfg.Tools.Web.Grok.APIKey),
+			GrokAPIKeys:          resolveKeyList("tools.web.grok.api_keys", cfg.Tools.Web.Grok.APIKeys),
 			GrokEndpoint:         cfg.Tools.Web.Grok.Endpoint,
 			GrokModel:            cfg.Tools.Web.Grok.DefaultModel,
 			GrokMaxResults:       cfg.Tools.Web.Grok.MaxResults,
@@ -642,14 +672,25 @@ func registerSharedTools(
 
 		// Feishu calendar tool
 		if strings.TrimSpace(cfg.Channels.Feishu.AppID) != "" &&
-			strings.TrimSpace(cfg.Channels.Feishu.AppSecret) != "" {
+			cfg.Channels.Feishu.AppSecret.Present() {
 			agent.Tools.Register(tools.NewFeishuCalendarTool(cfg.Channels.Feishu))
 		}
 
 		// Skill discovery and installation tools
+		clawhubAuthToken := resolveKey("tools.skills.registries.clawhub.auth_token", cfg.Tools.Skills.Registries.ClawHub.AuthToken)
 		registryMgr := skills.NewRegistryManagerFromConfig(skills.RegistryConfig{
 			MaxConcurrentSearches: cfg.Tools.Skills.MaxConcurrentSearches,
-			ClawHub:               skills.ClawHubConfig(cfg.Tools.Skills.Registries.ClawHub),
+			ClawHub: skills.ClawHubConfig{
+				Enabled:         cfg.Tools.Skills.Registries.ClawHub.Enabled,
+				BaseURL:         cfg.Tools.Skills.Registries.ClawHub.BaseURL,
+				AuthToken:       clawhubAuthToken,
+				SearchPath:      cfg.Tools.Skills.Registries.ClawHub.SearchPath,
+				SkillsPath:      cfg.Tools.Skills.Registries.ClawHub.SkillsPath,
+				DownloadPath:    cfg.Tools.Skills.Registries.ClawHub.DownloadPath,
+				Timeout:         cfg.Tools.Skills.Registries.ClawHub.Timeout,
+				MaxZipSize:      cfg.Tools.Skills.Registries.ClawHub.MaxZipSize,
+				MaxResponseSize: cfg.Tools.Skills.Registries.ClawHub.MaxResponseSize,
+			},
 		})
 		searchCache := skills.NewSearchCache(
 			cfg.Tools.Skills.SearchCache.MaxSize,
@@ -950,6 +991,7 @@ func (al *AgentLoop) Run(ctx context.Context) error {
 				Channel:       originChannel,
 				AccountID:     msg.Metadata["account_id"],
 				Peer:          &routing.RoutePeer{Kind: "direct", ID: originChatID},
+				ThreadID:      msg.Metadata["thread_id"],
 				DMScope:       dmScope,
 				IdentityLinks: identityLinks,
 			}))
@@ -962,6 +1004,7 @@ func (al *AgentLoop) Run(ctx context.Context) error {
 			Channel:       msg.Channel,
 			AccountID:     msg.Metadata["account_id"],
 			Peer:          extractPeer(msg),
+			ThreadID:      msg.Metadata["thread_id"],
 			DMScope:       dmScope,
 			IdentityLinks: identityLinks,
 		}))
@@ -1283,6 +1326,7 @@ func (al *AgentLoop) processMessage(ctx context.Context, msg bus.InboundMessage)
 		Channel:       msg.Channel,
 		AccountID:     msg.Metadata["account_id"],
 		Peer:          extractPeer(msg),
+		ThreadID:      msg.Metadata["thread_id"],
 		DMScope:       dmScope,
 		IdentityLinks: identityLinks,
 	}))

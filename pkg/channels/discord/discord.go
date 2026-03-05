@@ -35,7 +35,14 @@ type DiscordChannel struct {
 }
 
 func NewDiscordChannel(cfg config.DiscordConfig, bus *bus.MessageBus) (*DiscordChannel, error) {
-	session, err := discordgo.New("Bot " + cfg.Token)
+	if !cfg.Token.Present() {
+		return nil, fmt.Errorf("discord token is required")
+	}
+	token, err := cfg.Token.Resolve("")
+	if err != nil {
+		return nil, fmt.Errorf("resolve discord token: %w", err)
+	}
+	session, err := discordgo.New("Bot " + token)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create discord session: %w", err)
 	}

@@ -1,9 +1,9 @@
 package providers
 
 import (
-	"context"
 	"fmt"
 
+	coreprovider "github.com/sipeed/picoclaw/internal/core/provider"
 	"github.com/sipeed/picoclaw/pkg/providers/protocoltypes"
 )
 
@@ -21,21 +21,10 @@ type (
 	CacheControl           = protocoltypes.CacheControl
 )
 
-type LLMProvider interface {
-	Chat(
-		ctx context.Context,
-		messages []Message,
-		tools []ToolDefinition,
-		model string,
-		options map[string]any,
-	) (*LLMResponse, error)
-	GetDefaultModel() string
-}
-
-type StatefulProvider interface {
-	LLMProvider
-	Close()
-}
+type (
+	LLMProvider      = coreprovider.LLMProvider
+	StatefulProvider = coreprovider.StatefulProvider
+)
 
 // FailoverReason classifies why an LLM request failed for fallback decisions.
 type FailoverReason string

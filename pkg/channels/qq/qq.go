@@ -46,8 +46,13 @@ func NewQQChannel(cfg config.QQConfig, messageBus *bus.MessageBus) (*QQChannel, 
 }
 
 func (c *QQChannel) Start(ctx context.Context) error {
-	if c.config.AppID == "" || c.config.AppSecret == "" {
+	if c.config.AppID == "" || !c.config.AppSecret.Present() {
 		return fmt.Errorf("QQ app_id and app_secret not configured")
+	}
+
+	appSecret, err := c.config.AppSecret.Resolve("")
+	if err != nil {
+		return fmt.Errorf("resolve QQ app_secret: %w", err)
 	}
 
 	logger.InfoC("qq", "Starting QQ bot (WebSocket mode)")
@@ -55,7 +60,7 @@ func (c *QQChannel) Start(ctx context.Context) error {
 	// create token source
 	credentials := &token.QQBotCredentials{
 		AppID:     c.config.AppID,
-		AppSecret: c.config.AppSecret,
+		AppSecret: appSecret,
 	}
 	c.tokenSource = token.NewQQBotTokenSource(credentials)
 

@@ -76,7 +76,15 @@ func NewTelegramChannel(cfg *config.Config, bus *bus.MessageBus) (*TelegramChann
 		opts = append(opts, telego.WithAPIServer(baseURL))
 	}
 
-	bot, err := telego.NewBot(telegramCfg.Token, opts...)
+	if !telegramCfg.Token.Present() {
+		return nil, fmt.Errorf("telegram token is required")
+	}
+	token, err := telegramCfg.Token.Resolve("")
+	if err != nil {
+		return nil, fmt.Errorf("resolve telegram token: %w", err)
+	}
+
+	bot, err := telego.NewBot(token, opts...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create telegram bot: %w", err)
 	}
@@ -555,6 +563,9 @@ func (c *TelegramChannel) handleMessage(ctx context.Context, message *telego.Mes
 		"username":   user.Username,
 		"first_name": user.FirstName,
 		"is_group":   fmt.Sprintf("%t", message.Chat.Type != "private"),
+	}
+	if message.MessageThreadID != 0 {
+		metadata["thread_id"] = fmt.Sprintf("%d", message.MessageThreadID)
 	}
 
 	c.HandleMessage(c.ctx,

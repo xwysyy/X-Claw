@@ -918,7 +918,7 @@ func (c *PicoClawConfig) ToStandardConfig() *config.Config {
 			ModelName: m.ModelName,
 			Model:     m.Model,
 			APIBase:   m.APIBase,
-			APIKey:    m.APIKey,
+			APIKey:    config.SecretRef{Inline: m.APIKey},
 			Proxy:     m.Proxy,
 		})
 	}
@@ -955,40 +955,40 @@ func (c ChannelsConfig) ToStandardChannels() config.ChannelsConfig {
 		},
 		Telegram: config.TelegramConfig{
 			Enabled: c.Telegram.Enabled,
-			Token:   c.Telegram.Token,
+			Token:   config.SecretRef{Inline: c.Telegram.Token},
 			Proxy:   c.Telegram.Proxy,
 		},
 		Feishu: config.FeishuConfig{
 			Enabled:           c.Feishu.Enabled,
 			AppID:             c.Feishu.AppID,
-			AppSecret:         c.Feishu.AppSecret,
-			EncryptKey:        c.Feishu.EncryptKey,
-			VerificationToken: c.Feishu.VerificationToken,
+			AppSecret:         config.SecretRef{Inline: c.Feishu.AppSecret},
+			EncryptKey:        config.SecretRef{Inline: c.Feishu.EncryptKey},
+			VerificationToken: config.SecretRef{Inline: c.Feishu.VerificationToken},
 		},
 		Discord: config.DiscordConfig{
 			Enabled:     c.Discord.Enabled,
-			Token:       c.Discord.Token,
+			Token:       config.SecretRef{Inline: c.Discord.Token},
 			MentionOnly: c.Discord.MentionOnly,
 		},
 		QQ: config.QQConfig{
 			Enabled:   c.QQ.Enabled,
 			AppID:     c.QQ.AppID,
-			AppSecret: c.QQ.AppSecret,
+			AppSecret: config.SecretRef{Inline: c.QQ.AppSecret},
 		},
 		DingTalk: config.DingTalkConfig{
 			Enabled:      c.DingTalk.Enabled,
 			ClientID:     c.DingTalk.ClientID,
-			ClientSecret: c.DingTalk.ClientSecret,
+			ClientSecret: config.SecretRef{Inline: c.DingTalk.ClientSecret},
 		},
 		Slack: config.SlackConfig{
 			Enabled:  c.Slack.Enabled,
-			BotToken: c.Slack.BotToken,
-			AppToken: c.Slack.AppToken,
+			BotToken: config.SecretRef{Inline: c.Slack.BotToken},
+			AppToken: config.SecretRef{Inline: c.Slack.AppToken},
 		},
 		LINE: config.LINEConfig{
 			Enabled:            c.LINE.Enabled,
-			ChannelSecret:      c.LINE.ChannelSecret,
-			ChannelAccessToken: c.LINE.ChannelAccessToken,
+			ChannelSecret:      config.SecretRef{Inline: c.LINE.ChannelSecret},
+			ChannelAccessToken: config.SecretRef{Inline: c.LINE.ChannelAccessToken},
 			WebhookHost:        c.LINE.WebhookHost,
 			WebhookPort:        c.LINE.WebhookPort,
 			WebhookPath:        c.LINE.WebhookPath,
@@ -1022,7 +1022,7 @@ func (c ToolsConfig) ToStandardTools() config.ToolsConfig {
 		}
 		out.Web.Brave = config.BraveConfig{
 			Enabled:    c.Web.Brave.Enabled,
-			APIKey:     c.Web.Brave.APIKey,
+			APIKey:     config.SecretRef{Inline: c.Web.Brave.APIKey},
 			MaxResults: maxResults,
 		}
 	}
@@ -1034,7 +1034,7 @@ func (c ToolsConfig) ToStandardTools() config.ToolsConfig {
 		}
 		out.Web.Tavily = config.TavilyConfig{
 			Enabled:    c.Web.Tavily.Enabled,
-			APIKey:     c.Web.Tavily.APIKey,
+			APIKey:     config.SecretRef{Inline: c.Web.Tavily.APIKey},
 			BaseURL:    c.Web.Tavily.BaseURL,
 			MaxResults: maxResults,
 		}

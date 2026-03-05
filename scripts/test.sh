@@ -27,33 +27,52 @@ run_go_test_with_oom_retry() {
   local label="$1"
   shift
 
-  local tmp
-  tmp="$(mktemp)"
+  local attempt=0
+  while true; do
+    local tmp
+    tmp="$(mktemp)"
 
-  set +e
-  "$@" >"$tmp" 2>&1
-  local rc=$?
-  cat "$tmp"
-  set -e
-
-  local killed=false
-  if [[ $rc -eq 137 ]]; then
-    killed=true
-  elif grep -q "signal: killed" "$tmp"; then
-    killed=true
-  fi
-  rm -f "$tmp"
-
-  if [[ $rc -ne 0 ]]; then
-    if [[ $killed == true ]]; then
-      echo "$label tests were killed (likely OOM); retrying with more aggressive GC..."
+    set +e
+    if [[ $attempt -eq 0 ]]; then
+      "$@" >"$tmp" 2>&1
+    elif [[ $attempt -eq 1 ]]; then
       GOMEMLIMIT="${GOMEMLIMIT_RETRY:-160MiB}" \
         GOGC="${GOGC_RETRY:-20}" \
-        "$@"
+        "$@" >"$tmp" 2>&1
     else
+      GOMEMLIMIT="${GOMEMLIMIT_RETRY2:-128MiB}" \
+        GOGC="${GOGC_RETRY2:-10}" \
+        "$@" >"$tmp" 2>&1
+    fi
+    local rc=$?
+    cat "$tmp"
+    set -e
+
+    local killed=false
+    if [[ $rc -eq 137 ]]; then
+      killed=true
+    elif grep -q "signal: killed" "$tmp"; then
+      killed=true
+    fi
+    rm -f "$tmp"
+
+    if [[ $rc -eq 0 ]]; then
+      return 0
+    fi
+    if [[ $killed != true ]]; then
       exit $rc
     fi
-  fi
+
+    if [[ $attempt -eq 0 ]]; then
+      echo "$label tests were killed (likely OOM); retrying with more aggressive GC..."
+    elif [[ $attempt -eq 1 ]]; then
+      echo "$label tests were killed again; retrying with even more aggressive GC..."
+    else
+      echo "$label tests still killed after retries; failing."
+      exit $rc
+    fi
+    attempt=$((attempt + 1))
+  done
 }
 
 go test -p 1 ./internal/archcheck -count=1

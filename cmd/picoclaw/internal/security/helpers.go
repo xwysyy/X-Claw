@@ -185,7 +185,7 @@ func buildSecurityReport(cfg *config.Config) securityReport {
 
 	report.Gateway.Host = strings.TrimSpace(cfg.Gateway.Host)
 	report.Gateway.Port = cfg.Gateway.Port
-	report.Gateway.APIKeySet = strings.TrimSpace(cfg.Gateway.APIKey) != ""
+	report.Gateway.APIKeySet = cfg.Gateway.APIKey.Present()
 	report.Gateway.PublicBind = !isLoopbackHost(report.Gateway.Host)
 
 	report.BreakGlass.AllowPublicGateway = cfg.Security.BreakGlass.AllowPublicGateway

@@ -35,8 +35,13 @@ type DingTalkChannel struct {
 
 // NewDingTalkChannel creates a new DingTalk channel instance
 func NewDingTalkChannel(cfg config.DingTalkConfig, messageBus *bus.MessageBus) (*DingTalkChannel, error) {
-	if cfg.ClientID == "" || cfg.ClientSecret == "" {
+	if cfg.ClientID == "" || !cfg.ClientSecret.Present() {
 		return nil, fmt.Errorf("dingtalk client_id and client_secret are required")
+	}
+
+	secret, err := cfg.ClientSecret.Resolve("")
+	if err != nil {
+		return nil, fmt.Errorf("resolve dingtalk client_secret: %w", err)
 	}
 
 	base := channels.NewBaseChannel("dingtalk", cfg, messageBus, cfg.AllowFrom,
@@ -49,7 +54,7 @@ func NewDingTalkChannel(cfg config.DingTalkConfig, messageBus *bus.MessageBus) (
 		BaseChannel:  base,
 		config:       cfg,
 		clientID:     cfg.ClientID,
-		clientSecret: cfg.ClientSecret,
+		clientSecret: secret,
 	}, nil
 }
 
