@@ -187,6 +187,41 @@ Public exposure (remote / cross-machine notifications):
 
 For external agents (Claude Code / Codex) to notify X-Claw, see: `extensions/x-claw-notify/SKILL.md` (calls `/api/notify`).
 
+### Troubleshooting: Bot Doesn't Reply in Group Chats (`channels.*.group_trigger`)
+
+**Symptom**: You send a message in a Feishu/Telegram group and the bot stays silent, while `/health` is OK and `/api/notify` can still push messages to you.
+
+**Most common cause**: X-Claw is **safe-by-default** in group chats. If no trigger is hit, group messages are ignored to avoid being noisy.
+
+Group reply behavior is controlled by `channels.<channel>.group_trigger`:
+- `mention_only=true`: only reply when explicitly @mentioned (safer)
+- `command_bypass=true`: messages that look like commands (prefix `/` by default, configurable via `command_prefixes`) bypass mention requirements
+- `prefixes=["/ask", "!"]`: only reply when content starts with one of the prefixes (and strip the prefix)
+- `mentionless=true`: reply without @mention in group chats (most permissive, also the noisiest)
+
+Also note `allow_from` is checked before group-trigger logic:
+- `allow_from=[]` allows everyone
+- a non-empty list allows only the listed senders (supports `"platform:id"`, numeric ids, `"@username"`, and `"id|username"` formats)
+
+Example: allow Feishu group messages without @mention (useful if the group is just you):
+
+```json
+{
+  "channels": {
+    "feishu": {
+      "group_trigger": {
+        "mention_only": false,
+        "mentionless": true,
+        "command_bypass": true,
+        "command_prefixes": ["/"]
+      }
+    }
+  }
+}
+```
+
+If you're unsure whether inbound messages are being received, use `/api/notify` first to validate **outbound** delivery. If outbound works but inbound does not trigger, check `group_trigger` and `allow_from` first.
+
 ### Tool Trace (replayable tool-call logs)
 
 When `tools.trace.enabled=true`, every tool call appends to an on-disk JSONL event stream, and can optionally write per-call files. This makes it easy to debug:

@@ -34,6 +34,45 @@
 - `group_trigger` 默认更保守：群聊优先要求 `@机器人`（或命令 bypass / 前缀触发）。
 - `placeholder.delay_ms` 用来避免“很快就回复 → 先发占位符又立刻被编辑”的闪烁。
 
+## 常见问题：群聊发消息不回复（group_trigger / allow_from）
+
+**现象**：飞书群里发消息，机器人不回复；但你用 `/api/notify` 或“任务完成提醒”能收到机器人主动推送。
+
+优先按下面两点排查：
+
+1) `group_trigger` 是 safe-by-default  
+X-Claw 默认不会在群里“看到就回”，只有命中触发条件才会回复。常用字段：
+- `mention_only=true`：群聊必须 `@机器人` 才回复（更安全）
+- `command_bypass=true`：允许以 `/` 开头的命令绕过 `@` 要求（便于运维指令）
+- `prefixes=["/ask", "!"]`：只响应指定前缀（触发后会剥离前缀）
+- `mentionless=true`：群聊无需 `@` 也会回复（最放开，也最吵）
+
+如果你的群里“只有你自己”，想要更省事，可以直接打开 `mentionless`：
+
+```json
+{
+  "channels": {
+    "feishu": {
+      "group_trigger": {
+        "mention_only": false,
+        "mentionless": true,
+        "command_bypass": true,
+        "command_prefixes": ["/"]
+      }
+    }
+  }
+}
+```
+
+2) `allow_from` 会直接拦截入站消息  
+`allow_from=[]` 表示允许所有人；如果你填了非空列表，只有命中的 sender 才会被处理（其余会被静默忽略）。
+
+## 仍然收不到消息：检查飞书事件加密参数
+
+如果你“连私聊都收不到”，或群聊完全没有任何入站反应，且飞书后台启用了事件加密：
+- 请补齐 `encrypt_key` 与 `verification_token`
+- 然后重启 gateway（或开启 gateway reload 热更新）
+
 ## 常见坑：图片/文件下载失败（“资源共享给机器人”/权限不足）
 
 ### 症状
@@ -63,4 +102,3 @@
 3) 若仍失败：尝试让用户把资源“共享给机器人/可访问”，或改用可公开访问的链接（例如网盘链接、可直接下载的 URL）。
 
 > 提示：具体权限名称/控制台入口可能随飞书版本变化，优先以你当前飞书开发者后台为准。
-

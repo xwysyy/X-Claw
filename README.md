@@ -255,6 +255,41 @@ curl -sS -X POST http://127.0.0.1:18790/api/notify \
 
 外部 Agent（例如 Claude Code / Codex）对接 X-Claw 通知的扩展文档见：`extensions/x-claw-notify/SKILL.md`（通过调用 `/api/notify` 推送提醒）。
 
+### 常见问题：群聊发消息不回复（channels.*.group_trigger）
+
+**现象**：你在飞书/Telegram 群里发消息，机器人不理你；但 `/health` 正常、`/api/notify` 也能给你推送消息。
+
+**原因（最常见）**：X-Claw 对群聊采用 **safe-by-default** 策略，默认只在满足触发条件时才回复群消息，否则直接忽略（避免群里过吵）。
+
+群聊触发由 `channels.<channel>.group_trigger` 控制：
+- `mention_only=true`：必须 `@机器人` 才回复（更安全）
+- `command_bypass=true`：以 `/`（或自定义 `command_prefixes`）开头的命令可绕过 `@` 限制
+- `prefixes=["/ask", "!"]`：以指定前缀开头才触发（触发后会自动剥离前缀）
+- `mentionless=true`：群聊不需要 `@` 也会回复（最“放开”，但也最吵）
+
+同时注意 `allow_from`（允许列表）在群聊触发之前就会生效：
+- `allow_from=[]` 表示允许所有人
+- 非空表示只允许名单中的 sender（支持 `"platform:id"`、纯数字 id、`"@username"`、`"id|username"` 等格式）
+
+示例：允许飞书群聊不需要 `@` 也回复（适合“群里只有你自己”的场景）：
+
+```json
+{
+  "channels": {
+    "feishu": {
+      "group_trigger": {
+        "mention_only": false,
+        "mentionless": true,
+        "command_bypass": true,
+        "command_prefixes": ["/"]
+      }
+    }
+  }
+}
+```
+
+如果你不确定消息是否“入站成功”，可以先用 `/api/notify` 验证 **出站** 是否正常；若出站正常但入站不触发，优先检查 `group_trigger` 和 `allow_from`。
+
 ### 任务完成提醒（notify.on_task_complete）
 
 当你把 `notify.on_task_complete=true` 时，X-Claw 会在 **内部通道**（`cli/system/subagent`）的一次 run 正常结束后，自动通过 `message` tool 把“任务完成 + 结果摘要”发到 `last_active` 外部会话。

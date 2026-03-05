@@ -96,6 +96,23 @@
       "allow_from": [
         "YOUR_USER_ID"
       ],
+      "group_trigger": {
+        "command_bypass": true,
+        "command_prefixes": [
+          "/"
+        ],
+        "mention_only": false,
+        "mentionless": false,
+        "prefixes": []
+      },
+      "typing": {
+        "enabled": true
+      },
+      "placeholder": {
+        "enabled": true,
+        "text": "Thinking...",
+        "delay_ms": 2500
+      },
       "reasoning_channel_id": ""
     },
     "discord": {
@@ -130,6 +147,22 @@
       "encrypt_key": "",
       "verification_token": "",
       "allow_from": [],
+      "group_trigger": {
+        "mention_only": true,
+        "command_bypass": true,
+        "command_prefixes": [
+          "/"
+        ],
+        "mentionless": false,
+        "prefixes": []
+      },
+      "typing": {
+        "enabled": false
+      },
+      "placeholder": {
+        "enabled": false,
+        "delay_ms": 2500
+      },
       "reasoning_channel_id": ""
     },
     "dingtalk": {
