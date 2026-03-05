@@ -76,6 +76,7 @@ func (c *Config) NormalizeSecretRefs() {
 	c.Providers.Antigravity.APIKey = c.Providers.Antigravity.APIKey.Normalize(baseDir)
 	c.Providers.Qwen.APIKey = c.Providers.Qwen.APIKey.Normalize(baseDir)
 	c.Providers.Mistral.APIKey = c.Providers.Mistral.APIKey.Normalize(baseDir)
+	c.Providers.Avian.APIKey = c.Providers.Avian.APIKey.Normalize(baseDir)
 
 	// Model list
 	for i := range c.ModelList {
@@ -95,6 +96,8 @@ func (c *Config) NormalizeSecretRefs() {
 	for i := range c.Tools.Web.Grok.APIKeys {
 		c.Tools.Web.Grok.APIKeys[i] = c.Tools.Web.Grok.APIKeys[i].Normalize(baseDir)
 	}
+	c.Tools.Web.Perplexity.APIKey = c.Tools.Web.Perplexity.APIKey.Normalize(baseDir)
+	c.Tools.Web.GLMSearch.APIKey = c.Tools.Web.GLMSearch.APIKey.Normalize(baseDir)
 
 	// Skills registries
 	c.Tools.Skills.Registries.ClawHub.AuthToken = c.Tools.Skills.Registries.ClawHub.AuthToken.Normalize(baseDir)

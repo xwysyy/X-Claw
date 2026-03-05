@@ -20,15 +20,24 @@ import (
 // and tool registry. The session manager may be injected by the composition root
 // (AgentLoop) to enable shared conversation history across agents.
 type AgentInstance struct {
-	ID              string
-	Name            string
-	Model           string
-	Fallbacks       []string
-	Workspace       string
-	MaxIterations   int
-	MaxTokens       int
-	Temperature     float64
-	ContextWindow   int
+	ID          string
+	Name        string
+	Model       string
+	Fallbacks   []string
+	Workspace   string
+	MaxIterations int
+	MaxTokens     int
+	Temperature   float64
+
+	ThinkingLevel ThinkingLevel
+
+	// ContextWindow is the target context window (tokens) used for compaction/summarization decisions.
+	ContextWindow int
+
+	// Legacy summarization controls (still supported for compatibility).
+	SummarizeMessageThreshold int
+	SummarizeTokenPercent     int
+
 	Provider        providers.LLMProvider
 	Sessions        session.Store
 	ContextBuilder  *ContextBuilder
@@ -172,23 +181,42 @@ func NewAgentInstance(
 	allowWritePaths := compilePatterns(cfg.Tools.AllowWritePaths)
 
 	toolsRegistry := tools.NewToolRegistry()
-	readFileTool := tools.NewReadFileTool(workspace, readRestrict, allowReadPaths)
-	if cfg != nil && cfg.Limits.Enabled && cfg.Limits.MaxReadFileBytes > 0 {
-		readFileTool.SetMaxReadBytes(cfg.Limits.MaxReadFileBytes)
+	if cfg.Tools.IsToolEnabled("read_file") {
+		readFileTool := tools.NewReadFileTool(workspace, readRestrict, allowReadPaths)
+		if cfg != nil && cfg.Limits.Enabled && cfg.Limits.MaxReadFileBytes > 0 {
+			readFileTool.SetMaxReadBytes(cfg.Limits.MaxReadFileBytes)
+		}
+		toolsRegistry.Register(readFileTool)
 	}
-	toolsRegistry.Register(readFileTool)
-	toolsRegistry.Register(tools.NewDocumentTextTool(workspace, readRestrict))
-	toolsRegistry.Register(tools.NewWriteFileTool(workspace, restrict, allowWritePaths))
-	toolsRegistry.Register(tools.NewListDirTool(workspace, readRestrict, allowReadPaths))
-	execTool, err := tools.NewExecToolWithConfig(workspace, restrict, cfg)
-	if err != nil {
-		log.Fatalf("Critical error: unable to initialize exec tool: %v", err)
+	if cfg.Tools.IsToolEnabled("document_text") {
+		toolsRegistry.Register(tools.NewDocumentTextTool(workspace, readRestrict))
 	}
-	toolsRegistry.Register(execTool)
-	toolsRegistry.Register(tools.NewProcessTool(execTool.ProcessManager()))
+	if cfg.Tools.IsToolEnabled("write_file") {
+		toolsRegistry.Register(tools.NewWriteFileTool(workspace, restrict, allowWritePaths))
+	}
+	if cfg.Tools.IsToolEnabled("list_dir") {
+		toolsRegistry.Register(tools.NewListDirTool(workspace, readRestrict, allowReadPaths))
+	}
 
-	toolsRegistry.Register(tools.NewEditFileTool(workspace, restrict, allowWritePaths))
-	toolsRegistry.Register(tools.NewAppendFileTool(workspace, restrict, allowWritePaths))
+	var execTool *tools.ExecTool
+	if cfg.Tools.IsToolEnabled("exec") {
+		var err error
+		execTool, err = tools.NewExecToolWithConfig(workspace, restrict, cfg)
+		if err != nil {
+			log.Fatalf("Critical error: unable to initialize exec tool: %v", err)
+		}
+		toolsRegistry.Register(execTool)
+	}
+	if execTool != nil && cfg.Tools.IsToolEnabled("process") {
+		toolsRegistry.Register(tools.NewProcessTool(execTool.ProcessManager()))
+	}
+
+	if cfg.Tools.IsToolEnabled("edit_file") {
+		toolsRegistry.Register(tools.NewEditFileTool(workspace, restrict, allowWritePaths))
+	}
+	if cfg.Tools.IsToolEnabled("append_file") {
+		toolsRegistry.Register(tools.NewAppendFileTool(workspace, restrict, allowWritePaths))
+	}
 
 	contextBuilder := NewContextBuilder(workspace)
 
@@ -206,6 +234,24 @@ func NewAgentInstance(
 	pruning := resolveContextPruning(defaults.ContextPruning)
 	pruning.BootstrapSnapshot = defaults.BootstrapSnapshot.Enabled
 	memVec := resolveMemoryVector(defaults.MemoryVector)
+
+	var thinkingLevelStr string
+	if cfg != nil {
+		if mc, err := cfg.GetModelConfig(model); err == nil && mc != nil {
+			thinkingLevelStr = mc.ThinkingLevel
+		}
+	}
+	thinkingLevel := parseThinkingLevel(thinkingLevelStr)
+
+	summarizeMessageThreshold := defaults.SummarizeMessageThreshold
+	if summarizeMessageThreshold == 0 {
+		summarizeMessageThreshold = 20
+	}
+
+	summarizeTokenPercent := defaults.SummarizeTokenPercent
+	if summarizeTokenPercent == 0 {
+		summarizeTokenPercent = 75
+	}
 
 	contextBuilder.SetRuntimeSettings(ContextRuntimeSettings{
 		ContextWindowTokens:      maxTokens,
@@ -240,24 +286,27 @@ func NewAgentInstance(
 	candidates := resolveFallbackCandidates(model, fallbacks, defaults.Provider, cfg)
 
 	return &AgentInstance{
-		ID:            agentID,
-		Name:          agentName,
-		Model:         model,
-		Fallbacks:     fallbacks,
-		Workspace:     workspace,
-		MaxIterations: maxIter,
-		MaxTokens:     maxTokens,
-		Temperature:   temperature,
-		ContextWindow: maxTokens,
-		Provider:      provider,
+		ID:                        agentID,
+		Name:                      agentName,
+		Model:                     model,
+		Fallbacks:                 fallbacks,
+		Workspace:                 workspace,
+		MaxIterations:             maxIter,
+		MaxTokens:                 maxTokens,
+		Temperature:               temperature,
+		ThinkingLevel:             thinkingLevel,
+		ContextWindow:             maxTokens,
+		SummarizeMessageThreshold: summarizeMessageThreshold,
+		SummarizeTokenPercent:     summarizeTokenPercent,
+		Provider:                  provider,
 		// Sessions are injected by the composition root (AgentLoop) so multi-agent
 		// handoff can share one conversation history across agents.
 		Sessions:       nil,
-		ContextBuilder: contextBuilder,
-		Tools:          toolsRegistry,
-		Subagents:      subagents,
-		SkillsFilter:   skillsFilter,
-		Candidates:     candidates,
+		ContextBuilder:            contextBuilder,
+		Tools:                     toolsRegistry,
+		Subagents:                 subagents,
+		SkillsFilter:              skillsFilter,
+		Candidates:                candidates,
 		Compaction:     compaction,
 		ContextPruning: pruning,
 		MemoryVector:   memVec,

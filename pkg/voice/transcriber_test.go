@@ -13,7 +13,12 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/sipeed/picoclaw/pkg/config"
 )
+
+// Ensure GroqTranscriber satisfies the Transcriber interface at compile time.
+var _ Transcriber = (*GroqTranscriber)(nil)
 
 func TestGroqTranscriber_IsAvailable(t *testing.T) {
 	if NewGroqTranscriber("").IsAvailable() {
@@ -21,6 +26,126 @@ func TestGroqTranscriber_IsAvailable(t *testing.T) {
 	}
 	if !NewGroqTranscriber("k").IsAvailable() {
 		t.Fatal("expected non-empty api key transcriber to be available")
+	}
+}
+
+func TestGroqTranscriberName(t *testing.T) {
+	tr := NewGroqTranscriber("sk-test")
+	if got := tr.Name(); got != "groq" {
+		t.Errorf("Name() = %q, want %q", got, "groq")
+	}
+}
+
+func TestDetectTranscriber(t *testing.T) {
+	t.Setenv("GROQ_KEY", "sk-groq-env")
+
+	tests := []struct {
+		name       string
+		cfg        *config.Config
+		wantNil    bool
+		wantName   string
+		wantAPIKey string
+	}{
+		{
+			name:    "nil config",
+			cfg:     nil,
+			wantNil: true,
+		},
+		{
+			name:    "empty config",
+			cfg:     &config.Config{},
+			wantNil: true,
+		},
+		{
+			name: "groq provider key (inline)",
+			cfg: &config.Config{
+				Providers: config.ProvidersConfig{
+					Groq: config.ProviderConfig{APIKey: config.SecretRef{Inline: "sk-groq-direct"}},
+				},
+			},
+			wantName:   "groq",
+			wantAPIKey: "sk-groq-direct",
+		},
+		{
+			name: "groq provider key (env ref)",
+			cfg: &config.Config{
+				Providers: config.ProvidersConfig{
+					Groq: config.ProviderConfig{APIKey: config.SecretRef{Env: "GROQ_KEY"}},
+				},
+			},
+			wantName:   "groq",
+			wantAPIKey: "sk-groq-env",
+		},
+		{
+			name: "groq provider key (missing env) returns nil",
+			cfg: &config.Config{
+				Providers: config.ProvidersConfig{
+					Groq: config.ProviderConfig{APIKey: config.SecretRef{Env: "MISSING_GROQ_KEY"}},
+				},
+			},
+			wantNil: true,
+		},
+		{
+			name: "groq via model list",
+			cfg: &config.Config{
+				ModelList: []config.ModelConfig{
+					{ModelName: "openai", Model: "openai/gpt-4o", APIKey: config.SecretRef{Inline: "sk-openai"}},
+					{ModelName: "groq", Model: "groq/llama-3.3-70b", APIKey: config.SecretRef{Inline: "sk-groq-model"}},
+				},
+			},
+			wantName:   "groq",
+			wantAPIKey: "sk-groq-model",
+		},
+		{
+			name: "groq model list entry without key is skipped",
+			cfg: &config.Config{
+				ModelList: []config.ModelConfig{
+					{ModelName: "groq", Model: "groq/llama-3.3-70b"},
+				},
+			},
+			wantNil: true,
+		},
+		{
+			name: "provider key takes priority over model list",
+			cfg: &config.Config{
+				Providers: config.ProvidersConfig{
+					Groq: config.ProviderConfig{APIKey: config.SecretRef{Inline: "sk-groq-direct"}},
+				},
+				ModelList: []config.ModelConfig{
+					{ModelName: "groq", Model: "groq/llama-3.3-70b", APIKey: config.SecretRef{Inline: "sk-groq-model"}},
+				},
+			},
+			wantName:   "groq",
+			wantAPIKey: "sk-groq-direct",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			tr := DetectTranscriber(tc.cfg)
+			if tc.wantNil {
+				if tr != nil {
+					t.Errorf("DetectTranscriber() = %v, want nil", tr)
+				}
+				return
+			}
+			if tr == nil {
+				t.Fatal("DetectTranscriber() = nil, want non-nil")
+			}
+			if got := tr.Name(); got != tc.wantName {
+				t.Errorf("Name() = %q, want %q", got, tc.wantName)
+			}
+
+			if tc.wantAPIKey != "" {
+				gt, ok := tr.(*GroqTranscriber)
+				if !ok {
+					t.Fatalf("DetectTranscriber() = %T, want *GroqTranscriber", tr)
+				}
+				if got := gt.apiKey; got != tc.wantAPIKey {
+					t.Errorf("resolved api key = %q, want %q", got, tc.wantAPIKey)
+				}
+			}
+		})
 	}
 }
 
@@ -44,15 +169,15 @@ func TestGroqTranscriber_Transcribe_Success_RequestShapeAndParsing(t *testing.T)
 	}
 
 	type captured struct {
-		method        string
-		path          string
-		auth          string
-		contentType   string
-		model         string
-		responseFmt   string
-		fileFieldName string
-		fileName      string
-		fileBytes     []byte
+		method      string
+		path        string
+		auth        string
+		contentType string
+		model       string
+		responseFmt string
+		fileName    string
+		fileBytes   []byte
+		disposition string
 	}
 
 	var cap captured
@@ -98,8 +223,8 @@ func TestGroqTranscriber_Transcribe_Success_RequestShapeAndParsing(t *testing.T)
 		}
 		defer f.Close()
 
-		cap.fileFieldName = hdr.Header.Get("Content-Disposition")
 		cap.fileName = hdr.Filename
+		cap.disposition = hdr.Header.Get("Content-Disposition")
 		cap.fileBytes, err = io.ReadAll(f)
 		if err != nil {
 			handlerErr = fmt.Errorf("read multipart file: %w", err)
@@ -156,10 +281,8 @@ func TestGroqTranscriber_Transcribe_Success_RequestShapeAndParsing(t *testing.T)
 	if string(cap.fileBytes) != string(audioContent) {
 		t.Fatalf("uploaded file mismatch: got %q want %q", string(cap.fileBytes), string(audioContent))
 	}
-
-	// Minimal sanity-check that the request was a multipart form upload.
-	if !strings.Contains(cap.fileFieldName, "form-data") {
-		t.Fatalf("expected content-disposition to indicate form-data; got %q", cap.fileFieldName)
+	if cap.disposition != "" && !strings.Contains(cap.disposition, "form-data") {
+		t.Fatalf("expected content-disposition to indicate form-data; got %q", cap.disposition)
 	}
 }
 
@@ -219,7 +342,7 @@ func TestGroqTranscriber_Transcribe_InvalidJSON(t *testing.T) {
 }
 
 func TestGroqTranscriber_Transcribe_ContextCanceled(t *testing.T) {
-	// This test ensures the request respects context cancellation and returns promptly.
+	// Ensure the request respects context cancellation and returns promptly.
 	dir := t.TempDir()
 	audioPath := filepath.Join(dir, "audio.wav")
 	if err := os.WriteFile(audioPath, []byte("x"), 0o644); err != nil {

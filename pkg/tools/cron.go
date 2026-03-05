@@ -154,8 +154,8 @@ func (t *CronTool) Execute(ctx context.Context, args map[string]any) *ToolResult
 }
 
 func (t *CronTool) addJob(ctx context.Context, args map[string]any) *ToolResult {
-	channel := toolExecutionChannel(ctx)
-	chatID := toolExecutionChatID(ctx)
+	channel := ToolChannel(ctx)
+	chatID := ToolChatID(ctx)
 
 	if channel == "" || chatID == "" {
 		return ErrorResult("no session context (channel/chat_id not set). Use this tool in an active conversation.")

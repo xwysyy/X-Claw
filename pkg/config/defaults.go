@@ -26,19 +26,21 @@ func DefaultConfig() *Config {
 	return &Config{
 		Agents: AgentsConfig{
 			Defaults: AgentDefaults{
-				Workspace:           workspacePath,
-				RestrictToWorkspace: true,
-				Provider:            "",
-				Model:               "",
+				Workspace:                 workspacePath,
+				RestrictToWorkspace:       true,
+				Provider:                  "",
+				Model:                     "",
+				MaxTokens:                 32768,
+				Temperature:               nil, // nil means use provider default
+				MaxToolIterations:         50,
+				SummarizeMessageThreshold: 20,
+				SummarizeTokenPercent:     75,
 				SessionModelAutoDowngrade: SessionModelAutoDowngradeConfig{
 					Enabled:       false,
 					Threshold:     2,
 					WindowMinutes: 15,
 					TTLMinutes:    60,
 				},
-				MaxTokens:         32768,
-				Temperature:       nil, // nil means use provider default
-				MaxToolIterations: 50,
 				Compaction: AgentCompactionConfig{
 					Mode:             "safeguard",
 					ReserveTokens:    2048,
@@ -362,6 +364,20 @@ func DefaultConfig() *Config {
 				APIKey:    SecretRef{},
 			},
 
+			// Avian - https://avian.io
+				{
+					ModelName: "deepseek-v3.2",
+					Model:     "avian/deepseek/deepseek-v3.2",
+					APIBase:   "https://api.avian.io/v1",
+					APIKey:    SecretRef{},
+				},
+				{
+					ModelName: "kimi-k2.5",
+					Model:     "avian/moonshotai/kimi-k2.5",
+					APIBase:   "https://api.avian.io/v1",
+					APIKey:    SecretRef{},
+				},
+
 			// VLLM (local) - http://localhost:8000
 			{
 				ModelName: "local-model",
@@ -479,11 +495,16 @@ func DefaultConfig() *Config {
 				FailClosed: true,
 			},
 			MediaCleanup: MediaCleanupConfig{
-				Enabled:  true,
+				ToolConfig: ToolConfig{
+					Enabled: true,
+				},
 				MaxAge:   30,
 				Interval: 5,
 			},
 			Web: WebToolsConfig{
+				ToolConfig: ToolConfig{
+					Enabled: true,
+				},
 				Proxy:           "",
 				FetchLimitBytes: 10 * 1024 * 1024, // 10MB by default
 				FetchCache: WebFetchCacheConfig{
@@ -501,6 +522,17 @@ func DefaultConfig() *Config {
 					Enabled:    true,
 					MaxResults: 5,
 				},
+				Tavily: TavilyConfig{
+					Enabled:    false,
+					APIKey:     SecretRef{},
+					BaseURL:    "",
+					MaxResults: 5,
+				},
+				Perplexity: PerplexityConfig{
+					Enabled:    false,
+					APIKey:     SecretRef{},
+					MaxResults: 5,
+				},
 				Evidence: WebEvidenceModeConfig{
 					Enabled:    false,
 					MinDomains: 2,
@@ -510,6 +542,13 @@ func DefaultConfig() *Config {
 					APIKey:       SecretRef{},
 					Endpoint:     "https://api.x.ai/v1/chat/completions",
 					DefaultModel: "grok-4",
+					MaxResults:   5,
+				},
+				GLMSearch: GLMSearchConfig{
+					Enabled:      false,
+					APIKey:       SecretRef{},
+					BaseURL:      "https://open.bigmodel.cn/api/paas/v4/web_search",
+					SearchEngine: "search_std",
 					MaxResults:   5,
 				},
 			},
@@ -525,9 +564,15 @@ func DefaultConfig() *Config {
 				IncludeSchema: true,
 			},
 			Cron: CronToolsConfig{
+				ToolConfig: ToolConfig{
+					Enabled: true,
+				},
 				ExecTimeoutMinutes: 5,
 			},
 			Exec: ExecConfig{
+				ToolConfig: ToolConfig{
+					Enabled: true,
+				},
 				EnableDenyPatterns: true,
 				Backend:            "host",
 				Env: ExecEnvConfig{
@@ -561,6 +606,9 @@ func DefaultConfig() *Config {
 				},
 			},
 			Skills: SkillsToolsConfig{
+				ToolConfig: ToolConfig{
+					Enabled: true,
+				},
 				Registries: SkillsRegistriesConfig{
 					ClawHub: ClawHubRegistryConfig{
 						Enabled: true,
@@ -574,8 +622,49 @@ func DefaultConfig() *Config {
 				},
 			},
 			MCP: MCPConfig{
-				Enabled: false,
+				ToolConfig: ToolConfig{
+					Enabled: false,
+				},
 				Servers: map[string]MCPServerConfig{},
+			},
+			AppendFile: ToolConfig{
+				Enabled: true,
+			},
+			EditFile: ToolConfig{
+				Enabled: true,
+			},
+			FindSkills: ToolConfig{
+				Enabled: true,
+			},
+			I2C: ToolConfig{
+				Enabled: false, // Hardware tool - Linux only
+			},
+			InstallSkill: ToolConfig{
+				Enabled: true,
+			},
+			ListDir: ToolConfig{
+				Enabled: true,
+			},
+			Message: ToolConfig{
+				Enabled: true,
+			},
+			ReadFile: ToolConfig{
+				Enabled: true,
+			},
+			Spawn: ToolConfig{
+				Enabled: true,
+			},
+			SPI: ToolConfig{
+				Enabled: false, // Hardware tool - Linux only
+			},
+			Subagent: ToolConfig{
+				Enabled: true,
+			},
+			WebFetch: ToolConfig{
+				Enabled: true,
+			},
+			WriteFile: ToolConfig{
+				Enabled: true,
 			},
 		},
 		Heartbeat: HeartbeatConfig{

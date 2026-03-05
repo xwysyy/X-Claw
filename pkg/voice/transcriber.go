@@ -10,11 +10,18 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
+	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/utils"
 )
+
+type Transcriber interface {
+	Name() string
+	Transcribe(ctx context.Context, audioFilePath string) (*TranscriptionResponse, error)
+}
 
 type GroqTranscriber struct {
 	apiKey     string
@@ -152,8 +159,46 @@ func (t *GroqTranscriber) Transcribe(ctx context.Context, audioFilePath string) 
 	return &result, nil
 }
 
+func (t *GroqTranscriber) Name() string {
+	return "groq"
+}
+
 func (t *GroqTranscriber) IsAvailable() bool {
-	available := t.apiKey != ""
-	logger.DebugCF("voice", "Checking transcriber availability", map[string]any{"available": available})
-	return available
+	return strings.TrimSpace(t.apiKey) != ""
+}
+
+// DetectTranscriber inspects cfg and returns the appropriate Transcriber, or
+// nil if no supported transcription provider is configured.
+func DetectTranscriber(cfg *config.Config) Transcriber {
+	if cfg == nil {
+		return nil
+	}
+
+	// Direct Groq provider config takes priority.
+	if cfg.Providers.Groq.APIKey.Present() {
+		key, err := cfg.Providers.Groq.APIKey.Resolve("")
+		if err != nil {
+			logger.WarnCF("voice", "Failed to resolve groq api_key for transcriber", map[string]any{"error": err.Error()})
+		} else if strings.TrimSpace(key) != "" {
+			return NewGroqTranscriber(key)
+		}
+	}
+	// Fall back to any model-list entry that uses the groq/ protocol.
+	for _, mc := range cfg.ModelList {
+		if !strings.HasPrefix(strings.ToLower(strings.TrimSpace(mc.Model)), "groq/") {
+			continue
+		}
+		if !mc.APIKey.Present() {
+			continue
+		}
+		key, err := mc.APIKey.Resolve("")
+		if err != nil {
+			logger.WarnCF("voice", "Failed to resolve model_list api_key for transcriber", map[string]any{"model": mc.Model, "error": err.Error()})
+			continue
+		}
+		if strings.TrimSpace(key) != "" {
+			return NewGroqTranscriber(key)
+		}
+	}
+	return nil
 }

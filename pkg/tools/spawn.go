@@ -14,6 +14,9 @@ type SpawnTool struct {
 	allowlistCheck func(targetAgentID string) bool
 }
 
+// Compile-time check: SpawnTool implements AsyncExecutor.
+var _ AsyncExecutor = (*SpawnTool)(nil)
+
 func NewSpawnTool(manager *SubagentManager) *SpawnTool {
 	return &SpawnTool{
 		manager: manager,
@@ -59,6 +62,16 @@ func (t *SpawnTool) SetAllowlistChecker(check func(targetAgentID string) bool) {
 }
 
 func (t *SpawnTool) Execute(ctx context.Context, args map[string]any) *ToolResult {
+	return t.execute(ctx, args, nil)
+}
+
+// ExecuteAsync implements AsyncExecutor. The callback is passed through to the
+// subagent manager as a call parameter — never stored on the SpawnTool instance.
+func (t *SpawnTool) ExecuteAsync(ctx context.Context, args map[string]any, cb AsyncCallback) *ToolResult {
+	return t.execute(ctx, args, cb)
+}
+
+func (t *SpawnTool) execute(ctx context.Context, args map[string]any, cb AsyncCallback) *ToolResult {
 	task, ok := args["task"].(string)
 	if !ok || strings.TrimSpace(task) == "" {
 		return ErrorResult("task is required and must be a non-empty string")
@@ -87,8 +100,11 @@ func (t *SpawnTool) Execute(ctx context.Context, args map[string]any) *ToolResul
 		originChatID = "direct"
 	}
 
-	// Pass callback to manager for async completion notification (injected via context).
-	cb := toolExecutionAsyncCallback(ctx)
+	// Backward-compatible: older executor path injected callback via context.
+	if cb == nil {
+		cb = toolExecutionAsyncCallback(ctx)
+	}
+
 	taskInfo, err := t.manager.SpawnTask(ctx, task, label, agentID, originChannel, originChatID, cb)
 	if err != nil {
 		return ErrorResult(fmt.Sprintf("failed to spawn subagent: %v", err)).WithError(err)

@@ -25,31 +25,36 @@ func (m *mockRegistryTool) Execute(_ context.Context, _ map[string]any) *ToolRes
 	return m.result
 }
 
-type mockCtxTool struct {
+type mockContextAwareTool struct {
 	mockRegistryTool
-	channel string
-	chatID  string
+	lastCtx context.Context
 }
 
-func (m *mockCtxTool) SetContext(channel, chatID string) {
-	// Legacy interface retained for backward compatibility; context is now
-	// provided via ctx values for concurrency safety.
-}
-
-func (m *mockCtxTool) Execute(ctx context.Context, args map[string]any) *ToolResult {
-	m.channel = toolExecutionChannel(ctx)
-	m.chatID = toolExecutionChatID(ctx)
-	return m.mockRegistryTool.Execute(ctx, args)
+func (m *mockContextAwareTool) Execute(ctx context.Context, _ map[string]any) *ToolResult {
+	m.lastCtx = ctx
+	return m.result
 }
 
 type mockAsyncRegistryTool struct {
 	mockRegistryTool
-	cb AsyncCallback
+	lastCtx context.Context
+	lastCB  AsyncCallback
 }
 
-func (m *mockAsyncRegistryTool) Execute(ctx context.Context, args map[string]any) *ToolResult {
-	m.cb = toolExecutionAsyncCallback(ctx)
-	return m.mockRegistryTool.Execute(ctx, args)
+func (m *mockAsyncRegistryTool) ExecuteAsync(ctx context.Context, _ map[string]any, cb AsyncCallback) *ToolResult {
+	m.lastCtx = ctx
+	m.lastCB = cb
+	return m.result
+}
+
+type mockLegacyAsyncTool struct {
+	mockRegistryTool
+	cbFromCtx AsyncCallback
+}
+
+func (m *mockLegacyAsyncTool) Execute(ctx context.Context, _ map[string]any) *ToolResult {
+	m.cbFromCtx = toolExecutionAsyncCallback(ctx)
+	return m.result
 }
 
 type mockConcurrentSafeTool struct {
@@ -161,38 +166,61 @@ func TestToolRegistry_Execute_NotFound(t *testing.T) {
 	}
 }
 
-func TestToolRegistry_ExecuteWithContext_ContextualTool(t *testing.T) {
+func TestToolRegistry_ExecuteWithContext_InjectsToolContext(t *testing.T) {
 	r := NewToolRegistry()
-	ct := &mockCtxTool{
+	ct := &mockContextAwareTool{
 		mockRegistryTool: *newMockTool("ctx_tool", "needs context"),
 	}
 	r.Register(ct)
 
 	r.ExecuteWithContext(context.Background(), "ctx_tool", nil, "telegram", "chat-42", "", nil)
 
-	if ct.channel != "telegram" {
-		t.Errorf("expected channel 'telegram', got %q", ct.channel)
+	if ct.lastCtx == nil {
+		t.Fatal("expected Execute to be called")
 	}
-	if ct.chatID != "chat-42" {
-		t.Errorf("expected chatID 'chat-42', got %q", ct.chatID)
+	if got := ToolChannel(ct.lastCtx); got != "telegram" {
+		t.Errorf("ToolChannel: expected 'telegram', got %q", got)
+	}
+	if got := ToolChatID(ct.lastCtx); got != "chat-42" {
+		t.Errorf("ToolChatID: expected 'chat-42', got %q", got)
+	}
+	// Backward-compat: legacy helpers should still work.
+	if got := toolExecutionChannel(ct.lastCtx); got != "telegram" {
+		t.Errorf("toolExecutionChannel: expected 'telegram', got %q", got)
+	}
+	if got := toolExecutionChatID(ct.lastCtx); got != "chat-42" {
+		t.Errorf("toolExecutionChatID: expected 'chat-42', got %q", got)
 	}
 }
 
-func TestToolRegistry_ExecuteWithContext_SkipsEmptyContext(t *testing.T) {
+func TestToolRegistry_ExecuteWithContext_EmptyContext(t *testing.T) {
 	r := NewToolRegistry()
-	ct := &mockCtxTool{
+	ct := &mockContextAwareTool{
 		mockRegistryTool: *newMockTool("ctx_tool", "needs context"),
 	}
 	r.Register(ct)
 
 	r.ExecuteWithContext(context.Background(), "ctx_tool", nil, "", "", "", nil)
 
-	if ct.channel != "" || ct.chatID != "" {
-		t.Error("expected empty channel/chatID in context")
+	if ct.lastCtx == nil {
+		t.Fatal("expected Execute to be called")
+	}
+	// Empty values are still injected; tools decide what to do with them.
+	if got := ToolChannel(ct.lastCtx); got != "" {
+		t.Errorf("ToolChannel: expected empty, got %q", got)
+	}
+	if got := ToolChatID(ct.lastCtx); got != "" {
+		t.Errorf("ToolChatID: expected empty, got %q", got)
+	}
+	if got := toolExecutionChannel(ct.lastCtx); got != "" {
+		t.Errorf("toolExecutionChannel: expected empty, got %q", got)
+	}
+	if got := toolExecutionChatID(ct.lastCtx); got != "" {
+		t.Errorf("toolExecutionChatID: expected empty, got %q", got)
 	}
 }
 
-func TestToolRegistry_ExecuteWithContext_AsyncCallback(t *testing.T) {
+func TestToolRegistry_ExecuteWithContext_AsyncExecutorCallback(t *testing.T) {
 	r := NewToolRegistry()
 	at := &mockAsyncRegistryTool{
 		mockRegistryTool: *newMockTool("async_tool", "async work"),
@@ -204,14 +232,43 @@ func TestToolRegistry_ExecuteWithContext_AsyncCallback(t *testing.T) {
 	cb := func(_ context.Context, _ *ToolResult) { called = true }
 
 	result := r.ExecuteWithContext(context.Background(), "async_tool", nil, "", "", "", cb)
-	if at.cb == nil {
-		t.Error("expected async callback to be available via context")
+	if at.lastCB == nil {
+		t.Error("expected ExecuteAsync to have received a callback")
 	}
 	if !result.Async {
 		t.Error("expected async result")
 	}
 
-	at.cb(context.Background(), SilentResult("done"))
+	if at.lastCtx == nil || toolExecutionAsyncCallback(at.lastCtx) == nil {
+		t.Error("expected async callback to be available via context")
+	}
+
+	at.lastCB(context.Background(), SilentResult("done"))
+	if !called {
+		t.Error("expected callback to be invoked")
+	}
+}
+
+func TestToolRegistry_ExecuteWithContext_LegacyAsyncCallbackInjected(t *testing.T) {
+	r := NewToolRegistry()
+	lt := &mockLegacyAsyncTool{
+		mockRegistryTool: *newMockTool("legacy_async", "legacy async work"),
+	}
+	lt.result = AsyncResult("started")
+	r.Register(lt)
+
+	called := false
+	cb := func(_ context.Context, _ *ToolResult) { called = true }
+
+	result := r.ExecuteWithContext(context.Background(), "legacy_async", nil, "", "", "", cb)
+	if lt.cbFromCtx == nil {
+		t.Error("expected async callback to be available via context for legacy tools")
+	}
+	if !result.Async {
+		t.Error("expected async result")
+	}
+
+	lt.cbFromCtx(context.Background(), SilentResult("done"))
 	if !called {
 		t.Error("expected callback to be invoked")
 	}
@@ -419,25 +476,14 @@ func TestToolRegistry_CanRunToolCallInParallel(t *testing.T) {
 	}
 }
 
-func TestToolRegistry_CanRunToolCallInParallel_ContextualToolIsNotSafeByDefault(t *testing.T) {
-	r := NewToolRegistry()
-	r.Register(&mockCtxTool{
-		mockRegistryTool: *newMockTool("ctx_tool", "contextual"),
-	})
-
-	if r.CanRunToolCallInParallel("ctx_tool", ParallelToolsModeAll) {
-		t.Fatal("contextual tool should not be parallel-eligible by default")
-	}
-}
-
 func TestToolRegistry_CanRunToolCallInParallel_ConcurrentSafeOverride(t *testing.T) {
 	r := NewToolRegistry()
 	r.Register(&mockConcurrentSafeTool{
 		mockRegistryTool: *newMockTool("safe_tool", "safe"),
-		concurrentSafe:   true,
+		concurrentSafe:   false,
 	})
 
-	if !r.CanRunToolCallInParallel("safe_tool", ParallelToolsModeAll) {
-		t.Fatal("concurrent-safe tool should be parallel-eligible in all mode")
+	if r.CanRunToolCallInParallel("safe_tool", ParallelToolsModeAll) {
+		t.Fatal("tool opted out via ConcurrentSafeTool should not be parallel-eligible")
 	}
 }

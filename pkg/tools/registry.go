@@ -104,14 +104,9 @@ func (r *ToolRegistry) IsParallelInstanceSafe(name string) bool {
 	if safeTool, ok := tool.(ConcurrentSafeTool); ok {
 		return safeTool.SupportsConcurrentExecution()
 	}
-	// Conservative default: tools with mutable per-call hooks are not safe
-	// unless they explicitly opt in via ConcurrentSafeTool.
-	if _, ok := tool.(ContextualTool); ok {
-		return false
-	}
-	if _, ok := tool.(AsyncTool); ok {
-		return false
-	}
+	// Default: assume tools are safe to reuse concurrently unless they explicitly
+	// opt out via ConcurrentSafeTool. The executor still gates parallelization
+	// by tool-level policy (read_only_only).
 	return true
 }
 
@@ -154,6 +149,8 @@ func (r *ToolRegistry) ExecuteWithContext(
 ) *ToolResult {
 	ctx = withExecutionContext(ctx, channel, chatID, senderID)
 	ctx = withExecutionAsyncCallback(ctx, asyncCallback)
+	// Support newer ToolChannel/ToolChatID accessors as well.
+	ctx = WithToolContext(ctx, channel, chatID)
 
 	// Avoid logging raw args (may contain secrets). ToolTrace/Policy is the
 	// canonical place for detailed auditing.
@@ -178,8 +175,19 @@ func (r *ToolRegistry) ExecuteWithContext(
 		return ErrorResult(fmt.Sprintf("tool %q not found", name)).WithError(fmt.Errorf("tool not found"))
 	}
 
+	// If tool implements AsyncExecutor and callback is provided, use ExecuteAsync.
+	// The callback is a call parameter, not mutable state on the tool instance.
+	var result *ToolResult
 	start := time.Now()
-	result := tool.Execute(ctx, args)
+	if asyncExec, ok := tool.(AsyncExecutor); ok && asyncCallback != nil {
+		logger.DebugCF("tool", "Executing async tool via ExecuteAsync",
+			map[string]any{
+				"tool": name,
+			})
+		result = asyncExec.ExecuteAsync(ctx, args, asyncCallback)
+	} else {
+		result = tool.Execute(ctx, args)
+	}
 	duration := time.Since(start)
 
 	// Log based on result type

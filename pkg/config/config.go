@@ -258,6 +258,10 @@ type AgentDefaults struct {
 	MaxTokens                 int                             `json:"max_tokens"                      env:"PICOCLAW_AGENTS_DEFAULTS_MAX_TOKENS"`
 	Temperature               *float64                        `json:"temperature,omitempty"           env:"PICOCLAW_AGENTS_DEFAULTS_TEMPERATURE"`
 	MaxToolIterations         int                             `json:"max_tool_iterations"             env:"PICOCLAW_AGENTS_DEFAULTS_MAX_TOOL_ITERATIONS"`
+	// Legacy summarization controls (still supported for compatibility).
+	// Prefer compaction/context_pruning for more predictable behavior.
+	SummarizeMessageThreshold int `json:"summarize_message_threshold,omitempty" env:"PICOCLAW_AGENTS_DEFAULTS_SUMMARIZE_MESSAGE_THRESHOLD"`
+	SummarizeTokenPercent     int `json:"summarize_token_percent,omitempty"     env:"PICOCLAW_AGENTS_DEFAULTS_SUMMARIZE_TOKEN_PERCENT"`
 	MaxMediaSize              int                             `json:"max_media_size,omitempty"        env:"PICOCLAW_AGENTS_DEFAULTS_MAX_MEDIA_SIZE"`
 	Compaction                AgentCompactionConfig           `json:"compaction,omitempty"`
 	ContextPruning            AgentContextPruningConfig       `json:"context_pruning,omitempty"`
@@ -440,6 +444,7 @@ type FeishuConfig struct {
 type DiscordConfig struct {
 	Enabled            bool                `json:"enabled"                 env:"PICOCLAW_CHANNELS_DISCORD_ENABLED"`
 	Token              SecretRef           `json:"token"                   env:"PICOCLAW_CHANNELS_DISCORD_TOKEN"`
+	Proxy              string              `json:"proxy"                   env:"PICOCLAW_CHANNELS_DISCORD_PROXY"`
 	AllowFrom          FlexibleStringSlice `json:"allow_from"              env:"PICOCLAW_CHANNELS_DISCORD_ALLOW_FROM"`
 	MentionOnly        bool                `json:"mention_only"            env:"PICOCLAW_CHANNELS_DISCORD_MENTION_ONLY"`
 	GroupTrigger       GroupTriggerConfig  `json:"group_trigger,omitempty"`
@@ -702,6 +707,7 @@ type ProvidersConfig struct {
 	Antigravity   ProviderConfig       `json:"antigravity"`
 	Qwen          ProviderConfig       `json:"qwen"`
 	Mistral       ProviderConfig       `json:"mistral"`
+	Avian         ProviderConfig       `json:"avian"`
 }
 
 // IsEmpty checks if all provider configs are empty (no API keys or API bases set)
@@ -725,7 +731,8 @@ func (p ProvidersConfig) IsEmpty() bool {
 		p.GitHubCopilot.APIKey.IsZero() && p.GitHubCopilot.APIBase == "" &&
 		p.Antigravity.APIKey.IsZero() && p.Antigravity.APIBase == "" &&
 		p.Qwen.APIKey.IsZero() && p.Qwen.APIBase == "" &&
-		p.Mistral.APIKey.IsZero() && p.Mistral.APIBase == ""
+		p.Mistral.APIKey.IsZero() && p.Mistral.APIBase == "" &&
+		p.Avian.APIKey.IsZero() && p.Avian.APIBase == ""
 }
 
 // MarshalJSON implements custom JSON marshaling for ProvidersConfig
@@ -776,6 +783,7 @@ type ModelConfig struct {
 	RPM            int    `json:"rpm,omitempty"`              // Requests per minute limit
 	MaxTokensField string `json:"max_tokens_field,omitempty"` // Field name for max tokens (e.g., "max_completion_tokens")
 	RequestTimeout int    `json:"request_timeout,omitempty"`
+	ThinkingLevel  string `json:"thinking_level,omitempty"` // Extended thinking: off|low|medium|high|xhigh|adaptive
 }
 
 // Validate checks if the ModelConfig has all required fields.
@@ -826,6 +834,10 @@ type GatewayReloadConfig struct {
 	IntervalSeconds int `json:"interval_seconds,omitempty"`
 }
 
+type ToolConfig struct {
+	Enabled bool `json:"enabled" env:"ENABLED"`
+}
+
 type BraveConfig struct {
 	Enabled    bool        `json:"enabled"     env:"PICOCLAW_TOOLS_WEB_BRAVE_ENABLED"`
 	APIKey     SecretRef   `json:"api_key"     env:"PICOCLAW_TOOLS_WEB_BRAVE_API_KEY"`
@@ -868,11 +880,30 @@ type WebEvidenceModeConfig struct {
 	MinDomains int `json:"min_domains,omitempty"`
 }
 
+type GLMSearchConfig struct {
+	Enabled bool      `json:"enabled"  env:"PICOCLAW_TOOLS_WEB_GLM_ENABLED"`
+	APIKey  SecretRef `json:"api_key"  env:"PICOCLAW_TOOLS_WEB_GLM_API_KEY"`
+	BaseURL string    `json:"base_url" env:"PICOCLAW_TOOLS_WEB_GLM_BASE_URL"`
+	// SearchEngine specifies the search backend: "search_std" (default),
+	// "search_pro", "search_pro_sogou", or "search_pro_quark".
+	SearchEngine string `json:"search_engine" env:"PICOCLAW_TOOLS_WEB_GLM_SEARCH_ENGINE"`
+	MaxResults   int    `json:"max_results"   env:"PICOCLAW_TOOLS_WEB_GLM_MAX_RESULTS"`
+}
+
+type PerplexityConfig struct {
+	Enabled    bool      `json:"enabled"     env:"PICOCLAW_TOOLS_WEB_PERPLEXITY_ENABLED"`
+	APIKey     SecretRef `json:"api_key"     env:"PICOCLAW_TOOLS_WEB_PERPLEXITY_API_KEY"`
+	MaxResults int       `json:"max_results" env:"PICOCLAW_TOOLS_WEB_PERPLEXITY_MAX_RESULTS"`
+}
+
 type WebToolsConfig struct {
-	Brave      BraveConfig           `json:"brave"`
-	Tavily     TavilyConfig          `json:"tavily"`
-	DuckDuckGo DuckDuckGoConfig      `json:"duckduckgo"`
-	Grok       GrokConfig            `json:"grok"`
+	ToolConfig `envPrefix:"PICOCLAW_TOOLS_WEB_"`
+	Brave      BraveConfig      `json:"brave"`
+	Tavily     TavilyConfig     `json:"tavily"`
+	DuckDuckGo DuckDuckGoConfig `json:"duckduckgo"`
+	Perplexity PerplexityConfig `json:"perplexity"`
+	GLMSearch  GLMSearchConfig  `json:"glm_search"`
+	Grok       GrokConfig       `json:"grok"`
 	Evidence   WebEvidenceModeConfig `json:"evidence_mode,omitempty"`
 	// Proxy is an optional proxy URL for web tools (http/https/socks5/socks5h).
 	// For authenticated proxies, prefer HTTP_PROXY/HTTPS_PROXY env vars instead of embedding credentials in config.
@@ -899,7 +930,8 @@ type WebFetchCacheConfig struct {
 }
 
 type CronToolsConfig struct {
-	ExecTimeoutMinutes int `json:"exec_timeout_minutes" env:"PICOCLAW_TOOLS_CRON_EXEC_TIMEOUT_MINUTES"` // 0 means no timeout
+	ToolConfig         `    envPrefix:"PICOCLAW_TOOLS_CRON_"`
+	ExecTimeoutMinutes int `                                 env:"PICOCLAW_TOOLS_CRON_EXEC_TIMEOUT_MINUTES" json:"exec_timeout_minutes"` // 0 means no timeout
 }
 
 // ToolTraceConfig controls on-disk tracing of tool calls for debugging and replay.
@@ -935,6 +967,8 @@ type ToolErrorTemplateConfig struct {
 }
 
 type ExecConfig struct {
+	ToolConfig `envPrefix:"PICOCLAW_TOOLS_EXEC_"`
+
 	EnableDenyPatterns  bool     `json:"enable_deny_patterns"  env:"PICOCLAW_TOOLS_EXEC_ENABLE_DENY_PATTERNS"`
 	CustomDenyPatterns  []string `json:"custom_deny_patterns"  env:"PICOCLAW_TOOLS_EXEC_CUSTOM_DENY_PATTERNS"`
 	CustomAllowPatterns []string `json:"custom_allow_patterns" env:"PICOCLAW_TOOLS_EXEC_CUSTOM_ALLOW_PATTERNS"`
@@ -1034,26 +1068,44 @@ type PlanModeConfig struct {
 }
 
 type MediaCleanupConfig struct {
-	Enabled  bool `json:"enabled"          env:"PICOCLAW_MEDIA_CLEANUP_ENABLED"`
-	MaxAge   int  `json:"max_age_minutes"  env:"PICOCLAW_MEDIA_CLEANUP_MAX_AGE"`
-	Interval int  `json:"interval_minutes" env:"PICOCLAW_MEDIA_CLEANUP_INTERVAL"`
+	ToolConfig `    envPrefix:"PICOCLAW_MEDIA_CLEANUP_"`
+	MaxAge     int `                                    env:"PICOCLAW_MEDIA_CLEANUP_MAX_AGE"  json:"max_age_minutes"`
+	Interval   int `                                    env:"PICOCLAW_MEDIA_CLEANUP_INTERVAL" json:"interval_minutes"`
 }
 
 type ToolsConfig struct {
-	AllowReadPaths  []string                `json:"allow_read_paths"  env:"PICOCLAW_TOOLS_ALLOW_READ_PATHS"`
-	AllowWritePaths []string                `json:"allow_write_paths" env:"PICOCLAW_TOOLS_ALLOW_WRITE_PATHS"`
-	Web             WebToolsConfig          `json:"web"`
-	MCP             MCPConfig               `json:"mcp,omitempty"`
-	Policy          ToolPolicyConfig        `json:"policy,omitempty"`
-	Hooks           ToolHooksConfig         `json:"hooks,omitempty"`
-	PlanMode        PlanModeConfig          `json:"plan_mode,omitempty"`
-	Estop           EstopConfig             `json:"estop,omitempty"`
-	Trace           ToolTraceConfig         `json:"trace,omitempty"`
-	ErrorTemplate   ToolErrorTemplateConfig `json:"error_template,omitempty"`
-	Cron            CronToolsConfig         `json:"cron"`
-	Exec            ExecConfig              `json:"exec"`
-	Skills          SkillsToolsConfig       `json:"skills"`
-	MediaCleanup    MediaCleanupConfig      `json:"media_cleanup"`
+	AllowReadPaths  []string `json:"allow_read_paths"  env:"PICOCLAW_TOOLS_ALLOW_READ_PATHS"`
+	AllowWritePaths []string `json:"allow_write_paths" env:"PICOCLAW_TOOLS_ALLOW_WRITE_PATHS"`
+
+	Web          WebToolsConfig     `json:"web"`
+	Cron         CronToolsConfig    `json:"cron"`
+	Exec         ExecConfig         `json:"exec"`
+	Skills       SkillsToolsConfig  `json:"skills"`
+	MediaCleanup MediaCleanupConfig `json:"media_cleanup"`
+	MCP          MCPConfig          `json:"mcp,omitempty"`
+
+	// Governance / safety controls (policy-first tools).
+	Policy        ToolPolicyConfig        `json:"policy,omitempty"`
+	Hooks         ToolHooksConfig         `json:"hooks,omitempty"`
+	PlanMode      PlanModeConfig          `json:"plan_mode,omitempty"`
+	Estop         EstopConfig             `json:"estop,omitempty"`
+	Trace         ToolTraceConfig         `json:"trace,omitempty"`
+	ErrorTemplate ToolErrorTemplateConfig `json:"error_template,omitempty"`
+
+	// Tool-level toggles (coarse enable/disable per tool name).
+	AppendFile   ToolConfig `json:"append_file,omitempty"   envPrefix:"PICOCLAW_TOOLS_APPEND_FILE_"`
+	EditFile     ToolConfig `json:"edit_file,omitempty"     envPrefix:"PICOCLAW_TOOLS_EDIT_FILE_"`
+	FindSkills   ToolConfig `json:"find_skills,omitempty"   envPrefix:"PICOCLAW_TOOLS_FIND_SKILLS_"`
+	I2C          ToolConfig `json:"i2c,omitempty"           envPrefix:"PICOCLAW_TOOLS_I2C_"`
+	InstallSkill ToolConfig `json:"install_skill,omitempty" envPrefix:"PICOCLAW_TOOLS_INSTALL_SKILL_"`
+	ListDir      ToolConfig `json:"list_dir,omitempty"      envPrefix:"PICOCLAW_TOOLS_LIST_DIR_"`
+	Message      ToolConfig `json:"message,omitempty"       envPrefix:"PICOCLAW_TOOLS_MESSAGE_"`
+	ReadFile     ToolConfig `json:"read_file,omitempty"     envPrefix:"PICOCLAW_TOOLS_READ_FILE_"`
+	Spawn        ToolConfig `json:"spawn,omitempty"         envPrefix:"PICOCLAW_TOOLS_SPAWN_"`
+	SPI          ToolConfig `json:"spi,omitempty"           envPrefix:"PICOCLAW_TOOLS_SPI_"`
+	Subagent     ToolConfig `json:"subagent,omitempty"      envPrefix:"PICOCLAW_TOOLS_SUBAGENT_"`
+	WebFetch     ToolConfig `json:"web_fetch,omitempty"     envPrefix:"PICOCLAW_TOOLS_WEB_FETCH_"`
+	WriteFile    ToolConfig `json:"write_file,omitempty"    envPrefix:"PICOCLAW_TOOLS_WRITE_FILE_"`
 }
 
 // ToolPolicyConfig defines a centralized policy/middleware for all tool calls.
@@ -1148,8 +1200,10 @@ type ToolPolicyAuditConfig struct {
 }
 
 type SkillsToolsConfig struct {
+	ToolConfig `envPrefix:"PICOCLAW_TOOLS_SKILLS_"`
+
 	Registries            SkillsRegistriesConfig `json:"registries"`
-	MaxConcurrentSearches int                    `json:"max_concurrent_searches" env:"PICOCLAW_SKILLS_MAX_CONCURRENT_SEARCHES"`
+	MaxConcurrentSearches int                    `json:"max_concurrent_searches" env:"PICOCLAW_TOOLS_SKILLS_MAX_CONCURRENT_SEARCHES"`
 	SearchCache           SearchCacheConfig      `json:"search_cache"`
 }
 
@@ -1196,8 +1250,7 @@ type MCPServerConfig struct {
 
 // MCPConfig defines configuration for all MCP servers
 type MCPConfig struct {
-	// Enabled globally enables/disables MCP integration
-	Enabled bool `json:"enabled" env:"PICOCLAW_TOOLS_MCP_ENABLED"`
+	ToolConfig `envPrefix:"PICOCLAW_TOOLS_MCP_"`
 	// Servers is a map of server name to server configuration
 	Servers map[string]MCPServerConfig `json:"servers,omitempty"`
 }
@@ -1391,4 +1444,49 @@ func (c *Config) ValidateModelList() error {
 		return fmt.Errorf("%s is invalid", path)
 	}
 	return fmt.Errorf("%s: %s", path, msg)
+}
+
+func (t *ToolsConfig) IsToolEnabled(name string) bool {
+	switch name {
+	case "web":
+		return t.Web.Enabled
+	case "cron":
+		return t.Cron.Enabled
+	case "exec":
+		return t.Exec.Enabled
+	case "skills":
+		return t.Skills.Enabled
+	case "media_cleanup":
+		return t.MediaCleanup.Enabled
+	case "append_file":
+		return t.AppendFile.Enabled
+	case "edit_file":
+		return t.EditFile.Enabled
+	case "find_skills":
+		return t.FindSkills.Enabled
+	case "i2c":
+		return t.I2C.Enabled
+	case "install_skill":
+		return t.InstallSkill.Enabled
+	case "list_dir":
+		return t.ListDir.Enabled
+	case "message":
+		return t.Message.Enabled
+	case "read_file":
+		return t.ReadFile.Enabled
+	case "spawn":
+		return t.Spawn.Enabled
+	case "spi":
+		return t.SPI.Enabled
+	case "subagent":
+		return t.Subagent.Enabled
+	case "web_fetch":
+		return t.WebFetch.Enabled
+	case "write_file":
+		return t.WriteFile.Enabled
+	case "mcp":
+		return t.MCP.Enabled
+	default:
+		return true
+	}
 }

@@ -39,6 +39,7 @@ import (
 	"github.com/sipeed/picoclaw/pkg/providers"
 	"github.com/sipeed/picoclaw/pkg/session"
 	"github.com/sipeed/picoclaw/pkg/tools"
+	"github.com/sipeed/picoclaw/pkg/voice"
 )
 
 // gatewayServices groups all long-lived services for clean startup/shutdown.
@@ -112,6 +113,12 @@ func initGatewayServices(debug bool) (*gatewayServices, error) {
 
 	agentLoop.SetChannelManager(channelManager)
 	agentLoop.SetMediaResolver(media.AsMediaResolver(mediaStore))
+
+	// Wire up voice transcription if a supported provider is configured.
+	if transcriber := voice.DetectTranscriber(cfg); transcriber != nil {
+		agentLoop.SetTranscriber(transcriber)
+		logger.InfoCF("voice", "Transcription enabled (agent-level)", map[string]any{"provider": transcriber.Name()})
+	}
 
 	enabledChannels := channelManager.GetEnabledChannels()
 	if len(enabledChannels) > 0 {
@@ -519,16 +526,24 @@ func setupCronTool(
 	cronStorePath := filepath.Join(workspace, "cron", "jobs.json")
 	cronService := cron.NewCronService(cronStorePath, nil)
 
-	cronTool, err := tools.NewCronTool(cronService, agentLoop, msgBus, workspace, restrict, execTimeout, cfg)
-	if err != nil {
-		log.Fatalf("Critical error during CronTool initialization: %v", err)
+	// Create and register CronTool if enabled
+	var cronTool *tools.CronTool
+	if cfg.Tools.IsToolEnabled("cron") {
+		var err error
+		cronTool, err = tools.NewCronTool(cronService, agentLoop, msgBus, workspace, restrict, execTimeout, cfg)
+		if err != nil {
+			log.Fatalf("Critical error during CronTool initialization: %v", err)
+		}
+
+		agentLoop.RegisterTool(cronTool)
 	}
 
-	agentLoop.RegisterTool(cronTool)
-
-	cronService.SetOnJob(func(job *cron.CronJob) (string, error) {
-		return cronTool.ExecuteJob(context.Background(), job)
-	})
+	// Set onJob handler
+	if cronTool != nil {
+		cronService.SetOnJob(func(job *cron.CronJob) (string, error) {
+			return cronTool.ExecuteJob(context.Background(), job)
+		})
+	}
 
 	return cronService
 }
