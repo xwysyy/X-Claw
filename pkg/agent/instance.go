@@ -8,8 +8,12 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
+
+	"github.com/xwysyy/X-Claw/internal/core/ports"
 
 	"github.com/xwysyy/X-Claw/pkg/config"
+	"github.com/xwysyy/X-Claw/pkg/logger"
 	"github.com/xwysyy/X-Claw/pkg/providers"
 	"github.com/xwysyy/X-Claw/pkg/routing"
 	"github.com/xwysyy/X-Claw/pkg/session"
@@ -19,6 +23,14 @@ import (
 // AgentInstance represents a configured agent with its own workspace, context builder,
 // and tool registry. The session manager may be injected by the composition root
 // (AgentLoop) to enable shared conversation history across agents.
+// Type aliases for core ports. This keeps agent APIs readable while
+// using the canonical interface definitions from internal/core.
+type (
+	ChannelDirectory = ports.ChannelDirectory
+	MediaResolver    = ports.MediaResolver
+	MediaMeta        = ports.MediaMeta
+)
+
 type AgentInstance struct {
 	ID            string
 	Name          string
@@ -303,4 +315,188 @@ func expandHome(path string) string {
 		return home
 	}
 	return path
+}
+
+// CompactionSettings groups all compaction-related parameters.
+type CompactionSettings struct {
+	Mode                     string
+	ReserveTokens            int
+	KeepRecentTokens         int
+	MaxHistoryShare          float64
+	MemoryFlushEnabled       bool
+	MemoryFlushSoftThreshold int
+	NotifyUser               bool
+}
+
+// ContextPruningSettings groups all context pruning parameters.
+type ContextPruningSettings struct {
+	Mode              string
+	IncludeChitChat   bool
+	SoftToolChars     int
+	HardToolChars     int
+	TriggerRatio      float64
+	BootstrapSnapshot bool
+}
+
+func resolveCompaction(c config.AgentCompactionConfig) CompactionSettings {
+	mode := strings.TrimSpace(c.Mode)
+	if mode == "" {
+		mode = "safeguard"
+	}
+
+	flushEnabled := c.MemoryFlush.Enabled
+	if !c.MemoryFlush.Enabled && c.MemoryFlush.SoftThresholdTokens == 0 {
+		flushEnabled = true
+	}
+
+	return CompactionSettings{
+		Mode:                     mode,
+		ReserveTokens:            intDefault(c.ReserveTokens, 2048),
+		KeepRecentTokens:         intDefault(c.KeepRecentTokens, 2048),
+		MaxHistoryShare:          floatRangeDefault(c.MaxHistoryShare, 0, 0.9, 0.5),
+		MemoryFlushEnabled:       flushEnabled,
+		MemoryFlushSoftThreshold: intDefault(c.MemoryFlush.SoftThresholdTokens, 1500),
+		NotifyUser:               c.NotifyUser,
+	}
+}
+
+func resolveContextPruning(c config.AgentContextPruningConfig) ContextPruningSettings {
+	mode := strings.TrimSpace(c.Mode)
+	if mode == "" {
+		mode = "tools_only"
+	}
+	return ContextPruningSettings{
+		Mode:            mode,
+		IncludeChitChat: c.IncludeOldChitChat,
+		SoftToolChars:   intDefault(c.SoftToolResultChars, 2000),
+		HardToolChars:   intDefault(c.HardToolResultChars, 350),
+		TriggerRatio:    floatRangeDefault(c.TriggerRatio, 0, 1, 0.8),
+	}
+}
+
+func resolveMemoryVector(c config.AgentMemoryVectorConfig) MemoryVectorSettings {
+	apiKey := ""
+	if c.Embedding.APIKey.Present() {
+		if v, err := c.Embedding.APIKey.Resolve(""); err == nil {
+			apiKey = v
+		}
+	}
+	return MemoryVectorSettings{
+		Enabled:         c.Enabled,
+		Dimensions:      intDefault(c.Dimensions, defaultMemoryVectorDimensions),
+		TopK:            intDefault(c.TopK, defaultMemoryVectorTopK),
+		MinScore:        floatRangeDefault(c.MinScore, 0, 1, defaultMemoryVectorMinScore),
+		MaxContextChars: intDefault(c.MaxContextChars, defaultMemoryVectorMaxContextChars),
+		RecentDailyDays: intDefault(c.RecentDailyDays, defaultMemoryVectorRecentDailyDays),
+		Embedding: MemoryVectorEmbeddingSettings{
+			Kind:                  c.Embedding.Kind,
+			APIKey:                apiKey,
+			APIBase:               c.Embedding.APIBase,
+			Model:                 c.Embedding.Model,
+			Proxy:                 c.Embedding.Proxy,
+			BatchSize:             c.Embedding.BatchSize,
+			RequestTimeoutSeconds: c.Embedding.RequestTimeoutSeconds,
+		},
+		Hybrid: MemoryHybridSettings{
+			FTSWeight:    c.Hybrid.FTSWeight,
+			VectorWeight: c.Hybrid.VectorWeight,
+		},
+	}
+}
+
+func intDefault(v, fallback int) int {
+	if v <= 0 {
+		return fallback
+	}
+	return v
+}
+
+func floatRangeDefault(v, lo, hi, fallback float64) float64 {
+	if v <= lo || v >= hi {
+		return fallback
+	}
+	return v
+}
+
+// AgentRegistry manages multiple agent instances and routes messages to them.
+type AgentRegistry struct {
+	agents   map[string]*AgentInstance
+	resolver *routing.RouteResolver
+	mu       sync.RWMutex
+}
+
+// NewAgentRegistry creates a registry from config, instantiating all agents.
+func NewAgentRegistry(
+	cfg *config.Config,
+	provider providers.LLMProvider,
+) *AgentRegistry {
+	registry := &AgentRegistry{
+		agents:   make(map[string]*AgentInstance),
+		resolver: routing.NewRouteResolver(cfg),
+	}
+
+	agentConfigs := cfg.Agents.List
+	if len(agentConfigs) == 0 {
+		implicitAgent := &config.AgentConfig{
+			ID:      "main",
+			Default: true,
+		}
+		instance := NewAgentInstance(implicitAgent, &cfg.Agents.Defaults, cfg, provider)
+		registry.agents["main"] = instance
+		logger.InfoCF("agent", "Created implicit main agent (no agents.list configured)", nil)
+	} else {
+		for i := range agentConfigs {
+			ac := &agentConfigs[i]
+			id := routing.NormalizeAgentID(ac.ID)
+			instance := NewAgentInstance(ac, &cfg.Agents.Defaults, cfg, provider)
+			registry.agents[id] = instance
+			logger.InfoCF("agent", "Registered agent",
+				map[string]any{
+					"agent_id":  id,
+					"name":      ac.Name,
+					"workspace": instance.Workspace,
+					"model":     instance.Model,
+				})
+		}
+	}
+
+	return registry
+}
+
+// GetAgent returns the agent instance for a given ID.
+func (r *AgentRegistry) GetAgent(agentID string) (*AgentInstance, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	id := routing.NormalizeAgentID(agentID)
+	agent, ok := r.agents[id]
+	return agent, ok
+}
+
+// ResolveRoute determines which agent handles the message.
+func (r *AgentRegistry) ResolveRoute(input routing.RouteInput) routing.ResolvedRoute {
+	return r.resolver.ResolveRoute(input)
+}
+
+// ListAgentIDs returns all registered agent IDs.
+func (r *AgentRegistry) ListAgentIDs() []string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	ids := make([]string, 0, len(r.agents))
+	for id := range r.agents {
+		ids = append(ids, id)
+	}
+	return ids
+}
+
+// GetDefaultAgent returns the default agent instance.
+func (r *AgentRegistry) GetDefaultAgent() *AgentInstance {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if agent, ok := r.agents["main"]; ok {
+		return agent
+	}
+	for _, agent := range r.agents {
+		return agent
+	}
+	return nil
 }
