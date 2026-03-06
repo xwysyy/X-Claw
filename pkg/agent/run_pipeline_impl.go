@@ -2,15 +2,23 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/xwysyy/X-Claw/pkg/bus"
 	"github.com/xwysyy/X-Claw/pkg/config"
 	"github.com/xwysyy/X-Claw/pkg/constants"
+	"github.com/xwysyy/X-Claw/pkg/fileutil"
 	"github.com/xwysyy/X-Claw/pkg/logger"
 	"github.com/xwysyy/X-Claw/pkg/providers"
 	"github.com/xwysyy/X-Claw/pkg/routing"
+	"github.com/xwysyy/X-Claw/pkg/session"
+	"github.com/xwysyy/X-Claw/pkg/tools"
 	"github.com/xwysyy/X-Claw/pkg/utils"
 )
 
@@ -560,4 +568,338 @@ func (al *AgentLoop) notifyLastActiveOnInternalRun(
 			Content: notifyText,
 		})
 	}
+}
+
+// --- merged from run_pipeline.go ---
+
+func (al *AgentLoop) processMessage(ctx context.Context, msg bus.InboundMessage) (string, error) {
+	return al.processMessageImpl(ctx, msg)
+}
+
+func (al *AgentLoop) processSystemMessage(ctx context.Context, msg bus.InboundMessage) (string, error) {
+	return al.processSystemMessageImpl(ctx, msg)
+}
+
+func (al *AgentLoop) runAgentLoop(
+	ctx context.Context,
+	agent *AgentInstance,
+	opts processOptions,
+) (string, error) {
+	return al.runAgentLoopImpl(ctx, agent, opts)
+}
+
+// --- merged from session_transcript.go ---
+
+func addSessionMessage(store session.Store, sessionKey, role, content string) {
+	if store == nil || strings.TrimSpace(sessionKey) == "" {
+		return
+	}
+	store.AddMessage(sessionKey, role, content)
+}
+
+func addSessionMessageAndSave(store session.Store, sessionKey, role, content, warnMessage string, fields map[string]any) {
+	addSessionMessage(store, sessionKey, role, content)
+	saveSessionBestEffort(store, sessionKey, warnMessage, fields)
+}
+
+func addSessionFullMessage(store session.Store, sessionKey string, msg providers.Message) {
+	if store == nil || strings.TrimSpace(sessionKey) == "" {
+		return
+	}
+	store.AddFullMessage(sessionKey, msg)
+}
+
+func saveSessionBestEffort(store session.Store, sessionKey, warnMessage string, fields map[string]any) {
+	if store == nil || strings.TrimSpace(sessionKey) == "" {
+		return
+	}
+	if err := store.Save(sessionKey); err != nil {
+		payload := map[string]any{"session_key": sessionKey, "error": err.Error()}
+		for key, value := range fields {
+			payload[key] = value
+		}
+		logger.WarnCF("agent", warnMessage, payload)
+	}
+}
+
+// --- merged from steering.go ---
+
+type steeringInboxKey struct{}
+
+func withSteeringInbox(ctx context.Context, inbox <-chan bus.InboundMessage) context.Context {
+	if ctx == nil || inbox == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, steeringInboxKey{}, inbox)
+}
+
+func steeringInboxFromContext(ctx context.Context) <-chan bus.InboundMessage {
+	if ctx == nil {
+		return nil
+	}
+	v := ctx.Value(steeringInboxKey{})
+	if v == nil {
+		return nil
+	}
+	if ch, ok := v.(<-chan bus.InboundMessage); ok {
+		return ch
+	}
+	if ch, ok := v.(chan bus.InboundMessage); ok {
+		return ch
+	}
+	return nil
+}
+
+// extractSteeringContent recognizes "/steer <text>" style messages.
+// It returns the message body and true only when a non-empty body exists.
+func extractSteeringContent(content string) (string, bool) {
+	raw := strings.TrimSpace(content)
+	if raw == "" {
+		return "", false
+	}
+	fields := strings.Fields(raw)
+	if len(fields) < 2 {
+		return "", false
+	}
+	cmd := strings.ToLower(strings.TrimSpace(fields[0]))
+	if cmd != "/steer" && cmd != "/steering" {
+		return "", false
+	}
+	body := strings.TrimSpace(raw[len(fields[0]):])
+	if body == "" {
+		return "", false
+	}
+	return body, true
+}
+
+// --- merged from working_state.go ---
+
+// WorkingState tracks the agent's current task progress as structured data.
+// Instead of relying on the LLM to extract state from long conversation history,
+// this provides an explicit, maintained state object that is injected into the
+// context on each LLM call.
+//
+// This is the "working memory" layer — more structured than conversation history
+// (short-term), less persistent than MEMORY.md (long-term).
+type WorkingState struct {
+	mu             sync.RWMutex
+	OriginalTask   string            `json:"original_task"`
+	CurrentPlan    []PlanStep        `json:"current_plan,omitempty"`
+	CompletedSteps []CompletedStep   `json:"completed_steps,omitempty"`
+	CollectedData  map[string]string `json:"collected_data,omitempty"`
+	OpenQuestions  []string          `json:"open_questions,omitempty"`
+	NextAction     string            `json:"next_action,omitempty"`
+	ToolCallCount  int               `json:"tool_call_count"`
+	ErrorCount     int               `json:"error_count"`
+}
+
+// PlanStep represents a single step in the agent's execution plan.
+type PlanStep struct {
+	Description string `json:"description"`
+	Status      string `json:"status"` // pending, running, done, failed, skipped
+	ToolNeeded  string `json:"tool_needed,omitempty"`
+}
+
+// CompletedStep records a finished step with its outcome.
+type CompletedStep struct {
+	Description string `json:"description"`
+	Outcome     string `json:"outcome"`
+	ToolUsed    string `json:"tool_used,omitempty"`
+}
+
+// NewWorkingState creates a new WorkingState for the given task.
+func NewWorkingState(task string) *WorkingState {
+	return &WorkingState{
+		OriginalTask:  task,
+		CollectedData: make(map[string]string),
+	}
+}
+
+// RecordToolCall increments the tool call counter and tracks errors.
+func (ws *WorkingState) RecordToolCall(toolName string, isError bool) {
+	ws.mu.Lock()
+	defer ws.mu.Unlock()
+	ws.ToolCallCount++
+	if isError {
+		ws.ErrorCount++
+	}
+}
+
+// SetNextAction updates the planned next action.
+func (ws *WorkingState) SetNextAction(action string) {
+	ws.mu.Lock()
+	defer ws.mu.Unlock()
+	ws.NextAction = action
+}
+
+// AddCollectedData records a key piece of data gathered during execution.
+func (ws *WorkingState) AddCollectedData(key, value string) {
+	ws.mu.Lock()
+	defer ws.mu.Unlock()
+	ws.CollectedData[key] = value
+}
+
+// AddCompletedStep records a finished step.
+func (ws *WorkingState) AddCompletedStep(description, outcome, toolUsed string) {
+	ws.mu.Lock()
+	defer ws.mu.Unlock()
+	ws.CompletedSteps = append(ws.CompletedSteps, CompletedStep{
+		Description: description,
+		Outcome:     outcome,
+		ToolUsed:    toolUsed,
+	})
+}
+
+// FormatForContext returns a concise summary suitable for injection into the
+// LLM context. Only includes non-empty sections to save tokens.
+func (ws *WorkingState) FormatForContext() string {
+	ws.mu.RLock()
+	defer ws.mu.RUnlock()
+
+	if ws.OriginalTask == "" {
+		return ""
+	}
+
+	var sb strings.Builder
+	sb.WriteString("## Working State\n\n")
+	fmt.Fprintf(&sb, "**Task**: %s\n", ws.OriginalTask)
+	fmt.Fprintf(&sb, "**Progress**: %d tool calls, %d errors\n", ws.ToolCallCount, ws.ErrorCount)
+
+	if len(ws.CompletedSteps) > 0 {
+		sb.WriteString("\n**Completed**:\n")
+		// Show only last 5 steps to save tokens
+		start := 0
+		if len(ws.CompletedSteps) > 5 {
+			start = len(ws.CompletedSteps) - 5
+			fmt.Fprintf(&sb, "- (%d earlier steps omitted)\n", start)
+		}
+		for _, step := range ws.CompletedSteps[start:] {
+			fmt.Fprintf(&sb, "- %s → %s\n", step.Description, step.Outcome)
+		}
+	}
+
+	if len(ws.CollectedData) > 0 {
+		sb.WriteString("\n**Collected Data**:\n")
+		for k, v := range ws.CollectedData {
+			// Truncate long values
+			if len(v) > 200 {
+				v = v[:200] + "..."
+			}
+			fmt.Fprintf(&sb, "- %s: %s\n", k, v)
+		}
+	}
+
+	if len(ws.OpenQuestions) > 0 {
+		sb.WriteString("\n**Open Questions**:\n")
+		for _, q := range ws.OpenQuestions {
+			fmt.Fprintf(&sb, "- %s\n", q)
+		}
+	}
+
+	if ws.NextAction != "" {
+		fmt.Fprintf(&sb, "\n**Next Action**: %s\n", ws.NextAction)
+	}
+
+	return sb.String()
+}
+
+// --- merged from plan_mode.go ---
+
+type sessionPermissionMode string
+
+const (
+	sessionPermissionModeRun  sessionPermissionMode = "run"
+	sessionPermissionModePlan sessionPermissionMode = "plan"
+)
+
+type sessionPermissionState struct {
+	Mode sessionPermissionMode `json:"mode,omitempty"`
+
+	// PendingTask stores the last user request captured while in plan mode, so
+	// /approve can execute it without retyping.
+	PendingTask string `json:"pending_task,omitempty"`
+
+	UpdatedAt   string `json:"updated_at,omitempty"`
+	UpdatedAtMS int64  `json:"updated_at_ms,omitempty"`
+}
+
+func defaultSessionPermissionState() sessionPermissionState {
+	return sessionPermissionState{Mode: sessionPermissionModeRun}
+}
+
+func normalizeSessionPermissionMode(mode sessionPermissionMode) sessionPermissionMode {
+	switch strings.ToLower(strings.TrimSpace(string(mode))) {
+	case string(sessionPermissionModePlan):
+		return sessionPermissionModePlan
+	default:
+		return sessionPermissionModeRun
+	}
+}
+
+func (s sessionPermissionState) normalized() sessionPermissionState {
+	s.Mode = normalizeSessionPermissionMode(s.Mode)
+	s.PendingTask = strings.TrimSpace(s.PendingTask)
+	return s
+}
+
+func (s sessionPermissionState) isPlan() bool {
+	return normalizeSessionPermissionMode(s.Mode) == sessionPermissionModePlan
+}
+
+func sessionPermissionStatePath(workspace, sessionKey string) (string, error) {
+	workspace = strings.TrimSpace(workspace)
+	sessionKey = utils.CanonicalSessionKey(sessionKey)
+	if workspace == "" {
+		return "", fmt.Errorf("workspace is required")
+	}
+	if sessionKey == "" {
+		return "", fmt.Errorf("sessionKey is required")
+	}
+
+	token := tools.SafePathToken(sessionKey)
+	if token == "" {
+		token = "unknown"
+	}
+
+	return filepath.Join(workspace, ".x-claw", "state", "sessions", token, "permission.json"), nil
+}
+
+func loadSessionPermissionStateWithDefault(workspace, sessionKey string, defaultMode sessionPermissionMode) sessionPermissionState {
+	path, err := sessionPermissionStatePath(workspace, sessionKey)
+	if err != nil {
+		return sessionPermissionState{Mode: normalizeSessionPermissionMode(defaultMode)}
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return sessionPermissionState{Mode: normalizeSessionPermissionMode(defaultMode)}
+	}
+
+	var st sessionPermissionState
+	if err := json.Unmarshal(data, &st); err != nil {
+		return sessionPermissionState{Mode: normalizeSessionPermissionMode(defaultMode)}
+	}
+	return st.normalized()
+}
+
+func loadSessionPermissionState(workspace, sessionKey string) sessionPermissionState {
+	return loadSessionPermissionStateWithDefault(workspace, sessionKey, sessionPermissionModeRun)
+}
+
+func saveSessionPermissionState(workspace, sessionKey string, st sessionPermissionState) error {
+	path, err := sessionPermissionStatePath(workspace, sessionKey)
+	if err != nil {
+		return err
+	}
+
+	now := time.Now()
+	st = st.normalized()
+	st.UpdatedAt = now.UTC().Format(time.RFC3339Nano)
+	st.UpdatedAtMS = now.UnixMilli()
+
+	data, err := json.MarshalIndent(st, "", "  ")
+	if err != nil {
+		return err
+	}
+	return fileutil.WriteFileAtomic(path, data, 0o600)
 }

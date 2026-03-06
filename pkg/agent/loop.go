@@ -7,17 +7,23 @@
 package agent
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
+	"io"
+	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/h2non/filetype"
 	"github.com/xwysyy/X-Claw/pkg/auditlog"
 	"github.com/xwysyy/X-Claw/pkg/bus"
 	"github.com/xwysyy/X-Claw/pkg/config"
@@ -921,4 +927,1056 @@ func (al *AgentLoop) ProcessHeartbeat(
 		SendResponse:    false,
 		NoHistory:       true, // Don't load session history for heartbeat
 	})
+}
+
+func (al *AgentLoop) handleCommand(ctx context.Context, msg bus.InboundMessage, agent *AgentInstance, sessionKey string) (string, bool) {
+	cfg := al.Config()
+	sessionKey = utils.CanonicalSessionKey(sessionKey)
+
+	content := strings.TrimSpace(msg.Content)
+	if !strings.HasPrefix(content, "/") {
+		return "", false
+	}
+
+	parts := strings.Fields(content)
+	if len(parts) == 0 {
+		return "", false
+	}
+
+	cmd := parts[0]
+	args := parts[1:]
+
+	switch cmd {
+	case "/plan":
+		if cfg == nil || !cfg.Tools.PlanMode.Enabled {
+			return "Plan mode is disabled (set tools.plan_mode.enabled=true in config.json)", true
+		}
+		if agent == nil {
+			agent = al.registry.GetDefaultAgent()
+		}
+		if agent == nil {
+			return "No agent available", true
+		}
+		if sessionKey == "" {
+			return "No session available for plan mode (missing session_key)", true
+		}
+
+		defaultMode := sessionPermissionModeRun
+		if strings.EqualFold(strings.TrimSpace(cfg.Tools.PlanMode.DefaultMode), "plan") {
+			defaultMode = sessionPermissionModePlan
+		}
+		permWorkspace := agent.Workspace
+		if da := al.registry.GetDefaultAgent(); da != nil && strings.TrimSpace(da.Workspace) != "" {
+			permWorkspace = da.Workspace
+		}
+		perm := loadSessionPermissionStateWithDefault(permWorkspace, sessionKey, defaultMode)
+		perm.Mode = sessionPermissionModePlan
+
+		// If the user provided a task inline ("/plan <task>"), immediately run
+		// the plan-stage loop in the same session.
+		task := strings.TrimSpace(strings.Join(args, " "))
+		if task != "" {
+			perm.PendingTask = task
+			if err := saveSessionPermissionState(permWorkspace, sessionKey, perm); err != nil {
+				logger.WarnCF("agent", "Failed to persist plan mode state (best-effort)", map[string]any{
+					"session_key": sessionKey,
+					"error":       err.Error(),
+				})
+			}
+			response, runErr := al.runAgentLoop(ctx, agent, processOptions{
+				SessionKey:      sessionKey,
+				Channel:         msg.Channel,
+				ChatID:          msg.ChatID,
+				SenderID:        msg.SenderID,
+				UserMessage:     task,
+				DefaultResponse: defaultResponse,
+				EnableSummary:   true,
+				SendResponse:    false,
+				PlanMode:        true,
+			})
+			if runErr != nil {
+				return fmt.Sprintf("Error: %v", runErr), true
+			}
+			return response, true
+		}
+
+		if err := saveSessionPermissionState(permWorkspace, sessionKey, perm); err != nil {
+			logger.WarnCF("agent", "Failed to persist plan mode state (best-effort)", map[string]any{
+				"session_key": sessionKey,
+				"error":       err.Error(),
+			})
+		}
+		return "Plan mode enabled for this session. Send your task, then send /approve (or /run) to execute.", true
+
+	case "/approve", "/run":
+		if cfg == nil || !cfg.Tools.PlanMode.Enabled {
+			return "Plan mode is disabled (set tools.plan_mode.enabled=true in config.json)", true
+		}
+		if agent == nil {
+			agent = al.registry.GetDefaultAgent()
+		}
+		if agent == nil {
+			return "No agent available", true
+		}
+		if sessionKey == "" {
+			return "No session available for plan mode (missing session_key)", true
+		}
+
+		defaultMode := sessionPermissionModeRun
+		if strings.EqualFold(strings.TrimSpace(cfg.Tools.PlanMode.DefaultMode), "plan") {
+			defaultMode = sessionPermissionModePlan
+		}
+		permWorkspace := agent.Workspace
+		if da := al.registry.GetDefaultAgent(); da != nil && strings.TrimSpace(da.Workspace) != "" {
+			permWorkspace = da.Workspace
+		}
+		perm := loadSessionPermissionStateWithDefault(permWorkspace, sessionKey, defaultMode)
+		if !perm.isPlan() {
+			return "Plan mode is not active for this session. Use /plan first.", true
+		}
+		task := strings.TrimSpace(perm.PendingTask)
+		if task == "" {
+			perm.Mode = sessionPermissionModeRun
+			perm.PendingTask = ""
+			_ = saveSessionPermissionState(permWorkspace, sessionKey, perm)
+			return "No pending task captured. Send a task while in plan mode, then /approve.", true
+		}
+
+		perm.Mode = sessionPermissionModeRun
+		perm.PendingTask = ""
+		if err := saveSessionPermissionState(permWorkspace, sessionKey, perm); err != nil {
+			logger.WarnCF("agent", "Failed to persist plan mode state (best-effort)", map[string]any{
+				"session_key": sessionKey,
+				"error":       err.Error(),
+			})
+		}
+
+		approvedPrompt := fmt.Sprintf("[Plan approved] Execute the plan for the following task.\n\nTASK:\n%s", task)
+		response, runErr := al.runAgentLoop(ctx, agent, processOptions{
+			SessionKey:      sessionKey,
+			Channel:         msg.Channel,
+			ChatID:          msg.ChatID,
+			SenderID:        msg.SenderID,
+			UserMessage:     approvedPrompt,
+			DefaultResponse: defaultResponse,
+			EnableSummary:   true,
+			SendResponse:    false,
+			PlanMode:        false,
+		})
+		if runErr != nil {
+			return fmt.Sprintf("Error: %v", runErr), true
+		}
+		return response, true
+
+	case "/cancel":
+		if cfg == nil || !cfg.Tools.PlanMode.Enabled {
+			return "Plan mode is disabled (set tools.plan_mode.enabled=true in config.json)", true
+		}
+		if agent == nil {
+			agent = al.registry.GetDefaultAgent()
+		}
+		if agent == nil {
+			return "No agent available", true
+		}
+		if sessionKey == "" {
+			return "No session available for plan mode (missing session_key)", true
+		}
+
+		defaultMode := sessionPermissionModeRun
+		if strings.EqualFold(strings.TrimSpace(cfg.Tools.PlanMode.DefaultMode), "plan") {
+			defaultMode = sessionPermissionModePlan
+		}
+		permWorkspace := agent.Workspace
+		if da := al.registry.GetDefaultAgent(); da != nil && strings.TrimSpace(da.Workspace) != "" {
+			permWorkspace = da.Workspace
+		}
+		perm := loadSessionPermissionStateWithDefault(permWorkspace, sessionKey, defaultMode)
+		perm.Mode = sessionPermissionModeRun
+		perm.PendingTask = ""
+		if err := saveSessionPermissionState(permWorkspace, sessionKey, perm); err != nil {
+			logger.WarnCF("agent", "Failed to persist plan mode state (best-effort)", map[string]any{
+				"session_key": sessionKey,
+				"error":       err.Error(),
+			})
+		}
+		return "Plan mode cancelled; pending task cleared.", true
+
+	case "/mode":
+		if cfg == nil || !cfg.Tools.PlanMode.Enabled {
+			return "Plan mode is disabled (tools.plan_mode.enabled=false)", true
+		}
+		if agent == nil {
+			agent = al.registry.GetDefaultAgent()
+		}
+		if agent == nil {
+			return "No agent available", true
+		}
+		if sessionKey == "" {
+			return "No session available (missing session_key)", true
+		}
+
+		defaultMode := sessionPermissionModeRun
+		if strings.EqualFold(strings.TrimSpace(cfg.Tools.PlanMode.DefaultMode), "plan") {
+			defaultMode = sessionPermissionModePlan
+		}
+		permWorkspace := agent.Workspace
+		if da := al.registry.GetDefaultAgent(); da != nil && strings.TrimSpace(da.Workspace) != "" {
+			permWorkspace = da.Workspace
+		}
+		perm := loadSessionPermissionStateWithDefault(permWorkspace, sessionKey, defaultMode)
+
+		pendingPreview := utils.Truncate(strings.TrimSpace(perm.PendingTask), 120)
+		if pendingPreview == "" {
+			pendingPreview = "(none)"
+		}
+		mode := "run"
+		if perm.isPlan() {
+			mode = "plan"
+		}
+		return fmt.Sprintf("mode=%s (session=%s)\npending_task=%s", mode, sessionKey, pendingPreview), true
+
+	case "/show":
+		if len(args) < 1 {
+			return "Usage: /show [model|channel|agents]", true
+		}
+		switch args[0] {
+		case "model":
+			defaultAgent := al.registry.GetDefaultAgent()
+			if defaultAgent == nil {
+				return "No default agent configured", true
+			}
+			return fmt.Sprintf("Current model: %s", defaultAgent.Model), true
+		case "channel":
+			return fmt.Sprintf("Current channel: %s", msg.Channel), true
+		case "agents":
+			agentIDs := al.registry.ListAgentIDs()
+			return fmt.Sprintf("Registered agents: %s", strings.Join(agentIDs, ", ")), true
+		default:
+			return fmt.Sprintf("Unknown show target: %s", args[0]), true
+		}
+
+	case "/list":
+		if len(args) < 1 {
+			return "Usage: /list [models|channels|agents]", true
+		}
+		switch args[0] {
+		case "models":
+			return "Available models: configured in config.json per agent", true
+		case "channels":
+			if al.channelDirectory == nil {
+				return "Channel manager not initialized", true
+			}
+			channels := al.channelDirectory.EnabledChannels()
+			if len(channels) == 0 {
+				return "No channels enabled", true
+			}
+			return fmt.Sprintf("Enabled channels: %s", strings.Join(channels, ", ")), true
+		case "agents":
+			agentIDs := al.registry.ListAgentIDs()
+			return fmt.Sprintf("Registered agents: %s", strings.Join(agentIDs, ", ")), true
+		default:
+			return fmt.Sprintf("Unknown list target: %s", args[0]), true
+		}
+
+	case "/tree":
+		if agent == nil {
+			agent = al.registry.GetDefaultAgent()
+		}
+		if agent == nil || agent.Sessions == nil {
+			return "No session manager configured", true
+		}
+		if sessionKey == "" {
+			return "No session available (missing session_key)", true
+		}
+
+		usage := "Usage:\n" +
+			"/tree leaf\n" +
+			"/tree list [N]\n" +
+			"/tree switch <event_id>"
+
+		if len(args) == 0 {
+			leaf := agent.Sessions.LeafEventID(sessionKey)
+			if leaf == "" {
+				return "leaf: (none)\n\n" + usage, true
+			}
+			return fmt.Sprintf("leaf: %s\n\n%s", leaf, usage), true
+		}
+
+		sub := strings.ToLower(strings.TrimSpace(args[0]))
+		switch sub {
+		case "help":
+			return usage, true
+
+		case "leaf":
+			leaf := agent.Sessions.LeafEventID(sessionKey)
+			if leaf == "" {
+				return "leaf: (none)", true
+			}
+			return fmt.Sprintf("leaf: %s", leaf), true
+
+		case "list":
+			limit := 30
+			if len(args) >= 2 {
+				if n, err := strconv.Atoi(strings.TrimSpace(args[1])); err == nil && n > 0 {
+					limit = n
+				}
+			}
+			tree, err := agent.Sessions.GetTree(sessionKey, limit)
+			if err != nil {
+				return fmt.Sprintf("Error: %v", err), true
+			}
+			if tree == nil {
+				return "No tree available", true
+			}
+
+			var b strings.Builder
+			b.WriteString(fmt.Sprintf("session=%s\nleaf=%s\n", sessionKey, tree.LeafID))
+			b.WriteString(fmt.Sprintf("events=%d (showing last %d)\n", tree.Total, len(tree.Nodes)))
+			b.WriteString("Legend: * leaf; + on-branch; - off-branch\n\n")
+			for _, n := range tree.Nodes {
+				mark := "-"
+				if n.IsLeaf {
+					mark = "*"
+				} else if n.OnBranch {
+					mark = "+"
+				}
+
+				parent := strings.TrimSpace(n.ParentID)
+				if parent == "" {
+					parent = "(root)"
+				}
+
+				role := strings.TrimSpace(n.Role)
+				if role != "" {
+					role = " role=" + role
+				}
+
+				preview := strings.TrimSpace(n.Preview)
+				if preview != "" {
+					preview = " " + preview
+				}
+
+				b.WriteString(fmt.Sprintf("%s %s parent=%s type=%s%s%s\n", mark, n.ID, parent, n.Type, role, preview))
+			}
+			return b.String(), true
+
+		case "switch":
+			if len(args) < 2 {
+				return "Usage: /tree switch <event_id>", true
+			}
+			target := strings.TrimSpace(args[1])
+			from, to, err := agent.Sessions.SwitchLeaf(sessionKey, target)
+			if err != nil {
+				return fmt.Sprintf("Error: %v", err), true
+			}
+			if from == "" {
+				from = "(none)"
+			}
+			return fmt.Sprintf("Switched leaf: %s -> %s\nNext messages will branch from %s.", from, to, to), true
+
+		default:
+			return usage, true
+		}
+
+	case "/switch":
+		if len(args) < 3 || args[1] != "to" {
+			return "Usage: /switch [model|channel|session_model] to <name> [ttl_minutes]", true
+		}
+		target := args[0]
+		value := args[2]
+
+		switch target {
+		case "model":
+			defaultAgent := al.registry.GetDefaultAgent()
+			if defaultAgent == nil {
+				return "No default agent configured", true
+			}
+			oldModel := defaultAgent.Model
+			defaultAgent.Model = value
+			return fmt.Sprintf("Switched model from %s to %s", oldModel, value), true
+		case "session_model":
+			if agent == nil {
+				agent = al.registry.GetDefaultAgent()
+			}
+			if agent == nil || agent.Sessions == nil {
+				return "No session manager configured", true
+			}
+			if sessionKey == "" {
+				return "No session available (missing session_key)", true
+			}
+
+			ttlMinutes := 0
+			if len(args) >= 4 {
+				if n, err := strconv.Atoi(strings.TrimSpace(args[3])); err == nil && n > 0 {
+					ttlMinutes = n
+				}
+			}
+
+			normalized := strings.ToLower(strings.TrimSpace(value))
+			if normalized == "" || normalized == "default" || normalized == "clear" || normalized == "off" {
+				_, _ = agent.Sessions.ClearModelOverride(sessionKey)
+				return "Cleared session model override (using default model).", true
+			}
+
+			ttl := time.Duration(ttlMinutes) * time.Minute
+			expiresAt, err := agent.Sessions.SetModelOverride(sessionKey, value, ttl)
+			if err != nil {
+				return fmt.Sprintf("Error: %v", err), true
+			}
+			if expiresAt != nil {
+				return fmt.Sprintf(
+					"Session model override set: %s (ttl=%dm; expires=%s)",
+					value,
+					ttlMinutes,
+					expiresAt.UTC().Format(time.RFC3339Nano),
+				), true
+			}
+			return fmt.Sprintf("Session model override set: %s (ttl=none)", value), true
+		case "channel":
+			if al.channelDirectory == nil {
+				return "Channel manager not initialized", true
+			}
+			if !al.channelDirectory.HasChannel(value) && value != "cli" {
+				return fmt.Sprintf("Channel '%s' not found or not enabled", value), true
+			}
+			return fmt.Sprintf("Switched target channel to %s", value), true
+		default:
+			return fmt.Sprintf("Unknown switch target: %s", target), true
+		}
+	}
+
+	return "", false
+}
+
+// extractPeer extracts the routing peer from the inbound message's structured Peer field.
+func extractPeer(msg bus.InboundMessage) *routing.RoutePeer {
+	if msg.Peer.Kind == "" {
+		return nil
+	}
+	peerID := msg.Peer.ID
+	if peerID == "" {
+		if msg.Peer.Kind == "direct" {
+			peerID = msg.SenderID
+		} else {
+			peerID = msg.ChatID
+		}
+	}
+	return &routing.RoutePeer{Kind: msg.Peer.Kind, ID: peerID}
+}
+
+// extractParentPeer extracts the parent peer (reply-to) from inbound message metadata.
+func extractParentPeer(msg bus.InboundMessage) *routing.RoutePeer {
+	parentKind := msg.Metadata["parent_peer_kind"]
+	parentID := msg.Metadata["parent_peer_id"]
+	if parentKind == "" || parentID == "" {
+		return nil
+	}
+	return &routing.RoutePeer{Kind: parentKind, ID: parentID}
+}
+
+
+// resolveMediaRefs replaces media:// refs in message Media fields with base64 data URLs.
+// Uses streaming base64 encoding (file handle → encoder → buffer) to avoid holding
+// both raw bytes and encoded string in memory simultaneously.
+// Returns a new slice; original messages are not mutated.
+func resolveMediaRefs(messages []providers.Message, resolver MediaResolver, maxSize int) []providers.Message {
+	if resolver == nil {
+		return messages
+	}
+
+	result := make([]providers.Message, len(messages))
+	copy(result, messages)
+
+	for i, m := range result {
+		if len(m.Media) == 0 {
+			continue
+		}
+
+		resolved := make([]string, 0, len(m.Media))
+		for _, ref := range m.Media {
+			if !strings.HasPrefix(ref, "media://") {
+				resolved = append(resolved, ref)
+				continue
+			}
+
+			localPath, meta, err := resolver.ResolveWithMeta(ref)
+			if err != nil {
+				logger.WarnCF("agent", "Failed to resolve media ref", map[string]any{
+					"ref":   ref,
+					"error": err.Error(),
+				})
+				continue
+			}
+
+			info, err := os.Stat(localPath)
+			if err != nil {
+				logger.WarnCF("agent", "Failed to stat media file", map[string]any{
+					"path":  localPath,
+					"error": err.Error(),
+				})
+				continue
+			}
+			if info.Size() > int64(maxSize) {
+				logger.WarnCF("agent", "Media file too large, skipping", map[string]any{
+					"path":     localPath,
+					"size":     info.Size(),
+					"max_size": maxSize,
+				})
+				continue
+			}
+
+			// Determine MIME type: prefer metadata, fallback to magic-bytes detection
+			mime := meta.ContentType
+			if mime == "" {
+				kind, ftErr := filetype.MatchFile(localPath)
+				if ftErr != nil || kind == filetype.Unknown {
+					logger.WarnCF("agent", "Unknown media type, skipping", map[string]any{
+						"path": localPath,
+					})
+					continue
+				}
+				mime = kind.MIME.Value
+			}
+
+			// Streaming base64: open file → base64 encoder → buffer
+			// Peak memory: ~1.33x file size (buffer only, no raw bytes copy)
+			f, err := os.Open(localPath)
+			if err != nil {
+				logger.WarnCF("agent", "Failed to open media file", map[string]any{
+					"path":  localPath,
+					"error": err.Error(),
+				})
+				continue
+			}
+
+			prefix := "data:" + mime + ";base64,"
+			encodedLen := base64.StdEncoding.EncodedLen(int(info.Size()))
+			var buf bytes.Buffer
+			buf.Grow(len(prefix) + encodedLen)
+			buf.WriteString(prefix)
+
+			encoder := base64.NewEncoder(base64.StdEncoding, &buf)
+			if _, err := io.Copy(encoder, f); err != nil {
+				f.Close()
+				logger.WarnCF("agent", "Failed to encode media file", map[string]any{
+					"path":  localPath,
+					"error": err.Error(),
+				})
+				continue
+			}
+			encoder.Close()
+			f.Close()
+
+			resolved = append(resolved, buf.String())
+		}
+
+		result[i].Media = resolved
+	}
+
+	return result
+}
+
+func (al *AgentLoop) transcribeAudioInMessage(ctx context.Context, msg bus.InboundMessage) bus.InboundMessage {
+	if al == nil || al.transcriber == nil || al.mediaResolver == nil || len(msg.Media) == 0 {
+		return msg
+	}
+
+	transcriptions := make([]string, 0, len(msg.Media))
+	for _, ref := range msg.Media {
+		path, meta, err := al.mediaResolver.ResolveWithMeta(ref)
+		if err != nil {
+			logger.WarnCF("voice", "Failed to resolve media ref", map[string]any{"ref": ref, "error": err})
+			continue
+		}
+		if !utils.IsAudioFile(meta.Filename, meta.ContentType) {
+			continue
+		}
+		result, err := al.transcriber.Transcribe(ctx, path)
+		if err != nil {
+			logger.WarnCF("voice", "Transcription failed", map[string]any{"ref": ref, "error": err})
+			transcriptions = append(transcriptions, "(transcription failed)")
+			continue
+		}
+		transcriptions = append(transcriptions, strings.TrimSpace(result.Text))
+	}
+
+	if len(transcriptions) == 0 {
+		return msg
+	}
+
+	idx := 0
+	newContent := audioAnnotationRe.ReplaceAllStringFunc(msg.Content, func(match string) string {
+		if idx >= len(transcriptions) {
+			return match
+		}
+		text := transcriptions[idx]
+		idx++
+		if text == "" {
+			return match
+		}
+		return "[voice: " + text + "]"
+	})
+
+	for ; idx < len(transcriptions); idx++ {
+		text := strings.TrimSpace(transcriptions[idx])
+		if text == "" {
+			continue
+		}
+		newContent += "\n[voice: " + text + "]"
+	}
+
+	msg.Content = newContent
+	return msg
+}
+
+func inferMediaType(filename, contentType string) string {
+	ct := strings.ToLower(contentType)
+	fn := strings.ToLower(filename)
+
+	if strings.HasPrefix(ct, "image/") {
+		return "image"
+	}
+	if strings.HasPrefix(ct, "audio/") || ct == "application/ogg" {
+		return "audio"
+	}
+	if strings.HasPrefix(ct, "video/") {
+		return "video"
+	}
+
+	ext := filepath.Ext(fn)
+	switch ext {
+	case ".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".svg":
+		return "image"
+	case ".mp3", ".wav", ".ogg", ".m4a", ".flac", ".aac", ".wma", ".opus":
+		return "audio"
+	case ".mp4", ".avi", ".mov", ".webm", ".mkv":
+		return "video"
+	}
+
+	return "file"
+}
+
+
+func (al *AgentLoop) targetReasoningChannelID(channelName string) (chatID string) {
+	if al.channelDirectory == nil {
+		return ""
+	}
+	return al.channelDirectory.ReasoningChannelID(channelName)
+}
+
+func (al *AgentLoop) handleReasoning(
+	ctx context.Context,
+	reasoningContent, channelName, channelID string,
+) {
+	if reasoningContent == "" || channelName == "" || channelID == "" {
+		return
+	}
+
+	// Check context cancellation before attempting to publish,
+	// since PublishOutbound's select may race between send and ctx.Done().
+	if ctx.Err() != nil {
+		return
+	}
+
+	// Use a short timeout so the goroutine does not block indefinitely when
+	// the outbound bus is full.  Reasoning output is best-effort; dropping it
+	// is acceptable to avoid goroutine accumulation.
+	pubCtx, pubCancel := context.WithTimeout(ctx, 5*time.Second)
+	defer pubCancel()
+
+	if err := al.bus.PublishOutbound(pubCtx, bus.OutboundMessage{
+		Channel: channelName,
+		ChatID:  channelID,
+		Content: reasoningContent,
+	}); err != nil {
+		// Treat context.DeadlineExceeded / context.Canceled as expected
+		// (bus full under load, or parent canceled).  Check the error
+		// itself rather than ctx.Err(), because pubCtx may time out
+		// (5 s) while the parent ctx is still active.
+		// Also treat ErrBusClosed as expected — it occurs during normal
+		// shutdown when the bus is closed before all goroutines finish.
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) ||
+			errors.Is(err, bus.ErrBusClosed) {
+			logger.DebugCF("agent", "Reasoning publish skipped (timeout/cancel)", map[string]any{
+				"channel": channelName,
+				"error":   err.Error(),
+			})
+		} else {
+			logger.WarnCF("agent", "Failed to publish reasoning (best-effort)", map[string]any{
+				"channel": channelName,
+				"error":   err.Error(),
+			})
+		}
+	}
+}
+
+
+// maybeSummarize triggers summarization if the session history exceeds thresholds.
+func (al *AgentLoop) maybeSummarize(agent *AgentInstance, sessionKey, channel, chatID string) {
+	newHistory := agent.Sessions.GetHistory(sessionKey)
+	tokenEstimate := al.estimateTokens(newHistory)
+	threshold := agent.ContextWindow * 75 / 100
+
+	if len(newHistory) > 100 || tokenEstimate > threshold {
+		summarizeKey := agent.ID + ":" + sessionKey
+		if _, loading := al.summarizing.LoadOrStore(summarizeKey, true); !loading {
+			go func() {
+				defer al.summarizing.Delete(summarizeKey)
+				logger.Debug("Memory threshold reached. Optimizing conversation history...")
+				ctx, cancel := al.safeCompactionContext()
+				defer cancel()
+
+				if agent != nil && agent.Compaction.NotifyUser && al.bus != nil && channel != "" && chatID != "" && !constants.IsInternalChannel(channel) {
+					if err := al.bus.PublishOutbound(ctx, bus.OutboundMessage{
+						Channel: channel,
+						ChatID:  chatID,
+						Content: "Memory threshold reached. Optimizing conversation history...",
+					}); err != nil {
+						logger.WarnCF("agent", "Failed to publish compaction notice (best-effort)", map[string]any{
+							"channel": channel,
+							"chat_id": chatID,
+							"error":   err.Error(),
+						})
+					}
+				}
+
+				if flushed, err := al.maybeFlushMemoryBeforeCompaction(
+					ctx,
+					agent,
+					sessionKey,
+					tokenEstimate,
+				); err != nil {
+					logger.WarnCF("agent", "Background memory flush failed", map[string]any{
+						"session_key": sessionKey,
+						"error":       err.Error(),
+					})
+				} else if flushed {
+					logger.InfoCF("agent", "Background memory flush completed", map[string]any{
+						"session_key": sessionKey,
+					})
+				}
+
+				if compacted, err := al.compactWithSafeguard(ctx, agent, sessionKey); err != nil {
+					logger.WarnCF("agent", "Background compaction cancelled", map[string]any{
+						"session_key": sessionKey,
+						"error":       err.Error(),
+					})
+				} else if compacted {
+					logger.InfoCF("agent", "Background compaction completed", map[string]any{
+						"session_key": sessionKey,
+					})
+				}
+			}()
+		}
+	}
+}
+
+// forceCompression aggressively reduces context when the limit is hit.
+// It drops the oldest 50% of messages (keeping system prompt and last user message).
+func (al *AgentLoop) forceCompression(agent *AgentInstance, sessionKey string) {
+	history := agent.Sessions.GetHistory(sessionKey)
+	if len(history) <= 4 {
+		return
+	}
+
+	// Keep system prompt (usually [0]) and the very last message (user's trigger)
+	// We want to drop the oldest half of the *conversation*
+	// Assuming [0] is system, [1:] is conversation
+	conversation := history[1 : len(history)-1]
+	if len(conversation) == 0 {
+		return
+	}
+
+	// Helper to find the mid-point of the conversation
+	mid := len(conversation) / 2
+
+	// New history structure:
+	// 1. System Prompt (with compression note appended)
+	// 2. Second half of conversation
+	// 3. Last message
+
+	droppedCount := mid
+	keptConversation := conversation[mid:]
+
+	newHistory := make([]providers.Message, 0, 1+len(keptConversation)+1)
+
+	// Append compression note to the original system prompt instead of adding a new system message
+	// This avoids having two consecutive system messages which some APIs (like Zhipu) reject
+	compressionNote := fmt.Sprintf(
+		"\n\n[System Note: Emergency compression dropped %d oldest messages due to context limit]",
+		droppedCount,
+	)
+	enhancedSystemPrompt := history[0]
+	enhancedSystemPrompt.Content = enhancedSystemPrompt.Content + compressionNote
+	newHistory = append(newHistory, enhancedSystemPrompt)
+
+	newHistory = append(newHistory, keptConversation...)
+	newHistory = append(newHistory, history[len(history)-1]) // Last message
+
+	// Update session
+	agent.Sessions.SetHistory(sessionKey, newHistory)
+	agent.Sessions.Save(sessionKey)
+
+	logger.WarnCF("agent", "Forced compression executed", map[string]any{
+		"session_key":  sessionKey,
+		"dropped_msgs": droppedCount,
+		"new_count":    len(newHistory),
+	})
+}
+
+// GetStartupInfo returns information about loaded tools and skills for logging.
+func (al *AgentLoop) GetStartupInfo() map[string]any {
+	info := make(map[string]any)
+
+	agent := al.registry.GetDefaultAgent()
+	if agent == nil {
+		return info
+	}
+
+	// Tools info
+	toolsList := agent.Tools.List()
+	info["tools"] = map[string]any{
+		"count": len(toolsList),
+		"names": toolsList,
+	}
+
+	// Skills info
+	info["skills"] = agent.ContextBuilder.GetSkillsInfo()
+
+	// Agents info
+	info["agents"] = map[string]any{
+		"count": len(al.registry.ListAgentIDs()),
+		"ids":   al.registry.ListAgentIDs(),
+	}
+
+	return info
+}
+
+// formatMessagesForLog formats messages for logging
+func formatMessagesForLog(messages []providers.Message) string {
+	if len(messages) == 0 {
+		return "[]"
+	}
+
+	var sb strings.Builder
+	sb.WriteString("[\n")
+	for i, msg := range messages {
+		fmt.Fprintf(&sb, "  [%d] Role: %s\n", i, msg.Role)
+		if len(msg.ToolCalls) > 0 {
+			sb.WriteString("  ToolCalls:\n")
+			for _, tc := range msg.ToolCalls {
+				fmt.Fprintf(&sb, "    - ID: %s, Type: %s, Name: %s\n", tc.ID, tc.Type, tc.Name)
+				if tc.Function != nil {
+					fmt.Fprintf(
+						&sb,
+						"      Arguments: %s\n",
+						utils.Truncate(tc.Function.Arguments, 200),
+					)
+				}
+			}
+		}
+		if msg.Content != "" {
+			content := utils.Truncate(msg.Content, 200)
+			fmt.Fprintf(&sb, "  Content: %s\n", content)
+		}
+		if msg.ToolCallID != "" {
+			fmt.Fprintf(&sb, "  ToolCallID: %s\n", msg.ToolCallID)
+		}
+		sb.WriteString("\n")
+	}
+	sb.WriteString("]")
+	return sb.String()
+}
+
+// formatToolsForLog formats tool definitions for logging
+func formatToolsForLog(toolDefs []providers.ToolDefinition) string {
+	if len(toolDefs) == 0 {
+		return "[]"
+	}
+
+	var sb strings.Builder
+	sb.WriteString("[\n")
+	for i, tool := range toolDefs {
+		fmt.Fprintf(&sb, "  [%d] Type: %s, Name: %s\n", i, tool.Type, tool.Function.Name)
+		fmt.Fprintf(&sb, "      Description: %s\n", tool.Function.Description)
+		if len(tool.Function.Parameters) > 0 {
+			fmt.Fprintf(
+				&sb,
+				"      Parameters: %s\n",
+				utils.Truncate(fmt.Sprintf("%v", tool.Function.Parameters), 200),
+			)
+		}
+	}
+	sb.WriteString("]")
+	return sb.String()
+}
+
+// summarizeSession summarizes the conversation history for a session.
+func (al *AgentLoop) summarizeSession(agent *AgentInstance, sessionKey string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+
+	history := agent.Sessions.GetHistory(sessionKey)
+	summary := agent.Sessions.GetSummary(sessionKey)
+
+	// Keep last 4 messages for continuity
+	if len(history) <= 4 {
+		return
+	}
+
+	toSummarize := history[:len(history)-4]
+
+	// Oversized Message Guard
+	maxMessageTokens := agent.ContextWindow / 2
+	validMessages := make([]providers.Message, 0)
+	omitted := false
+
+	for _, m := range toSummarize {
+		if m.Role != "user" && m.Role != "assistant" {
+			continue
+		}
+		msgTokens := len(m.Content) / 2
+		if msgTokens > maxMessageTokens {
+			omitted = true
+			continue
+		}
+		validMessages = append(validMessages, m)
+	}
+
+	if len(validMessages) == 0 {
+		return
+	}
+
+	// Multi-Part Summarization
+	var finalSummary string
+	if len(validMessages) > 10 {
+		mid := len(validMessages) / 2
+		part1 := validMessages[:mid]
+		part2 := validMessages[mid:]
+
+		s1, _ := al.summarizeBatch(ctx, agent, part1, "")
+		s2, _ := al.summarizeBatch(ctx, agent, part2, "")
+
+		mergePrompt := fmt.Sprintf(
+			"Merge these two conversation summaries into one cohesive summary:\n\n1: %s\n\n2: %s",
+			s1,
+			s2,
+		)
+		resp, err := agent.Provider.Chat(
+			ctx,
+			[]providers.Message{{Role: "user", Content: mergePrompt}},
+			nil,
+			agent.Model,
+			map[string]any{
+				"max_tokens":       1024,
+				"temperature":      0.3,
+				"prompt_cache_key": agent.ID,
+			},
+		)
+		if err == nil {
+			finalSummary = resp.Content
+		} else {
+			finalSummary = s1 + " " + s2
+		}
+	} else {
+		finalSummary, _ = al.summarizeBatch(ctx, agent, validMessages, summary)
+	}
+
+	if omitted && finalSummary != "" {
+		finalSummary += "\n[Note: Some oversized messages were omitted from this summary for efficiency.]"
+	}
+
+	if finalSummary != "" {
+		agent.Sessions.SetSummary(sessionKey, finalSummary)
+		agent.Sessions.TruncateHistory(sessionKey, 4)
+		agent.Sessions.Save(sessionKey)
+	}
+}
+
+// summarizeBatch summarizes a batch of messages.
+func (al *AgentLoop) summarizeBatch(
+	ctx context.Context,
+	agent *AgentInstance,
+	batch []providers.Message,
+	existingSummary string,
+) (string, error) {
+	var sb strings.Builder
+	sb.WriteString(
+		"Provide a concise summary of this conversation segment, preserving core context and key points.\n",
+	)
+	if existingSummary != "" {
+		sb.WriteString("Existing context: ")
+		sb.WriteString(existingSummary)
+		sb.WriteString("\n")
+	}
+	sb.WriteString("\nCONVERSATION:\n")
+	for _, m := range batch {
+		fmt.Fprintf(&sb, "%s: %s\n", m.Role, m.Content)
+	}
+	prompt := sb.String()
+
+	response, err := agent.Provider.Chat(
+		ctx,
+		[]providers.Message{{Role: "user", Content: prompt}},
+		nil,
+		agent.Model,
+		map[string]any{
+			"max_tokens":       1024,
+			"temperature":      0.3,
+			"prompt_cache_key": agent.ID,
+		},
+	)
+	if err != nil {
+		return "", err
+	}
+	return response.Content, nil
+}
+
+// estimateTokens estimates the number of tokens in a message list.
+// Delegates to the shared estimateTotalTokens helper in context.go.
+func (al *AgentLoop) estimateTokens(messages []providers.Message) int {
+	return estimateTotalTokens("", messages)
+}
+
+// estimateMessageTokens estimates the number of tokens in a single message.
+// Kept as a thin wrapper for compaction helpers that operate message-by-message.
+func (al *AgentLoop) estimateMessageTokens(message providers.Message) int {
+	return estimateTotalTokens("", []providers.Message{message})
+}
+
+
+// ThinkingLevel controls how the provider sends thinking parameters.
+//
+//   - "adaptive": sends {thinking: {type: "adaptive"}} + output_config.effort (Claude 4.6+)
+//   - "low"/"medium"/"high"/"xhigh": sends {thinking: {type: "enabled", budget_tokens: N}} (all models)
+//   - "off": disables thinking
+type ThinkingLevel string
+
+const (
+	ThinkingOff      ThinkingLevel = "off"
+	ThinkingLow      ThinkingLevel = "low"
+	ThinkingMedium   ThinkingLevel = "medium"
+	ThinkingHigh     ThinkingLevel = "high"
+	ThinkingXHigh    ThinkingLevel = "xhigh"
+	ThinkingAdaptive ThinkingLevel = "adaptive"
+)
+
+// parseThinkingLevel normalizes a config string to a ThinkingLevel.
+// Case-insensitive and whitespace-tolerant for user-facing config values.
+// Returns ThinkingOff for unknown or empty values.
+func parseThinkingLevel(level string) ThinkingLevel {
+	switch strings.ToLower(strings.TrimSpace(level)) {
+	case "adaptive":
+		return ThinkingAdaptive
+	case "low":
+		return ThinkingLow
+	case "medium":
+		return ThinkingMedium
+	case "high":
+		return ThinkingHigh
+	case "xhigh":
+		return ThinkingXHigh
+	default:
+		return ThinkingOff
+	}
 }
