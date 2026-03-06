@@ -16,8 +16,10 @@ type stubCronExecutor struct {
 	lastCh string
 	lastID string
 
-	gotChannel string
-	gotChatID  string
+	gotChannel     string
+	gotChatID      string
+	gotSessionKey  string
+	usedSessionAPI bool
 
 	response string
 	err      error
@@ -27,9 +29,18 @@ func (s *stubCronExecutor) LastActive() (string, string) {
 	return s.lastCh, s.lastID
 }
 
-func (s *stubCronExecutor) ProcessDirectWithChannel(_ context.Context, _content, _sessionKey, channel, chatID string) (string, error) {
+func (s *stubCronExecutor) ProcessDirectWithChannel(_ context.Context, _content, sessionKey, channel, chatID string) (string, error) {
 	s.gotChannel = channel
 	s.gotChatID = chatID
+	s.gotSessionKey = sessionKey
+	return s.response, s.err
+}
+
+func (s *stubCronExecutor) ProcessSessionMessage(_ context.Context, _content, sessionKey, channel, chatID string) (string, error) {
+	s.gotChannel = channel
+	s.gotChatID = chatID
+	s.gotSessionKey = sessionKey
+	s.usedSessionAPI = true
 	return s.response, s.err
 }
 
@@ -53,6 +64,59 @@ func newCronToolWithExecutorForTest(t *testing.T, exec JobExecutor, mb *bus.Mess
 		t.Fatalf("failed to construct cron tool: %v", err)
 	}
 	return tool
+}
+
+func TestCronToolExecuteJob_DeliverFalseUsesDedicatedCronSession(t *testing.T) {
+	mb := bus.NewMessageBus()
+	exec := &stubCronExecutor{lastCh: "feishu", lastID: "oc_test", response: "ok"}
+	tool := newCronToolWithExecutorForTest(t, exec, mb)
+
+	job := &cronpkg.CronJob{
+		ID:      "job_session",
+		Name:    "sessioned",
+		Payload: cronpkg.CronPayload{Message: "do work", Deliver: false},
+	}
+
+	_, err := tool.ExecuteJob(context.Background(), job)
+	if err != nil {
+		t.Fatalf("expected success, got error: %v", err)
+	}
+	if !exec.usedSessionAPI {
+		t.Fatalf("expected ProcessSessionMessage to be used")
+	}
+	if exec.gotSessionKey != "cron-job_session" {
+		t.Fatalf("expected cron session key, got %q", exec.gotSessionKey)
+	}
+}
+
+func TestCronToolExecuteJob_BudgetExceededReturnsError(t *testing.T) {
+	mb := bus.NewMessageBus()
+	exec := &stubCronExecutor{lastCh: "feishu", lastID: "oc_test", response: "RESOURCE_BUDGET_EXCEEDED: run wall time exceeded (300s)."}
+	tool := newCronToolWithExecutorForTest(t, exec, mb)
+
+	job := &cronpkg.CronJob{
+		ID:      "job_budget",
+		Name:    "budgeted",
+		Payload: cronpkg.CronPayload{Message: "do work", Deliver: false},
+	}
+
+	out, err := tool.ExecuteJob(context.Background(), job)
+	if err == nil {
+		t.Fatalf("expected error for budget exceeded response")
+	}
+	if out == "" || !strings.Contains(out, "RESOURCE_BUDGET_EXCEEDED") {
+		t.Fatalf("unexpected output: %q", out)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	msg, ok := mb.SubscribeOutbound(ctx)
+	if !ok {
+		t.Fatalf("expected outbound failure message")
+	}
+	if !strings.Contains(msg.Content, "failed") {
+		t.Fatalf("unexpected outbound content: %q", msg.Content)
+	}
 }
 
 func TestCronToolExecuteJob_DeliverFalsePublishesToLastActive(t *testing.T) {

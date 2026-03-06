@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -22,12 +23,21 @@ type lastActiveProvider interface {
 	LastActive() (channel string, chatID string)
 }
 
+type sessionJobExecutor interface {
+	ProcessSessionMessage(ctx context.Context, content, sessionKey, channel, chatID string) (string, error)
+}
+
 // CronTool provides scheduling capabilities for the agent
 type CronTool struct {
 	cronService *cron.CronService
 	executor    JobExecutor
 	msgBus      *bus.MessageBus
 	execTool    *ExecTool
+}
+
+func isResourceBudgetExceededResponse(raw string) bool {
+	s := strings.TrimSpace(raw)
+	return strings.HasPrefix(strings.ToUpper(s), "RESOURCE_BUDGET_EXCEEDED")
 }
 
 func isNoUpdateResponse(raw string) bool {
@@ -448,14 +458,27 @@ func (t *CronTool) ExecuteJob(ctx context.Context, job *cron.CronJob) (string, e
 	}
 	sessionKey := fmt.Sprintf("cron-%s", job.ID)
 
-	// Call agent with job's message
-	response, err := t.executor.ProcessDirectWithChannel(
-		ctx,
-		job.Payload.Message,
-		sessionKey,
-		channel,
-		chatID,
-	)
+	// Call agent with job's message. Prefer a session-preserving API when available
+	// so cron jobs do not pollute or inherit the shared conversation session.
+	var response string
+	var err error
+	if sessionExec, ok := t.executor.(sessionJobExecutor); ok {
+		response, err = sessionExec.ProcessSessionMessage(
+			ctx,
+			job.Payload.Message,
+			sessionKey,
+			channel,
+			chatID,
+		)
+	} else {
+		response, err = t.executor.ProcessDirectWithChannel(
+			ctx,
+			job.Payload.Message,
+			sessionKey,
+			channel,
+			chatID,
+		)
+	}
 	if err != nil {
 		pubCtx, pubCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer pubCancel()
@@ -465,6 +488,18 @@ func (t *CronTool) ExecuteJob(ctx context.Context, job *cron.CronJob) (string, e
 			Content: fmt.Sprintf("Cron job '%s' failed: %v", job.Name, err),
 		})
 		return "", err
+	}
+
+	if isResourceBudgetExceededResponse(response) {
+		err = errors.New(strings.TrimSpace(response))
+		pubCtx, pubCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer pubCancel()
+		_ = t.msgBus.PublishOutbound(pubCtx, bus.OutboundMessage{
+			Channel: channel,
+			ChatID:  chatID,
+			Content: fmt.Sprintf("Cron job '%s' failed:\n\n%s", job.Name, response),
+		})
+		return response, err
 	}
 
 	// In gateway mode, ProcessDirectWithChannel returns the response but does NOT publish it.
