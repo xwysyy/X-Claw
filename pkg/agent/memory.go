@@ -8,6 +8,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -15,8 +16,11 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/xwysyy/X-Claw/pkg/fileutil"
+	"github.com/xwysyy/X-Claw/pkg/tools"
+	"github.com/xwysyy/X-Claw/pkg/utils"
 )
 
 // MemoryStore manages persistent memory for the agent.
@@ -801,4 +805,592 @@ func (ms *memoryReadStack) GetBySource(ctx context.Context, source string) (Memo
 	}
 
 	return MemoryVectorHit{}, false, nil
+}
+
+type memoryBlockSpec struct {
+	Label    string
+	Limit    int  // max characters (runes) allowed for the block content
+	ReadOnly bool // true if agent updates must not modify this block
+}
+
+var memoryBlockSpecs = []memoryBlockSpec{
+	{Label: "persona", Limit: 2400, ReadOnly: true},
+	{Label: "human", Limit: 3600, ReadOnly: true},
+	{Label: "projects", Limit: 6000, ReadOnly: false},
+	{Label: "facts", Limit: 9000, ReadOnly: false},
+}
+
+func lookupMemoryBlockSpec(label string) (memoryBlockSpec, bool) {
+	label = strings.ToLower(strings.TrimSpace(label))
+	if label == "" {
+		return memoryBlockSpec{}, false
+	}
+	for _, spec := range memoryBlockSpecs {
+		if spec.Label == label {
+			return spec, true
+		}
+	}
+	return memoryBlockSpec{}, false
+}
+
+func memoryBlockLabelForLegacySection(section string) (string, bool) {
+	section = strings.TrimSpace(section)
+	switch section {
+	case "Profile":
+		return "human", true
+	case "Long-term Facts", "Constraints":
+		return "facts", true
+	case "Active Goals", "Open Threads", "Deprecated/Resolved":
+		return "projects", true
+	default:
+		return "", false
+	}
+}
+
+func memoryBlockLabels() []string {
+	out := make([]string, 0, len(memoryBlockSpecs))
+	for _, spec := range memoryBlockSpecs {
+		out = append(out, spec.Label)
+	}
+	return out
+}
+
+func parseMemoryBlocks(content string) (map[string]string, bool) {
+	blocks := map[string]string{}
+	lines := strings.Split(content, "\n")
+	current := ""
+	found := false
+	var buf []string
+
+	flush := func() {
+		if current == "" {
+			buf = buf[:0]
+			return
+		}
+		blocks[current] = strings.TrimSpace(strings.Join(buf, "\n"))
+		buf = buf[:0]
+	}
+
+	for _, raw := range lines {
+		line := strings.TrimSpace(raw)
+		if strings.HasPrefix(line, "##") && !strings.HasPrefix(line, "###") {
+			heading := strings.TrimSpace(strings.TrimLeft(line, "#"))
+			label := strings.ToLower(strings.TrimSpace(heading))
+			if _, ok := lookupMemoryBlockSpec(label); ok {
+				flush()
+				current = label
+				found = true
+				continue
+			}
+		}
+		if current != "" {
+			buf = append(buf, raw)
+		}
+	}
+	flush()
+	return blocks, found
+}
+
+func renderMemoryBlocks(blocks map[string]string) string {
+	now := time.Now().Format("2006-01-02 15:04")
+
+	var sb strings.Builder
+	sb.WriteString("# MEMORY\n\n")
+	sb.WriteString("_Last organized: ")
+	sb.WriteString(now)
+	sb.WriteString("_\n\n")
+
+	for _, label := range memoryBlockLabels() {
+		sb.WriteString("## ")
+		sb.WriteString(label)
+		sb.WriteString("\n")
+		if v := strings.TrimSpace(blocks[label]); v != "" {
+			sb.WriteString(v)
+			sb.WriteString("\n")
+		}
+		sb.WriteString("\n")
+	}
+
+	return strings.TrimSpace(sb.String()) + "\n"
+}
+
+func sanitizeMemoryText(s string) string {
+	// Remove NUL bytes and other non-text junk that can break JSON/SQLite.
+	return strings.Map(func(r rune) rune {
+		if r == 0 {
+			return -1
+		}
+		return r
+	}, s)
+}
+
+func extractBlockEntries(content string) []string {
+	content = strings.TrimSpace(content)
+	if content == "" {
+		return nil
+	}
+
+	lines := strings.Split(content, "\n")
+	out := make([]string, 0, len(lines))
+	for _, raw := range lines {
+		line := strings.TrimSpace(raw)
+		if line == "" {
+			continue
+		}
+		if strings.HasPrefix(line, "#") {
+			continue
+		}
+		line = strings.TrimSpace(strings.TrimLeft(line, "-*+"))
+		line = compactWhitespace(line)
+		if line == "" {
+			continue
+		}
+		out = append(out, line)
+	}
+	return out
+}
+
+func mergeBlockEntries(base, incoming string) []string {
+	baseEntries := extractBlockEntries(base)
+	inEntries := extractBlockEntries(incoming)
+
+	seen := make(map[string]struct{}, len(baseEntries)+len(inEntries))
+	out := make([]string, 0, len(baseEntries)+len(inEntries))
+
+	add := func(s string) {
+		s = strings.TrimSpace(s)
+		if s == "" {
+			return
+		}
+		key := strings.ToLower(s)
+		if _, ok := seen[key]; ok {
+			return
+		}
+		seen[key] = struct{}{}
+		out = append(out, s)
+	}
+
+	for _, e := range baseEntries {
+		add(e)
+	}
+	for _, e := range inEntries {
+		add(e)
+	}
+	return out
+}
+
+func clipEntriesToLimit(entries []string, limit int) []string {
+	if limit <= 0 || len(entries) == 0 {
+		return entries
+	}
+
+	// Keep newest entries when trimming (tail-preserving).
+	selectedRev := make([]string, 0, len(entries))
+	used := 0
+	for i := len(entries) - 1; i >= 0; i-- {
+		entry := strings.TrimSpace(entries[i])
+		if entry == "" {
+			continue
+		}
+		// "- " + entry + "\n"
+		entryLen := utf8.RuneCountInString(entry) + 3
+		if used+entryLen > limit {
+			if len(selectedRev) == 0 {
+				// Single entry too large: truncate it to fit.
+				max := maxInt(1, limit-3)
+				selectedRev = append(selectedRev, truncateRunes(entry, max))
+			}
+			break
+		}
+		selectedRev = append(selectedRev, entry)
+		used += entryLen
+	}
+
+	// Reverse back to chronological order.
+	for i, j := 0, len(selectedRev)-1; i < j; i, j = i+1, j-1 {
+		selectedRev[i], selectedRev[j] = selectedRev[j], selectedRev[i]
+	}
+	return selectedRev
+}
+
+func renderEntries(entries []string) string {
+	var sb strings.Builder
+	for _, e := range entries {
+		e = strings.TrimSpace(e)
+		if e == "" {
+			continue
+		}
+		sb.WriteString("- ")
+		sb.WriteString(e)
+		sb.WriteString("\n")
+	}
+	return strings.TrimSpace(sb.String())
+}
+
+func truncateRunes(s string, limit int) string {
+	if limit <= 0 {
+		return ""
+	}
+	if utf8.RuneCountInString(s) <= limit {
+		return s
+	}
+	out := make([]rune, 0, limit)
+	for _, r := range s {
+		if len(out) >= limit {
+			break
+		}
+		out = append(out, r)
+	}
+	return strings.TrimSpace(string(out))
+}
+
+func parseMemoryAsBlocks(content string) map[string]string {
+	content = strings.TrimSpace(content)
+	if content == "" {
+		return map[string]string{}
+	}
+
+	if blocks, ok := parseMemoryBlocks(content); ok {
+		// Ensure all block keys exist for deterministic rendering.
+		for _, label := range memoryBlockLabels() {
+			if _, exists := blocks[label]; !exists {
+				blocks[label] = ""
+			}
+		}
+		return blocks
+	}
+
+	// Legacy format: map older sections into modern blocks.
+	sections := parseMemorySections(content)
+	projects := make([]string, 0, len(sections["Active Goals"])+len(sections["Open Threads"])+len(sections["Deprecated/Resolved"]))
+	projects = append(projects, sections["Active Goals"]...)
+	projects = append(projects, sections["Open Threads"]...)
+	for _, entry := range sections["Deprecated/Resolved"] {
+		entry = strings.TrimSpace(entry)
+		if entry == "" {
+			continue
+		}
+		projects = append(projects, "resolved: "+entry)
+	}
+
+	facts := make([]string, 0, len(sections["Long-term Facts"])+len(sections["Constraints"]))
+	facts = append(facts, sections["Long-term Facts"]...)
+	facts = append(facts, sections["Constraints"]...)
+
+	blocks := map[string]string{
+		"persona":  "",
+		"human":    renderEntries(sections["Profile"]),
+		"projects": renderEntries(projects),
+		"facts":    renderEntries(facts),
+	}
+	// Preserve anything else by appending to facts (best-effort).
+	for section, entries := range sections {
+		switch section {
+		case "Profile", "Active Goals", "Open Threads", "Long-term Facts", "Constraints", "Deprecated/Resolved":
+			continue
+		default:
+			if len(entries) == 0 {
+				continue
+			}
+			extra := renderEntries(entries)
+			if extra == "" {
+				continue
+			}
+			if blocks["facts"] != "" {
+				blocks["facts"] += "\n" + extra
+			} else {
+				blocks["facts"] = extra
+			}
+		}
+	}
+	return blocks
+}
+
+// MemorySearchTool performs semantic lookup over persisted memory files.
+type MemorySearchTool struct {
+	memoryProvider  func(ctx context.Context) MemoryReader
+	defaultTopK     int
+	defaultMinScore float64
+}
+
+func NewMemorySearchTool(memory MemoryReader, defaultTopK int, defaultMinScore float64) *MemorySearchTool {
+	return NewMemorySearchToolWithProvider(func(context.Context) MemoryReader { return memory }, defaultTopK, defaultMinScore)
+}
+
+func NewMemorySearchToolWithProvider(provider func(ctx context.Context) MemoryReader, defaultTopK int, defaultMinScore float64) *MemorySearchTool {
+	if defaultTopK <= 0 {
+		defaultTopK = defaultMemoryVectorTopK
+	}
+	if defaultMinScore < 0 || defaultMinScore >= 1 {
+		defaultMinScore = defaultMemoryVectorMinScore
+	}
+	return &MemorySearchTool{
+		memoryProvider:  provider,
+		defaultTopK:     defaultTopK,
+		defaultMinScore: defaultMinScore,
+	}
+}
+
+func (t *MemorySearchTool) Name() string {
+	return "memory_search"
+}
+
+func (t *MemorySearchTool) ParallelPolicy() tools.ToolParallelPolicy {
+	return tools.ToolParallelReadOnly
+}
+
+func (t *MemorySearchTool) Description() string {
+	return "Semantically search MEMORY.md and recent daily notes for relevant facts. Returns structured JSON hits for stable LLM consumption."
+}
+
+func (t *MemorySearchTool) Parameters() map[string]any {
+	return map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"query": map[string]any{
+				"type":        "string",
+				"description": "Natural-language query to search semantic memory",
+			},
+			"top_k": map[string]any{
+				"type":        "integer",
+				"description": "Maximum number of hits to return (default from agent settings)",
+			},
+			"min_score": map[string]any{
+				"type":        "number",
+				"description": "Minimum cosine similarity in [0,1), lower means broader recall",
+			},
+		},
+		"required": []string{"query"},
+	}
+}
+
+func (t *MemorySearchTool) Execute(ctx context.Context, args map[string]any) *tools.ToolResult {
+	memory := (MemoryReader)(nil)
+	if t.memoryProvider != nil {
+		memory = t.memoryProvider(ctx)
+	}
+	if memory == nil {
+		return tools.ErrorResult("memory store unavailable")
+	}
+
+	query, ok := args["query"].(string)
+	if !ok || strings.TrimSpace(query) == "" {
+		return tools.ErrorResult("query is required")
+	}
+
+	topK := t.defaultTopK
+	if raw, ok := args["top_k"]; ok {
+		switch v := raw.(type) {
+		case int:
+			if v > 0 {
+				topK = v
+			}
+		case int64:
+			if v > 0 {
+				topK = int(v)
+			}
+		case float64:
+			if int(v) > 0 {
+				topK = int(v)
+			}
+		}
+	}
+
+	minScore := t.defaultMinScore
+	if raw, ok := args["min_score"]; ok {
+		if v, ok := raw.(float64); ok && v >= 0 && v < 1 {
+			minScore = v
+		}
+	}
+
+	hits, err := memory.SearchRelevant(ctx, query, topK, minScore)
+	if err != nil {
+		return tools.ErrorResult(fmt.Sprintf("memory search failed: %v", err)).WithError(err)
+	}
+
+	type memoryHit struct {
+		ID         string             `json:"id"`
+		Score      float64            `json:"score"`
+		MatchKind  string             `json:"match_kind,omitempty"`
+		Signals    map[string]float64 `json:"signals,omitempty"`
+		Snippet    string             `json:"snippet"`
+		Source     string             `json:"source"`
+		SourcePath string             `json:"source_path"`
+		Tags       []string           `json:"tags"`
+	}
+	type memorySearchResult struct {
+		Kind     string      `json:"kind"`
+		Query    string      `json:"query"`
+		TopK     int         `json:"top_k"`
+		MinScore float64     `json:"min_score"`
+		Hits     []memoryHit `json:"hits"`
+	}
+
+	result := memorySearchResult{
+		Kind:     "memory_search_result",
+		Query:    query,
+		TopK:     topK,
+		MinScore: minScore,
+		Hits:     make([]memoryHit, 0, len(hits)),
+	}
+
+	for _, hit := range hits {
+		sourcePath := hit.Source
+		if before, _, ok := strings.Cut(hit.Source, "#"); ok && strings.TrimSpace(before) != "" {
+			sourcePath = before
+		}
+		result.Hits = append(result.Hits, memoryHit{
+			ID:         hit.Source,
+			Score:      hit.Score,
+			MatchKind:  strings.TrimSpace(hit.MatchKind),
+			Signals:    buildMemoryHitSignals(hit),
+			Snippet:    utils.Truncate(hit.Text, 240),
+			Source:     hit.Source,
+			SourcePath: sourcePath,
+			Tags:       []string{},
+		})
+	}
+
+	payload, err := json.Marshal(result)
+	if err != nil {
+		return tools.ErrorResult(fmt.Sprintf("memory search failed: %v", err)).WithError(err)
+	}
+
+	// Keep a human-readable summary (for traces / debugging) while returning JSON to the LLM.
+	var summary strings.Builder
+	if len(hits) == 0 {
+		summary.WriteString("No relevant memory hits found.")
+	} else {
+		summary.WriteString("Memory search hits:\n")
+		for _, hit := range hits {
+			summary.WriteString(fmt.Sprintf("- (score=%.2f, source=%s) %s\n", hit.Score, hit.Source, hit.Text))
+		}
+	}
+
+	return &tools.ToolResult{
+		ForLLM:  string(payload),
+		ForUser: strings.TrimSpace(summary.String()),
+		Silent:  true,
+		IsError: false,
+		Async:   false,
+	}
+}
+
+func buildMemoryHitSignals(hit MemoryVectorHit) map[string]float64 {
+	signals := map[string]float64{}
+	if hit.HasFTS {
+		signals["fts_score"] = hit.FTSScore
+	}
+	if hit.HasVector {
+		signals["vector_score"] = hit.VectorScore
+	}
+	if len(signals) == 0 {
+		return nil
+	}
+	return signals
+}
+
+// MemoryGetTool returns a specific memory item by its source citation.
+type MemoryGetTool struct {
+	memoryProvider func(ctx context.Context) MemoryReader
+}
+
+func NewMemoryGetTool(memory MemoryReader) *MemoryGetTool {
+	return NewMemoryGetToolWithProvider(func(context.Context) MemoryReader { return memory })
+}
+
+func NewMemoryGetToolWithProvider(provider func(ctx context.Context) MemoryReader) *MemoryGetTool {
+	return &MemoryGetTool{memoryProvider: provider}
+}
+
+func (t *MemoryGetTool) Name() string {
+	return "memory_get"
+}
+
+func (t *MemoryGetTool) ParallelPolicy() tools.ToolParallelPolicy {
+	return tools.ToolParallelReadOnly
+}
+
+func (t *MemoryGetTool) Description() string {
+	return "Retrieve one memory entry by source citation returned from memory_search. Returns structured JSON for stable LLM consumption."
+}
+
+func (t *MemoryGetTool) Parameters() map[string]any {
+	return map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"source": map[string]any{
+				"type":        "string",
+				"description": "Citation source like MEMORY.md#facts (also accepts legacy sections like MEMORY.md#Long-term Facts)",
+			},
+		},
+		"required": []string{"source"},
+	}
+}
+
+func (t *MemoryGetTool) Execute(ctx context.Context, args map[string]any) *tools.ToolResult {
+	memory := (MemoryReader)(nil)
+	if t.memoryProvider != nil {
+		memory = t.memoryProvider(ctx)
+	}
+	if memory == nil {
+		return tools.ErrorResult("memory store unavailable")
+	}
+
+	source, ok := args["source"].(string)
+	if !ok || strings.TrimSpace(source) == "" {
+		return tools.ErrorResult("source is required")
+	}
+
+	hit, found, err := memory.GetBySource(ctx, source)
+	if err != nil {
+		return tools.ErrorResult(fmt.Sprintf("memory get failed: %v", err)).WithError(err)
+	}
+
+	type memoryGetResult struct {
+		Kind  string `json:"kind"`
+		Found bool   `json:"found"`
+		Hit   struct {
+			ID         string   `json:"id,omitempty"`
+			Source     string   `json:"source,omitempty"`
+			SourcePath string   `json:"source_path,omitempty"`
+			Content    string   `json:"content,omitempty"`
+			Tags       []string `json:"tags,omitempty"`
+		} `json:"hit"`
+	}
+
+	result := memoryGetResult{
+		Kind:  "memory_get_result",
+		Found: found,
+	}
+	if found {
+		sourcePath := hit.Source
+		if before, _, ok := strings.Cut(hit.Source, "#"); ok && strings.TrimSpace(before) != "" {
+			sourcePath = before
+		}
+
+		result.Hit.ID = hit.Source
+		result.Hit.Source = hit.Source
+		result.Hit.SourcePath = sourcePath
+		result.Hit.Content = hit.Text
+		result.Hit.Tags = []string{}
+	}
+
+	payload, err := json.Marshal(result)
+	if err != nil {
+		return tools.ErrorResult(fmt.Sprintf("memory get failed: %v", err)).WithError(err)
+	}
+
+	userSummary := "Memory source not found."
+	if found {
+		userSummary = fmt.Sprintf("Memory entry:\n- source=%s\n- content=%s", hit.Source, hit.Text)
+	}
+
+	return &tools.ToolResult{
+		ForLLM:  string(payload),
+		ForUser: userSummary,
+		Silent:  true,
+		IsError: false,
+		Async:   false,
+	}
 }
