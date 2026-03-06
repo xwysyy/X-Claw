@@ -25,6 +25,20 @@ type toolRegistrar struct {
 	taskLedger       *tools.TaskLedger
 }
 
+type sharedToolInstaller func(toolRegistrar, *AgentInstance, string)
+
+func defaultSharedToolInstallers() []sharedToolInstaller {
+	return []sharedToolInstaller{
+		func(r toolRegistrar, agent *AgentInstance, _ string) { r.registerWebTools(agent) },
+		func(r toolRegistrar, agent *AgentInstance, _ string) { r.registerMessageTool(agent) },
+		func(r toolRegistrar, agent *AgentInstance, _ string) { r.registerConfirmTool(agent) },
+		func(r toolRegistrar, agent *AgentInstance, _ string) { r.registerCalendarTool(agent) },
+		func(r toolRegistrar, agent *AgentInstance, _ string) { r.registerSkillTools(agent) },
+		func(r toolRegistrar, agent *AgentInstance, agentID string) { r.registerHandoffTools(agent, agentID) },
+		func(r toolRegistrar, agent *AgentInstance, agentID string) { r.registerSpawnTools(agent, agentID) },
+	}
+}
+
 func registerSharedTools(
 	cfg *config.Config,
 	msgBus *bus.MessageBus,
@@ -48,13 +62,9 @@ func registerSharedTools(
 			continue
 		}
 
-		registrar.registerWebTools(agent)
-		registrar.registerMessageTool(agent)
-		registrar.registerConfirmTool(agent)
-		registrar.registerCalendarTool(agent)
-		registrar.registerSkillTools(agent)
-		registrar.registerHandoffTools(agent, agentID)
-		registrar.registerSpawnTools(agent, agentID)
+		for _, install := range defaultSharedToolInstallers() {
+			install(registrar, agent, agentID)
+		}
 		agent.ContextBuilder.SetToolsRegistry(agent.Tools)
 	}
 }

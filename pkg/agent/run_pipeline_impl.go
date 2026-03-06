@@ -483,13 +483,14 @@ func newRunTraceForMessages(
 }
 
 func persistUserMessage(agent *AgentInstance, opts processOptions) {
-	agent.Sessions.AddMessage(opts.SessionKey, "user", opts.UserMessage)
-	if err := agent.Sessions.Save(opts.SessionKey); err != nil {
-		logger.WarnCF("agent", "Failed to WAL user message (best-effort)", map[string]any{
-			"session_key": opts.SessionKey,
-			"error":       err.Error(),
-		})
-	}
+	addSessionMessageAndSave(
+		agent.Sessions,
+		opts.SessionKey,
+		"user",
+		opts.UserMessage,
+		"Failed to WAL user message (best-effort)",
+		nil,
+	)
 }
 
 func (al *AgentLoop) finalizeRun(
@@ -505,8 +506,8 @@ func (al *AgentLoop) finalizeRun(
 		finalContent = opts.DefaultResponse
 	}
 
-	agent.Sessions.AddMessage(opts.SessionKey, "assistant", finalContent)
-	agent.Sessions.Save(opts.SessionKey)
+	addSessionMessage(agent.Sessions, opts.SessionKey, "assistant", finalContent)
+	saveSessionBestEffort(agent.Sessions, opts.SessionKey, "Failed to persist assistant message (best-effort)", nil)
 
 	if opts.EnableSummary {
 		al.maybeSummarize(agent, opts.SessionKey, opts.Channel, opts.ChatID)

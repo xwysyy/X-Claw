@@ -12,6 +12,7 @@ import (
 	"golang.org/x/time/rate"
 
 	"github.com/xwysyy/X-Claw/pkg/bus"
+	"github.com/xwysyy/X-Claw/pkg/config"
 )
 
 // mockChannel is a test double that delegates Send to a configurable function.
@@ -76,6 +77,33 @@ func TestSendWithRetry_Success(t *testing.T) {
 
 	if callCount != 1 {
 		t.Fatalf("expected 1 Send call, got %d", callCount)
+	}
+}
+
+func TestSelectedChannelInitializers(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Channels.Telegram.Enabled = true
+	cfg.Channels.Telegram.Token = config.SecretRef{Inline: "token"}
+	cfg.Channels.WhatsApp.Enabled = true
+	cfg.Channels.WhatsApp.UseNative = true
+	cfg.Channels.Slack.Enabled = true
+	cfg.Channels.Slack.BotToken = config.SecretRef{Inline: "bot"}
+
+	specs := selectedChannelInitializers(cfg)
+	got := map[string]bool{}
+	for _, spec := range specs {
+		if spec.enabled != nil && spec.enabled(cfg) {
+			got[spec.name] = true
+		}
+	}
+
+	for _, name := range []string{"telegram", "whatsapp_native", "slack"} {
+		if !got[name] {
+			t.Fatalf("expected initializer %q to be selected; got=%v", name, got)
+		}
+	}
+	if got["whatsapp"] {
+		t.Fatalf("expected bridge whatsapp initializer to be disabled when native mode is on")
 	}
 }
 

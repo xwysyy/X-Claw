@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/xwysyy/X-Claw/pkg/providers"
 )
 
 func TestSanitizeFilename(t *testing.T) {
@@ -148,6 +150,46 @@ func TestCompactionStateLifecycle(t *testing.T) {
 	}
 	if flushAt.IsZero() {
 		t.Fatal("flushAt should be set")
+	}
+}
+
+func TestSetHistory_DeepCopiesInput(t *testing.T) {
+	sm := NewSessionManager(t.TempDir())
+	key := "agent:main:main"
+	sm.AddMessage(key, "user", "seed")
+
+	history := []providers.Message{{Role: "user", Content: "hello"}}
+	sm.SetHistory(key, history)
+	history[0].Content = "mutated"
+
+	got := sm.GetHistory(key)
+	if len(got) != 1 {
+		t.Fatalf("expected 1 history item, got %d", len(got))
+	}
+	if got[0].Content != "hello" {
+		t.Fatalf("history was not deep-copied, got %q", got[0].Content)
+	}
+}
+
+func TestSetActiveAgentID_CreatesSessionAndPersistsMeta(t *testing.T) {
+	tmpDir := t.TempDir()
+	sm := NewSessionManager(tmpDir)
+	key := "telegram:123456"
+
+	sm.SetActiveAgentID(key, "writer")
+
+	if got := sm.GetActiveAgentID(key); got != "writer" {
+		t.Fatalf("GetActiveAgentID(%q) = %q, want writer", key, got)
+	}
+
+	metaPath := filepath.Join(tmpDir, "telegram_123456.meta.json")
+	if _, err := os.Stat(metaPath); err != nil {
+		t.Fatalf("expected meta file %s to exist: %v", metaPath, err)
+	}
+
+	sm2 := NewSessionManager(tmpDir)
+	if got := sm2.GetActiveAgentID(key); got != "writer" {
+		t.Fatalf("reloaded GetActiveAgentID(%q) = %q, want writer", key, got)
 	}
 }
 

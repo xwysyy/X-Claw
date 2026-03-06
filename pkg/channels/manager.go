@@ -376,61 +376,10 @@ func (m *Manager) initChannel(name, displayName string) {
 func (m *Manager) initChannels() error {
 	logger.InfoC("channels", "Initializing channel manager")
 
-	if m.config.Channels.Telegram.Enabled && m.config.Channels.Telegram.Token.Present() {
-		m.initChannel("telegram", "Telegram")
-	}
-
-	if m.config.Channels.WhatsApp.Enabled {
-		waCfg := m.config.Channels.WhatsApp
-		if waCfg.UseNative {
-			m.initChannel("whatsapp_native", "WhatsApp Native")
-		} else if waCfg.BridgeURL != "" {
-			m.initChannel("whatsapp", "WhatsApp")
+	for _, spec := range selectedChannelInitializers(m.config) {
+		if spec.enabled != nil && spec.enabled(m.config) {
+			m.initChannel(spec.name, spec.displayName)
 		}
-	}
-
-	if m.config.Channels.Feishu.Enabled {
-		m.initChannel("feishu", "Feishu")
-	}
-
-	if m.config.Channels.Discord.Enabled && m.config.Channels.Discord.Token.Present() {
-		m.initChannel("discord", "Discord")
-	}
-
-	if m.config.Channels.QQ.Enabled {
-		m.initChannel("qq", "QQ")
-	}
-
-	if m.config.Channels.DingTalk.Enabled && m.config.Channels.DingTalk.ClientID != "" {
-		m.initChannel("dingtalk", "DingTalk")
-	}
-
-	if m.config.Channels.Slack.Enabled && m.config.Channels.Slack.BotToken.Present() {
-		m.initChannel("slack", "Slack")
-	}
-
-	if m.config.Channels.LINE.Enabled && m.config.Channels.LINE.ChannelAccessToken.Present() {
-		m.initChannel("line", "LINE")
-	}
-
-	if m.config.Channels.OneBot.Enabled && m.config.Channels.OneBot.WSUrl != "" {
-		m.initChannel("onebot", "OneBot")
-	}
-
-	if m.config.Channels.WeCom.Enabled && m.config.Channels.WeCom.Token.Present() {
-		m.initChannel("wecom", "WeCom")
-	}
-
-	if m.config.Channels.WeComAIBot.Enabled && m.config.Channels.WeComAIBot.Token.Present() {
-		m.initChannel("wecom_aibot", "WeCom AI Bot")
-	}
-
-	if m.config.Channels.WeComApp.Enabled && m.config.Channels.WeComApp.CorpID != "" {
-		m.initChannel("wecom_app", "WeCom App")
-	}
-
-	if m.config.Channels.Pico.Enabled && m.config.Channels.Pico.Token.Present() {
-		m.initChannel("pico", "Pico")
 	}
 
 	logger.InfoCF("channels", "Channel initialization completed", map[string]any{

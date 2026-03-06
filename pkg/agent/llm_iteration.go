@@ -468,8 +468,14 @@ steeringDrained:
 		if content == "" {
 			continue
 		}
-		r.agent.Sessions.AddMessage(r.opts.SessionKey, "user", content)
-		_ = r.agent.Sessions.Save(r.opts.SessionKey)
+		addSessionMessageAndSave(
+			r.agent.Sessions,
+			r.opts.SessionKey,
+			"user",
+			content,
+			"Failed to persist steering message (best-effort)",
+			map[string]any{"iteration": r.iteration},
+		)
 		r.messages = append(r.messages, providers.Message{Role: "user", Content: content})
 		if r.trace != nil {
 			now := time.Now()
@@ -656,7 +662,7 @@ func (r *llmIterationRunner) appendAssistantToolCallMessage(response *providers.
 		})
 	}
 	r.messages = append(r.messages, assistantMsg)
-	r.agent.Sessions.AddFullMessage(r.opts.SessionKey, assistantMsg)
+	addSessionFullMessage(r.agent.Sessions, r.opts.SessionKey, assistantMsg)
 }
 
 func (r *llmIterationRunner) executeToolCalls(toolCalls []providers.ToolCall) []tools.ToolCallExecution {
@@ -800,7 +806,7 @@ func (r *llmIterationRunner) applyToolExecutionResults(toolExecutions []tools.To
 
 		toolResultMsg := providers.Message{Role: "tool", Content: contentForLLM, ToolCallID: tc.ID}
 		r.messages = append(r.messages, toolResultMsg)
-		r.agent.Sessions.AddFullMessage(r.opts.SessionKey, toolResultMsg)
+		addSessionFullMessage(r.agent.Sessions, r.opts.SessionKey, toolResultMsg)
 	}
 	r.applyHandoff(handoffTargetID, handoffTakeover)
 }

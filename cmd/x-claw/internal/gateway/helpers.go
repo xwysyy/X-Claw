@@ -7,14 +7,12 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"strings"
 	"sync"
 	"syscall"
 	"time"
 
 	"github.com/xwysyy/X-Claw/cmd/x-claw/internal"
 	"github.com/xwysyy/X-Claw/pkg/agent"
-	"github.com/xwysyy/X-Claw/pkg/auditlog"
 	"github.com/xwysyy/X-Claw/pkg/bus"
 	"github.com/xwysyy/X-Claw/pkg/channels"
 	_ "github.com/xwysyy/X-Claw/pkg/channels/dingtalk"
@@ -33,11 +31,9 @@ import (
 	"github.com/xwysyy/X-Claw/pkg/cron"
 	"github.com/xwysyy/X-Claw/pkg/health"
 	"github.com/xwysyy/X-Claw/pkg/heartbeat"
-	"github.com/xwysyy/X-Claw/pkg/httpapi"
 	"github.com/xwysyy/X-Claw/pkg/logger"
 	"github.com/xwysyy/X-Claw/pkg/media"
 	"github.com/xwysyy/X-Claw/pkg/providers"
-	"github.com/xwysyy/X-Claw/pkg/session"
 	"github.com/xwysyy/X-Claw/pkg/tools"
 	"github.com/xwysyy/X-Claw/pkg/voice"
 )
@@ -213,251 +209,6 @@ func runGateway(svc *gatewayServices) error {
 
 		return shutdownGateway(svc, cancel)
 	}
-}
-
-func watchConfigFile(ctx context.Context, path string, interval time.Duration, onChange func()) {
-	path = strings.TrimSpace(path)
-	if path == "" || interval <= 0 || onChange == nil {
-		return
-	}
-
-	lastStamp := ""
-	if fi, err := os.Stat(path); err == nil && fi != nil {
-		lastStamp = fmt.Sprintf("%d:%d", fi.ModTime().UnixNano(), fi.Size())
-	}
-
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			fi, err := os.Stat(path)
-			if err != nil || fi == nil {
-				continue
-			}
-			stamp := fmt.Sprintf("%d:%d", fi.ModTime().UnixNano(), fi.Size())
-			if stamp == lastStamp {
-				continue
-			}
-			lastStamp = stamp
-			onChange()
-		}
-	}
-}
-
-func (svc *gatewayServices) reload(ctx context.Context, reason string) error {
-	if svc == nil {
-		return fmt.Errorf("gateway services is nil")
-	}
-
-	svc.reloadMu.Lock()
-	defer svc.reloadMu.Unlock()
-
-	path := strings.TrimSpace(svc.configPath)
-	if path == "" {
-		path = internal.GetConfigPath()
-	}
-
-	newCfg, err := config.LoadConfig(path)
-	if err != nil {
-		return fmt.Errorf("reload config: %w", err)
-	}
-
-	// Fail-fast: if gateway.api_key is configured but cannot be resolved, abort reload
-	// before stopping the currently running channels. This avoids silently dropping
-	// authentication or leaving the gateway in a partially-restarted state.
-	if _, err := resolveGatewayAPIKey(newCfg); err != nil {
-		return fmt.Errorf("reload: resolve gateway api_key: %w", err)
-	}
-
-	// Preflight: ensure new config enables at least one channel, otherwise keep the current gateway running.
-	preflightCM, err := channels.NewManager(newCfg, svc.msgBus, svc.mediaStore)
-	if err != nil {
-		return fmt.Errorf("reload: create channel manager: %w", err)
-	}
-	if len(preflightCM.GetEnabledChannels()) == 0 {
-		return fmt.Errorf("reload aborted: no channels enabled in new config")
-	}
-
-	// Apply config to agent loop (tools/policy/notify settings).
-	svc.cfg = newCfg
-	if svc.agentLoop != nil {
-		svc.agentLoop.SetConfig(newCfg)
-		// Refresh MCP tools in-place.
-		svc.agentLoop.ReloadMCPTools(ctx)
-	}
-
-	// Restart channel manager + HTTP server (re-registers webhook handlers + /api/* handlers).
-	if svc.channelManager != nil {
-		stopCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		_ = svc.channelManager.StopAll(stopCtx)
-		cancel()
-	}
-
-	svc.channelManager = preflightCM
-	svc.healthServer = health.NewServer(newCfg.Gateway.Host, newCfg.Gateway.Port)
-
-	if svc.agentLoop != nil {
-		svc.agentLoop.SetChannelManager(svc.channelManager)
-	}
-
-	addr := fmt.Sprintf("%s:%d", newCfg.Gateway.Host, newCfg.Gateway.Port)
-	svc.channelManager.SetupHTTPServer(addr, svc.healthServer)
-	if err := registerGatewayHTTPAPI(svc); err != nil {
-		return fmt.Errorf("reload: register http api: %w", err)
-	}
-
-	if err := svc.channelManager.StartAll(ctx); err != nil {
-		return fmt.Errorf("reload: start channels: %w", err)
-	}
-
-	logger.InfoCF("gateway", "Config reloaded", map[string]any{
-		"reason":           reason,
-		"config_path":      path,
-		"enabled_channels": svc.channelManager.GetEnabledChannels(),
-		"listen":           addr,
-	})
-
-	auditlog.Record(newCfg.WorkspacePath(), auditlog.Event{
-		Type:   "config.reload",
-		Source: "gateway",
-		Note: fmt.Sprintf(
-			"reason=%s path=%s listen=%s channels=%v",
-			strings.TrimSpace(reason),
-			strings.TrimSpace(path),
-			strings.TrimSpace(addr),
-			svc.channelManager.GetEnabledChannels(),
-		),
-	})
-
-	return nil
-}
-
-func resolveGatewayAPIKey(cfg *config.Config) (string, error) {
-	if cfg == nil {
-		return "", nil
-	}
-	if !cfg.Gateway.APIKey.Present() {
-		return "", nil
-	}
-	v, err := cfg.Gateway.APIKey.Resolve("")
-	if err != nil {
-		return "", err
-	}
-	v = strings.TrimSpace(v)
-	if v == "" {
-		return "", fmt.Errorf("secret resolved empty")
-	}
-	return v, nil
-}
-
-func registerGatewayHTTPAPI(svc *gatewayServices) error {
-	if svc == nil || svc.channelManager == nil {
-		return nil
-	}
-
-	apiKey, err := resolveGatewayAPIKey(svc.cfg)
-	if err != nil {
-		return fmt.Errorf("gateway.api_key: %w", err)
-	}
-
-	notify := httpapi.NewNotifyHandler(httpapi.NotifyHandlerOptions{
-		Sender: svc.channelManager,
-		APIKey: apiKey,
-		LastActive: func() (string, string) {
-			if svc.agentLoop == nil {
-				return "", ""
-			}
-			return svc.agentLoop.LastActive()
-		},
-	})
-
-	if err := svc.channelManager.RegisterHTTPHandler("/api/notify", notify); err != nil {
-		fmt.Printf("⚠ Warning: failed to register /api/notify: %v\n", err)
-	}
-
-	resume := httpapi.NewResumeLastTaskHandler(httpapi.ResumeLastTaskHandlerOptions{
-		APIKey:  apiKey,
-		Timeout: 2 * time.Minute,
-		Resume: func(ctx context.Context) (any, string, error) {
-			if svc.agentLoop == nil {
-				return nil, "", fmt.Errorf("agent loop not available")
-			}
-			candidate, response, err := svc.agentLoop.ResumeLastTask(ctx)
-			return candidate, response, err
-		},
-	})
-	if err := svc.channelManager.RegisterHTTPHandler("/api/resume_last_task", resume); err != nil {
-		fmt.Printf("⚠ Warning: failed to register /api/resume_last_task: %v\n", err)
-	}
-
-	estop := httpapi.NewEstopHandler(httpapi.EstopHandlerOptions{
-		APIKey:       apiKey,
-		Workspace:    svc.cfg.WorkspacePath(),
-		Enabled:      svc.cfg.Tools.Estop.Enabled,
-		FailClosed:   svc.cfg.Tools.Estop.FailClosed,
-		MaxBodyBytes: 8 << 10,
-	})
-	if err := svc.channelManager.RegisterHTTPHandler("/api/estop", estop); err != nil {
-		fmt.Printf("⚠ Warning: failed to register /api/estop: %v\n", err)
-	}
-
-	sessionModel := httpapi.NewSessionModelHandler(httpapi.SessionModelHandlerOptions{
-		APIKey:    apiKey,
-		Workspace: svc.cfg.WorkspacePath(),
-		Sessions: func() session.Store { // avoid nil deref on startup
-			if svc.agentLoop == nil {
-				return nil
-			}
-			return svc.agentLoop.SessionStore()
-		}(),
-		Enabled:      true,
-		MaxBodyBytes: 8 << 10,
-	})
-	if err := svc.channelManager.RegisterHTTPHandler("/api/session_model", sessionModel); err != nil {
-		fmt.Printf("⚠ Warning: failed to register /api/session_model: %v\n", err)
-	}
-
-	security := httpapi.NewSecurityHandler(httpapi.SecurityHandlerOptions{
-		APIKey:    apiKey,
-		Workspace: svc.cfg.WorkspacePath(),
-		Config:    svc.cfg,
-	})
-	if err := svc.channelManager.RegisterHTTPHandler("/api/security", security); err != nil {
-		fmt.Printf("⚠ Warning: failed to register /api/security: %v\n", err)
-	}
-
-	console := httpapi.NewConsoleHandler(httpapi.ConsoleHandlerOptions{
-		Workspace: svc.cfg.WorkspacePath(),
-		APIKey:    apiKey,
-		LastActive: func() (string, string) {
-			if svc.agentLoop == nil {
-				return "", ""
-			}
-			return svc.agentLoop.LastActive()
-		},
-		Info: httpapi.ConsoleInfo{
-			Model:                svc.cfg.Agents.Defaults.ModelName,
-			NotifyOnTaskComplete: svc.cfg.Notify.OnTaskComplete,
-			ToolTraceEnabled:     svc.cfg.Tools.Trace.Enabled,
-			RunTraceEnabled:      svc.cfg.Tools.Trace.Enabled,
-			WebEvidenceMode:      svc.cfg.Tools.Web.Evidence.Enabled,
-
-			InboundQueueEnabled:        svc.cfg.Gateway.InboundQueue.Enabled,
-			InboundQueueMaxConcurrency: svc.cfg.Gateway.InboundQueue.MaxConcurrency,
-		},
-	})
-	if err := svc.channelManager.RegisterHTTPHandler("/console/", console); err != nil {
-		fmt.Printf("⚠ Warning: failed to register /console/: %v\n", err)
-	}
-	if err := svc.channelManager.RegisterHTTPHandler("/api/console/", console); err != nil {
-		fmt.Printf("⚠ Warning: failed to register /api/console/: %v\n", err)
-	}
-
-	return nil
 }
 
 // shutdownGateway performs graceful shutdown of all services.
