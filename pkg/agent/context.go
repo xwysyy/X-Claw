@@ -8,9 +8,11 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/xwysyy/X-Claw/pkg/logger"
 	"github.com/xwysyy/X-Claw/pkg/providers"
@@ -669,4 +671,435 @@ func (cb *ContextBuilder) GetSkillsInfo() map[string]any {
 		"available": len(allSkills),
 		"names":     skillNames,
 	}
+}
+
+func (cb *ContextBuilder) pruneHistoryForContext(
+	history []providers.Message,
+	systemPrompt string,
+) []providers.Message {
+	if len(history) == 0 || cb.settings.PruningMode == "off" || cb.settings.ContextWindowTokens <= 0 {
+		return history
+	}
+
+	totalTokens := estimateTotalTokens(systemPrompt, history)
+	ratio := float64(totalTokens) / float64(cb.settings.ContextWindowTokens)
+	if ratio < cb.settings.TriggerRatio {
+		return history
+	}
+
+	cutoff := len(history) - 8
+	if cutoff <= 0 {
+		return history
+	}
+
+	pruned := make([]providers.Message, 0, len(history))
+	for i := 0; i < cutoff; i++ {
+		msg := history[i]
+
+		if cb.settings.PruningMode == "tools_only" && msg.Role == "tool" && cb.settings.SoftToolResultChars > 0 {
+			raw := msg.Content
+			if len(raw) > cb.settings.SoftToolResultChars {
+				head := cb.settings.SoftToolResultChars * 7 / 10
+				tail := cb.settings.SoftToolResultChars * 2 / 10
+				if head+tail > len(raw) {
+					head = len(raw)
+					tail = 0
+				}
+				msg.Content = raw[:head] +
+					"\n...\n[tool result condensed for context stability]\n...\n" +
+					raw[len(raw)-tail:]
+			}
+		}
+
+		pruned = append(pruned, msg)
+	}
+	pruned = append(pruned, history[cutoff:]...)
+
+	if cb.settings.IncludeOldChitChat {
+		pruned = compactOldChitChat(pruned, cutoff)
+	}
+
+	totalTokens = estimateTotalTokens(systemPrompt, pruned)
+	ratio = float64(totalTokens) / float64(cb.settings.ContextWindowTokens)
+	if ratio < cb.settings.TriggerRatio || cb.settings.HardToolResultChars <= 0 {
+		return pruned
+	}
+
+	scanLimit := minInt(cutoff, len(pruned))
+	for i := 0; i < scanLimit; i++ {
+		if ratio < cb.settings.TriggerRatio {
+			break
+		}
+		msg := pruned[i]
+		if msg.Role != "tool" || len(msg.Content) <= cb.settings.HardToolResultChars {
+			continue
+		}
+		pruned[i].Content = "[tool result omitted for context stability; details preserved in session history]"
+		totalTokens = estimateTotalTokens(systemPrompt, pruned)
+		ratio = float64(totalTokens) / float64(cb.settings.ContextWindowTokens)
+	}
+
+	return pruned
+}
+
+func compactOldChitChat(history []providers.Message, cutoff int) []providers.Message {
+	if len(history) == 0 || cutoff <= 0 {
+		return history
+	}
+
+	isLowSignal := func(msg providers.Message) bool {
+		if msg.Role != "user" && msg.Role != "assistant" {
+			return false
+		}
+		if len(msg.ToolCalls) > 0 || msg.ToolCallID != "" {
+			return false
+		}
+		text := strings.ToLower(strings.TrimSpace(msg.Content))
+		if text == "" || len(text) > 40 {
+			return false
+		}
+		switch text {
+		case "ok", "okay", "thanks", "thank you", "got it", "roger", "understood", "好的", "收到", "谢谢":
+			return true
+		}
+		return false
+	}
+
+	result := make([]providers.Message, 0, len(history))
+	i := 0
+	for i < len(history) {
+		if i >= cutoff || !isLowSignal(history[i]) {
+			result = append(result, history[i])
+			i++
+			continue
+		}
+
+		j := i
+		for j < cutoff && isLowSignal(history[j]) {
+			j++
+		}
+		runLen := j - i
+		if runLen >= 2 {
+			result = append(result, providers.Message{
+				Role:    "assistant",
+				Content: fmt.Sprintf("[History note: %d brief acknowledgements condensed]", runLen),
+			})
+		} else {
+			result = append(result, history[i])
+		}
+		i = j
+	}
+
+	return result
+}
+
+func sanitizeHistoryForProvider(history []providers.Message) []providers.Message {
+	if len(history) == 0 {
+		return history
+	}
+
+	sanitized := make([]providers.Message, 0, len(history))
+	var pendingToolCalls map[string]struct{}
+	var pendingToolCallOrder []string
+	flushPendingToolCalls := func() {
+		if len(pendingToolCalls) == 0 {
+			pendingToolCalls = nil
+			pendingToolCallOrder = nil
+			return
+		}
+		for _, id := range pendingToolCallOrder {
+			if _, ok := pendingToolCalls[id]; !ok {
+				continue
+			}
+			sanitized = append(sanitized, providers.Message{
+				Role:       "tool",
+				ToolCallID: id,
+				Content:    "[tool result missing in transcript; synthesized placeholder for provider compatibility]",
+			})
+		}
+		pendingToolCalls = nil
+		pendingToolCallOrder = nil
+	}
+
+	for _, msg := range history {
+		switch msg.Role {
+		case "system":
+			logger.DebugCF("agent", "Dropping system message from history", map[string]any{})
+			continue
+
+		case "tool":
+			if pendingToolCalls == nil {
+				logger.DebugCF("agent", "Dropping orphaned tool message", map[string]any{})
+				continue
+			}
+
+			if len(pendingToolCalls) > 0 {
+				if msg.ToolCallID == "" {
+					logger.DebugCF("agent", "Dropping orphaned tool message with empty call id", map[string]any{})
+					continue
+				}
+				if _, ok := pendingToolCalls[msg.ToolCallID]; !ok {
+					logger.DebugCF(
+						"agent",
+						"Dropping duplicate/orphaned tool message with unknown call id",
+						map[string]any{"tool_call_id": msg.ToolCallID},
+					)
+					continue
+				}
+				delete(pendingToolCalls, msg.ToolCallID)
+			}
+			sanitized = append(sanitized, msg)
+
+		case "assistant":
+			flushPendingToolCalls()
+
+			if len(msg.ToolCalls) > 0 {
+				if len(sanitized) == 0 {
+					logger.DebugCF("agent", "Dropping assistant tool-call turn at history start", map[string]any{})
+					continue
+				}
+				prev := sanitized[len(sanitized)-1]
+				if prev.Role != "user" && prev.Role != "tool" {
+					logger.DebugCF(
+						"agent",
+						"Dropping assistant tool-call turn with invalid predecessor",
+						map[string]any{"prev_role": prev.Role},
+					)
+					continue
+				}
+
+				pendingToolCalls = make(map[string]struct{}, len(msg.ToolCalls))
+				pendingToolCallOrder = make([]string, 0, len(msg.ToolCalls))
+				for _, tc := range msg.ToolCalls {
+					if tc.ID != "" {
+						if _, exists := pendingToolCalls[tc.ID]; exists {
+							continue
+						}
+						pendingToolCalls[tc.ID] = struct{}{}
+						pendingToolCallOrder = append(pendingToolCallOrder, tc.ID)
+					}
+				}
+			}
+			sanitized = append(sanitized, msg)
+
+		default:
+			flushPendingToolCalls()
+			sanitized = append(sanitized, msg)
+		}
+	}
+	flushPendingToolCalls()
+
+	return sanitized
+}
+
+func estimateMessageTokens(msg providers.Message) int {
+	chars := utf8.RuneCountInString(msg.Content)
+	for _, tc := range msg.ToolCalls {
+		chars += utf8.RuneCountInString(tc.Name)
+		if tc.Function != nil {
+			chars += utf8.RuneCountInString(tc.Function.Name)
+			chars += utf8.RuneCountInString(tc.Function.Arguments)
+		}
+	}
+	if chars == 0 {
+		return 0
+	}
+	return chars * 2 / 5
+}
+
+func estimateTotalTokens(systemPrompt string, messages []providers.Message) int {
+	total := utf8.RuneCountInString(systemPrompt) * 2 / 5
+	for _, msg := range messages {
+		total += estimateMessageTokens(msg)
+	}
+	return total
+}
+
+func (cb *ContextBuilder) buildToolsSection() string {
+	if cb.tools == nil {
+		return ""
+	}
+
+	summaries := cb.tools.GetSummaries()
+	if len(summaries) == 0 {
+		return ""
+	}
+
+	var sb strings.Builder
+	sb.WriteString("## Available Tools\n\n")
+	sb.WriteString(
+		"**CRITICAL**: You MUST use tools to perform actions. Do NOT pretend to execute commands or schedule tasks.\n\n",
+	)
+	sb.WriteString("You have access to the following tools:\n\n")
+	for _, s := range summaries {
+		sb.WriteString(s)
+		sb.WriteString("\n")
+	}
+
+	return sb.String()
+}
+
+func (cb *ContextBuilder) BuildSystemPrompt() string {
+	return cb.BuildSystemPromptForSession("")
+}
+
+func (cb *ContextBuilder) BuildSystemPromptForSession(sessionKey string) string {
+	parts := []string{}
+
+	parts = append(parts, cb.getIdentity())
+
+	bootstrapContent := cb.LoadBootstrapFiles(sessionKey)
+	if bootstrapContent != "" {
+		parts = append(parts, bootstrapContent)
+	}
+
+	skillsSummary := cb.skillsLoader.BuildSkillsSummary()
+	if skillsSummary != "" {
+		parts = append(parts, fmt.Sprintf(`# Skills
+
+The following skills extend your capabilities. To use a skill, read its SKILL.md file using the read_file tool.
+
+%s`, skillsSummary))
+	}
+
+	return strings.Join(parts, "\n\n---\n\n")
+}
+
+func (cb *ContextBuilder) BuildSystemPromptWithCache() string {
+	cb.systemPromptMutex.RLock()
+	if cb.cachedSystemPrompt != "" && !cb.sourceFilesChangedLocked() {
+		cached := cb.cachedSystemPrompt
+		cb.systemPromptMutex.RUnlock()
+		return cached
+	}
+	cb.systemPromptMutex.RUnlock()
+
+	cb.systemPromptMutex.Lock()
+	defer cb.systemPromptMutex.Unlock()
+
+	if cb.cachedSystemPrompt != "" && !cb.sourceFilesChangedLocked() {
+		return cb.cachedSystemPrompt
+	}
+
+	baseline := cb.buildCacheBaseline()
+	prompt := cb.BuildSystemPrompt()
+	cb.cachedSystemPrompt = prompt
+	cb.cachedAt = baseline.maxMtime
+	cb.existedAtCache = baseline.existed
+	cb.skillFilesAtCache = baseline.skillFiles
+
+	return prompt
+}
+
+func (cb *ContextBuilder) InvalidateCache() {
+	cb.systemPromptMutex.Lock()
+	defer cb.systemPromptMutex.Unlock()
+
+	cb.cachedSystemPrompt = ""
+	cb.cachedAt = time.Time{}
+	cb.existedAtCache = nil
+	cb.skillFilesAtCache = nil
+
+	logger.DebugCF("agent", "System prompt cache invalidated", nil)
+}
+
+func (cb *ContextBuilder) sourcePaths() []string {
+	return []string{
+		filepath.Join(cb.workspace, "AGENTS.md"),
+		filepath.Join(cb.workspace, "SOUL.md"),
+		filepath.Join(cb.workspace, "USER.md"),
+		filepath.Join(cb.workspace, "IDENTITY.md"),
+	}
+}
+
+func (cb *ContextBuilder) skillRoots() []string {
+	if cb.skillsLoader == nil {
+		return []string{filepath.Join(cb.workspace, "skills")}
+	}
+
+	roots := cb.skillsLoader.SkillRoots()
+	if len(roots) == 0 {
+		return []string{filepath.Join(cb.workspace, "skills")}
+	}
+	return roots
+}
+
+type cacheBaseline struct {
+	existed    map[string]bool
+	skillFiles map[string]time.Time
+	maxMtime   time.Time
+}
+
+func (cb *ContextBuilder) buildCacheBaseline() cacheBaseline {
+	skillRoots := cb.skillRoots()
+	allPaths := append(cb.sourcePaths(), skillRoots...)
+
+	existed := make(map[string]bool, len(allPaths))
+	skillFiles := make(map[string]time.Time)
+	var maxMtime time.Time
+	for _, p := range allPaths {
+		info, err := os.Stat(p)
+		existed[p] = err == nil
+		if err == nil && info.ModTime().After(maxMtime) {
+			maxMtime = info.ModTime()
+		}
+	}
+
+	for _, root := range skillRoots {
+		_ = filepath.WalkDir(root, func(path string, d fs.DirEntry, walkErr error) error {
+			if walkErr == nil && !d.IsDir() {
+				if info, err := os.Stat(path); err == nil {
+					skillFiles[path] = info.ModTime()
+					if info.ModTime().After(maxMtime) {
+						maxMtime = info.ModTime()
+					}
+				}
+			}
+			return nil
+		})
+	}
+
+	if maxMtime.IsZero() {
+		maxMtime = time.Unix(1, 0)
+	}
+
+	return cacheBaseline{existed: existed, skillFiles: skillFiles, maxMtime: maxMtime}
+}
+
+func (cb *ContextBuilder) sourceFilesChangedLocked() bool {
+	if cb.cachedAt.IsZero() {
+		return true
+	}
+
+	if slices.ContainsFunc(cb.sourcePaths(), cb.fileChangedSince) {
+		return true
+	}
+
+	for _, root := range cb.skillRoots() {
+		if cb.fileChangedSince(root) {
+			return true
+		}
+	}
+	if skillFilesChangedSince(cb.skillRoots(), cb.skillFilesAtCache) {
+		return true
+	}
+
+	return false
+}
+
+func (cb *ContextBuilder) fileChangedSince(path string) bool {
+	if cb.existedAtCache == nil {
+		return true
+	}
+
+	info, err := os.Stat(path)
+	existedBefore := cb.existedAtCache[path]
+	existsNow := err == nil
+	if existedBefore != existsNow {
+		return true
+	}
+	if err == nil && info.ModTime().After(cb.cachedAt) {
+		return true
+	}
+	return false
 }
