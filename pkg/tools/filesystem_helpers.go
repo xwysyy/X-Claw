@@ -1,0 +1,99 @@
+package tools
+
+import (
+	"fmt"
+	"os"
+	"path/filepath"
+)
+
+func validatePath(path, workspace string, restrict bool) (string, error) {
+	if workspace == "" {
+		return path, fmt.Errorf("workspace is not defined")
+	}
+
+	absWorkspace, err := filepath.Abs(workspace)
+	if err != nil {
+		return "", fmt.Errorf("failed to resolve workspace path: %w", err)
+	}
+
+	var absPath string
+	if filepath.IsAbs(path) {
+		absPath = filepath.Clean(path)
+	} else {
+		absPath, err = filepath.Abs(filepath.Join(absWorkspace, path))
+		if err != nil {
+			return "", fmt.Errorf("failed to resolve file path: %w", err)
+		}
+	}
+
+	if restrict {
+		if !isWithinWorkspace(absPath, absWorkspace) {
+			return "", fmt.Errorf("access denied: path is outside the workspace")
+		}
+
+		var resolved string
+		workspaceReal := absWorkspace
+		if resolved, err = filepath.EvalSymlinks(absWorkspace); err == nil {
+			workspaceReal = resolved
+		}
+
+		if resolved, err = filepath.EvalSymlinks(absPath); err == nil {
+			if !isWithinWorkspace(resolved, workspaceReal) {
+				return "", fmt.Errorf("access denied: symlink resolves outside workspace")
+			}
+		} else if os.IsNotExist(err) {
+			var parentResolved string
+			if parentResolved, err = resolveExistingAncestor(filepath.Dir(absPath)); err == nil {
+				if !isWithinWorkspace(parentResolved, workspaceReal) {
+					return "", fmt.Errorf("access denied: symlink resolves outside workspace")
+				}
+			} else if !os.IsNotExist(err) {
+				return "", fmt.Errorf("failed to resolve path: %w", err)
+			}
+		} else {
+			return "", fmt.Errorf("failed to resolve path: %w", err)
+		}
+	}
+
+	return absPath, nil
+}
+
+func resolveExistingAncestor(path string) (string, error) {
+	for current := filepath.Clean(path); ; current = filepath.Dir(current) {
+		if resolved, err := filepath.EvalSymlinks(current); err == nil {
+			return resolved, nil
+		} else if !os.IsNotExist(err) {
+			return "", err
+		}
+		if filepath.Dir(current) == current {
+			return "", os.ErrNotExist
+		}
+	}
+}
+
+func isWithinWorkspace(candidate, workspace string) bool {
+	rel, err := filepath.Rel(filepath.Clean(workspace), filepath.Clean(candidate))
+	return err == nil && filepath.IsLocal(rel)
+}
+
+// Helper to get a safe relative path for os.Root usage
+func getSafeRelPath(workspace, path string) (string, error) {
+	if workspace == "" {
+		return "", fmt.Errorf("workspace is not defined")
+	}
+
+	rel := filepath.Clean(path)
+	if filepath.IsAbs(rel) {
+		var err error
+		rel, err = filepath.Rel(workspace, rel)
+		if err != nil {
+			return "", fmt.Errorf("failed to calculate relative path: %w", err)
+		}
+	}
+
+	if !filepath.IsLocal(rel) {
+		return "", fmt.Errorf("path escapes workspace: %s", path)
+	}
+
+	return rel, nil
+}

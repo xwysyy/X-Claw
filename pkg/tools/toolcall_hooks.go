@@ -223,7 +223,6 @@ func (h *ToolResultRedactHook) BeforeToolCall(_ context.Context, call providers.
 }
 
 func (h *ToolResultRedactHook) AfterToolCall(_ context.Context, call providers.ToolCall, result *ToolResult, _ ToolHookContext) (*ToolResult, *ToolHookAction) {
-	_ = call
 	if h == nil || h.redactor == nil || result == nil {
 		return result, nil
 	}

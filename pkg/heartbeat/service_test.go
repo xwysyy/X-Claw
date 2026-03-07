@@ -3,9 +3,11 @@ package heartbeat
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/xwysyy/X-Claw/pkg/bus"
 	"github.com/xwysyy/X-Claw/pkg/tools"
 )
 
@@ -201,5 +203,31 @@ func TestHeartbeatFilePath(t *testing.T) {
 	expectedPath := filepath.Join(tmpDir, "HEARTBEAT.md")
 	if _, err := os.Stat(expectedPath); os.IsNotExist(err) {
 		t.Errorf("Expected HEARTBEAT.md at %s, but it doesn't exist", expectedPath)
+	}
+}
+
+func TestHeartbeatSendResponseLogsPublishFailure(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "heartbeat-test-*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	hs := NewHeartbeatService(tmpDir, 30, true)
+	mb := bus.NewMessageBus()
+	hs.SetBus(mb)
+	if err := hs.state.SetLastChannel("telegram:123"); err != nil {
+		t.Fatalf("SetLastChannel() error = %v", err)
+	}
+	mb.Close()
+
+	hs.sendResponse("heartbeat ping")
+
+	data, err := os.ReadFile(filepath.Join(tmpDir, "heartbeat.log"))
+	if err != nil {
+		t.Fatalf("read heartbeat.log: %v", err)
+	}
+	if !strings.Contains(string(data), "Failed to send heartbeat result") {
+		t.Fatalf("expected publish failure to be logged, got %q", string(data))
 	}
 }

@@ -5,6 +5,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/xwysyy/X-Claw/pkg/logger"
 	"github.com/xwysyy/X-Claw/pkg/providers"
 	"github.com/xwysyy/X-Claw/pkg/utils"
 )
@@ -15,24 +16,44 @@ func (sm *SessionManager) EffectiveModelOverride(key string) (string, bool) {
 		return "", false
 	}
 
-	sm.mu.RLock()
+	var metaPath string
+	var meta SessionMeta
+	var persistMeta bool
+
+	sm.mu.Lock()
 	sess, ok := sm.sessions[key]
 	if !ok || sess == nil {
-		sm.mu.RUnlock()
+		sm.mu.Unlock()
 		return "", false
 	}
 	model := strings.TrimSpace(sess.ModelOverride)
-	expiresAtMS := sess.ModelOverrideExpiresAtMS
-	sm.mu.RUnlock()
-
 	if model == "" {
+		sm.mu.Unlock()
 		return "", false
 	}
 
+	expiresAtMS := sess.ModelOverrideExpiresAtMS
 	if expiresAtMS != nil && *expiresAtMS > 0 && time.Now().UnixMilli() > *expiresAtMS {
-		_, _ = sm.ClearModelOverride(key)
+		sess.ModelOverride = ""
+		sess.ModelOverrideExpiresAtMS = nil
+		sess.Updated = time.Now()
+		if sm.storage != "" {
+			metaPath = sm.metaPath(key)
+			meta = buildSessionMeta(sess)
+			persistMeta = strings.TrimSpace(metaPath) != ""
+		}
+		sm.mu.Unlock()
+		if persistMeta {
+			if err := writeMetaFile(metaPath, meta); err != nil {
+				logger.WarnCF("session", "Failed to persist expired model override clear", map[string]any{
+					"key":   key,
+					"error": err.Error(),
+				})
+			}
+		}
 		return "", false
 	}
+	sm.mu.Unlock()
 
 	return model, true
 }
@@ -81,7 +102,12 @@ func (sm *SessionManager) SetModelOverride(key, model string, ttl time.Duration)
 	sm.mu.Unlock()
 
 	if strings.TrimSpace(metaPath) != "" {
-		_ = writeMetaFile(metaPath, meta)
+		if err := writeMetaFile(metaPath, meta); err != nil {
+			logger.WarnCF("session", "Failed to persist model override meta", map[string]any{
+				"key":   key,
+				"error": err.Error(),
+			})
+		}
 	}
 
 	return expiresAt, nil
@@ -114,7 +140,12 @@ func (sm *SessionManager) ClearModelOverride(key string) (*time.Time, error) {
 	sm.mu.Unlock()
 
 	if strings.TrimSpace(metaPath) != "" {
-		_ = writeMetaFile(metaPath, meta)
+		if err := writeMetaFile(metaPath, meta); err != nil {
+			logger.WarnCF("session", "Failed to persist model override clear", map[string]any{
+				"key":   key,
+				"error": err.Error(),
+			})
+		}
 	}
 
 	return nil, nil

@@ -6,6 +6,7 @@
 package providers
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -132,6 +133,41 @@ func TestCreateProviderFromConfig_DefaultAPIBase(t *testing.T) {
 	}
 }
 
+func TestCreateProviderFromConfig_LocalDefaultAPIBaseAllowsMissingAPIKey(t *testing.T) {
+	tests := []struct {
+		name      string
+		model     string
+		wantModel string
+	}{
+		{name: "litellm", model: "litellm/my-proxy-alias", wantModel: "my-proxy-alias"},
+		{name: "ollama", model: "ollama/qwen2.5", wantModel: "qwen2.5"},
+		{name: "vllm", model: "vllm/meta-llama-3.1-8b", wantModel: "meta-llama-3.1-8b"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := &config.ModelConfig{
+				ModelName: "test-" + tt.name,
+				Model:     tt.model,
+			}
+
+			provider, modelID, err := CreateProviderFromConfig(cfg)
+			if err != nil {
+				t.Fatalf("CreateProviderFromConfig() error = %v", err)
+			}
+			if provider == nil {
+				t.Fatal("CreateProviderFromConfig() returned nil provider")
+			}
+			if _, ok := provider.(*HTTPProvider); !ok {
+				t.Fatalf("expected *HTTPProvider, got %T", provider)
+			}
+			if modelID != tt.wantModel {
+				t.Fatalf("modelID = %q, want %q", modelID, tt.wantModel)
+			}
+		})
+	}
+}
+
 func TestGetDefaultAPIBase_LiteLLM(t *testing.T) {
 	if got := getDefaultAPIBase("litellm"); got != "http://localhost:4000/v1" {
 		t.Fatalf("getDefaultAPIBase(%q) = %q, want %q", "litellm", got, "http://localhost:4000/v1")
@@ -240,6 +276,32 @@ func TestCreateProviderFromConfig_MissingAPIKey(t *testing.T) {
 	_, _, err := CreateProviderFromConfig(cfg)
 	if err == nil {
 		t.Fatal("CreateProviderFromConfig() expected error for missing API key")
+	}
+}
+
+func TestOAuthCredentialErrors_DoNotReferenceMissingAuthLoginCommand(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+	}{
+		{name: "anthropic missing", err: missingOAuthCredentialError("anthropic")},
+		{name: "openai missing", err: missingOAuthCredentialError("openai")},
+		{name: "antigravity expired", err: expiredOAuthCredentialError("google-antigravity")},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.err == nil {
+				t.Fatal("expected non-nil error")
+			}
+			msg := tt.err.Error()
+			if strings.Contains(msg, "x-claw auth login") {
+				t.Fatalf("error message should not reference removed auth login command: %q", msg)
+			}
+			if !strings.Contains(msg, "local auth store") && !strings.Contains(msg, "api_key") {
+				t.Fatalf("error message should provide actionable guidance, got %q", msg)
+			}
+		})
 	}
 }
 

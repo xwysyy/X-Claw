@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -9,7 +10,18 @@ import (
 	"time"
 
 	"github.com/xwysyy/X-Claw/pkg/providers"
+	"github.com/xwysyy/X-Claw/pkg/tools"
 )
+
+func testScopedSession(scopeID string) (string, string, string) {
+	chatID := fmt.Sprintf("chat-%s", scopeID)
+	return "agent:main:feishu:group:" + chatID, "feishu", chatID
+}
+
+func testScopedMemoryDir(workspace, sessionKey, channel, chatID string) string {
+	scope := deriveMemoryScope(sessionKey, channel, chatID)
+	return filepath.Join(workspace, "memory", "scopes", string(scope.Kind), memoryScopeToken(scope.RawID))
+}
 
 func setupWorkspace(t *testing.T, files map[string]string) string {
 	t.Helper()
@@ -222,6 +234,70 @@ func TestBuildMessagesForSession_GroupSession_IncludesAgentMemoryBaseline(t *tes
 	system := strings.ToLower(messages[0].Content)
 	if !strings.Contains(system, "algorithmic problem synthesis") {
 		t.Fatalf("expected agent memory baseline to be present in group session prompt, got:\n%s", messages[0].Content)
+	}
+}
+
+func TestMemoryForSession_BoundsScopedCache(t *testing.T) {
+	workspace := t.TempDir()
+	cb := NewContextBuilder(workspace)
+	cb.memoryScopesMaxEntries = 3
+
+	for i := range 12 {
+		sessionKey, channel, chatID := testScopedSession(fmt.Sprintf("%02d", i))
+		store := cb.MemoryForSession(sessionKey, channel, chatID)
+		if store == nil {
+			t.Fatalf("nil scoped store for %s", sessionKey)
+		}
+		if got := len(cb.memoryScopes); got > cb.memoryScopesMaxEntries {
+			t.Fatalf("len(memoryScopes) = %d, want <= %d", got, cb.memoryScopesMaxEntries)
+		}
+	}
+}
+
+func TestMemoryForSession_RebuildsEvictedScopeWithoutBehaviorChange(t *testing.T) {
+	workspace := t.TempDir()
+	cb := NewContextBuilder(workspace)
+	cb.memoryScopesMaxEntries = 3
+
+	firstSessionKey, firstChannel, firstChatID := testScopedSession("first")
+	firstStore := cb.MemoryForSession(firstSessionKey, firstChannel, firstChatID)
+	if firstStore == nil {
+		t.Fatal("expected first scoped store")
+	}
+	if err := firstStore.WriteLongTerm("# MEMORY\n\n## Long-term Facts\n- persisted scoped fact\n"); err != nil {
+		t.Fatalf("write scoped memory: %v", err)
+	}
+	firstDir := testScopedMemoryDir(workspace, firstSessionKey, firstChannel, firstChatID)
+
+	for _, id := range []string{"second", "third", "fourth"} {
+		sessionKey, channel, chatID := testScopedSession(id)
+		if store := cb.MemoryForSession(sessionKey, channel, chatID); store == nil {
+			t.Fatalf("expected scoped store for %s", id)
+		}
+	}
+
+	if got := len(cb.memoryScopes); got > cb.memoryScopesMaxEntries {
+		t.Fatalf("len(memoryScopes) = %d, want <= %d", got, cb.memoryScopesMaxEntries)
+	}
+	if _, ok := cb.memoryScopes[firstDir]; ok {
+		t.Fatalf("expected oldest scoped store %q to be evicted", firstDir)
+	}
+
+	rebuilt := cb.MemoryForSession(firstSessionKey, firstChannel, firstChatID)
+	if rebuilt == nil {
+		t.Fatal("expected rebuilt scoped store")
+	}
+	if rebuilt == firstStore {
+		t.Fatal("expected evicted scoped store to be recreated")
+	}
+	if got := rebuilt.ReadLongTerm(); !strings.Contains(got, "persisted scoped fact") {
+		t.Fatalf("rebuilt scoped memory lost persisted content: %q", got)
+	}
+	if got := cb.MemoryReadForSession(firstSessionKey, firstChannel, firstChatID).GetMemoryContext(); !strings.Contains(got, "persisted scoped fact") {
+		t.Fatalf("memory read behavior changed after rebuild: %q", got)
+	}
+	if got := len(cb.memoryScopes); got > cb.memoryScopesMaxEntries {
+		t.Fatalf("len(memoryScopes) after rebuild = %d, want <= %d", got, cb.memoryScopesMaxEntries)
 	}
 }
 
@@ -829,6 +905,107 @@ func TestConcurrentBuildSystemPromptWithCache(t *testing.T) {
 
 	for errMsg := range errs {
 		t.Errorf("concurrent access error: %s", errMsg)
+	}
+}
+
+func TestContextBuilderConcurrentSettersAndReaders(t *testing.T) {
+	tmpDir := setupWorkspace(t, map[string]string{
+		"IDENTITY.md":      "# Identity\nConcurrency test agent.",
+		"SOUL.md":          "# Soul\nBe helpful.",
+		"memory/MEMORY.md": "# Memory\nUser prefers Go.",
+	})
+	defer os.RemoveAll(tmpDir)
+
+	cb := NewContextBuilder(tmpDir)
+	history := []providers.Message{{Role: "user", Content: "hello"}}
+
+	const goroutines = 5
+	const iterations = 80
+
+	start := make(chan struct{})
+	errs := make(chan string, goroutines*iterations)
+	var wg sync.WaitGroup
+
+	wg.Add(goroutines)
+
+	go func() {
+		defer wg.Done()
+		<-start
+		for i := range iterations {
+			cb.SetRuntimeSettings(ContextRuntimeSettings{
+				ContextWindowTokens:      1024 + i,
+				PruningMode:              "tools_only",
+				IncludeOldChitChat:       i%2 == 0,
+				SoftToolResultChars:      256 + i,
+				HardToolResultChars:      64 + (i % 16),
+				TriggerRatio:             0.6,
+				BootstrapSnapshotEnabled: i%2 == 0,
+				MemoryVectorEnabled:      i%2 == 0,
+				MemoryVectorTopK:         3 + (i % 3),
+				MemoryVectorMinScore:     0.05,
+				MemoryVectorMaxChars:     600 + i,
+				MemoryVectorRecentDays:   7,
+			})
+		}
+	}()
+
+	go func() {
+		defer wg.Done()
+		<-start
+		for i := range iterations {
+			cb.SetWebEvidenceMode(i%2 == 0, 2+(i%3))
+		}
+	}()
+
+	go func() {
+		defer wg.Done()
+		<-start
+		for range iterations {
+			cb.SetToolsRegistry(tools.NewToolRegistry())
+		}
+	}()
+
+	go func() {
+		defer wg.Done()
+		<-start
+		for i := range iterations {
+			msgs := cb.BuildMessagesForSession(
+				"sess-1",
+				history,
+				"",
+				"message",
+				nil,
+				"feishu",
+				"chat-1",
+				nil,
+			)
+			if len(msgs) == 0 {
+				errs <- "BuildMessagesForSession returned no messages"
+				return
+			}
+			if i%10 == 0 {
+				cb.InvalidateCache()
+			}
+		}
+	}()
+
+	go func() {
+		defer wg.Done()
+		<-start
+		for range iterations {
+			if prompt := cb.BuildSystemPromptWithCache(); prompt == "" {
+				errs <- "BuildSystemPromptWithCache returned empty prompt"
+				return
+			}
+		}
+	}()
+
+	close(start)
+	wg.Wait()
+	close(errs)
+
+	for errMsg := range errs {
+		t.Error(errMsg)
 	}
 }
 

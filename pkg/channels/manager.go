@@ -297,6 +297,7 @@ func (m *Manager) StartAll(ctx context.Context) error {
 
 	dispatchCtx, cancel := context.WithCancel(ctx)
 	m.dispatchTask = &asyncTask{cancel: cancel}
+	started := 0
 
 	for name, channel := range m.channels {
 		logger.InfoCF("channels", "Starting channel", map[string]any{
@@ -309,11 +310,21 @@ func (m *Manager) StartAll(ctx context.Context) error {
 			})
 			continue
 		}
+		started++
 		// Lazily create worker only after channel starts successfully
 		w := newChannelWorker(name, channel)
 		m.workers[name] = w
 		go m.runWorker(dispatchCtx, name, w)
 		go m.runMediaWorker(dispatchCtx, name, w)
+	}
+
+	if started == 0 {
+		cancel()
+		m.dispatchTask = nil
+		if m.healthServer != nil {
+			m.healthServer.SetReady(false)
+		}
+		return errors.New("no channels started successfully")
 	}
 
 	// Start the dispatcher that reads from the bus and routes to workers
@@ -323,18 +334,20 @@ func (m *Manager) StartAll(ctx context.Context) error {
 	// Start the TTL janitor that cleans up stale typing/placeholder entries
 	go m.runTTLJanitor(dispatchCtx)
 
-	// Start shared HTTP server if configured
-	if m.httpServer != nil {
-		go func() {
+	// Start shared HTTP server if configured.
+	// Capture the server pointer so concurrent StopAll()/reload mutations do not race
+	// the goroutine into dereferencing a nil field on the manager.
+	if server := m.httpServer; server != nil {
+		go func(server *http.Server) {
 			logger.InfoCF("channels", "Shared HTTP server listening", map[string]any{
-				"addr": m.httpServer.Addr,
+				"addr": server.Addr,
 			})
-			if err := m.httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 				logger.ErrorCF("channels", "Shared HTTP server error", map[string]any{
 					"error": err.Error(),
 				})
 			}
-		}()
+		}(server)
 	}
 
 	if m.healthServer != nil {
@@ -347,7 +360,6 @@ func (m *Manager) StartAll(ctx context.Context) error {
 
 func (m *Manager) StopAll(ctx context.Context) error {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 
 	logger.InfoC("channels", "Stopping all channels")
 
@@ -373,30 +385,24 @@ func (m *Manager) StopAll(ctx context.Context) error {
 		m.dispatchTask = nil
 	}
 
-	// Close all worker queues and wait for them to drain
+	workers := make([]*channelWorker, 0, len(m.workers))
 	for _, w := range m.workers {
 		if w != nil {
-			close(w.queue)
+			workers = append(workers, w)
 		}
 	}
-	for _, w := range m.workers {
-		if w != nil {
-			<-w.done
-		}
+	m.workers = make(map[string]*channelWorker)
+	m.mu.Unlock()
+
+	for _, w := range workers {
+		<-w.done
 	}
-	// Close all media worker queues and wait for them to drain
-	for _, w := range m.workers {
-		if w != nil {
-			close(w.mediaQueue)
-		}
-	}
-	for _, w := range m.workers {
-		if w != nil {
-			<-w.mediaDone
-		}
+	for _, w := range workers {
+		<-w.mediaDone
 	}
 
 	// Stop all channels
+	m.mu.Lock()
 	for name, channel := range m.channels {
 		logger.InfoCF("channels", "Stopping channel", map[string]any{
 			"channel": name,
@@ -410,6 +416,7 @@ func (m *Manager) StopAll(ctx context.Context) error {
 	}
 
 	logger.InfoC("channels", "All channels stopped")
+	m.mu.Unlock()
 	return nil
 }
 
@@ -501,18 +508,18 @@ func (m *Manager) SendToChannel(ctx context.Context, channelName, chatID, conten
 		Content: content,
 	}
 
-	if wExists && w != nil {
-		select {
-		case w.queue <- msg:
-			return nil
-		case <-ctx.Done():
-			return ctx.Err()
-		}
+	if !wExists || w == nil {
+		return fmt.Errorf("%w: channel %s has no active worker", ErrNotRunning, channelName)
 	}
 
-	// Fallback: direct send (should not happen)
-	channel, _ := m.channels[channelName]
-	return channel.Send(ctx, msg)
+	sent, stopped := enqueueOutboundMessage(ctx, channelName, w, msg)
+	if stopped {
+		return ctx.Err()
+	}
+	if !sent {
+		return fmt.Errorf("%w: channel %s has no active worker", ErrNotRunning, channelName)
+	}
+	return nil
 }
 
 var (
@@ -1165,9 +1172,9 @@ func ClassifySendError(statusCode int, rawErr error) error {
 	case statusCode == http.StatusTooManyRequests:
 		return fmt.Errorf("%w: %v", ErrRateLimit, rawErr)
 	case statusCode >= 500:
-		return fmt.Errorf("%w: %v", ErrTemporary, rawErr)
+		return fmt.Errorf("%w: %w", ErrTemporary, rawErr)
 	case statusCode >= 400:
-		return fmt.Errorf("%w: %v", ErrSendFailed, rawErr)
+		return fmt.Errorf("%w: %w", ErrSendFailed, rawErr)
 	default:
 		return rawErr
 	}
@@ -1178,7 +1185,7 @@ func ClassifyNetError(err error) error {
 	if err == nil {
 		return nil
 	}
-	return fmt.Errorf("%w: %v", ErrTemporary, err)
+	return fmt.Errorf("%w: %w", ErrTemporary, err)
 }
 
 type MediaSender interface {

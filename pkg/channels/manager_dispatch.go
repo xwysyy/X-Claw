@@ -40,6 +40,44 @@ func newChannelWorker(name string, ch Channel) *channelWorker {
 	}
 }
 
+func enqueueOutboundMessage(ctx context.Context, channel string, w *channelWorker, msg bus.OutboundMessage) (sent bool, stopped bool) {
+	defer func() {
+		if r := recover(); r != nil {
+			logger.WarnCF("channels", "Channel worker queue closed, skipping message", map[string]any{
+				"channel": channel,
+			})
+			sent = false
+			stopped = false
+		}
+	}()
+
+	select {
+	case w.queue <- msg:
+		return true, false
+	case <-ctx.Done():
+		return false, true
+	}
+}
+
+func enqueueOutboundMediaMessage(ctx context.Context, channel string, w *channelWorker, msg bus.OutboundMediaMessage) (sent bool, stopped bool) {
+	defer func() {
+		if r := recover(); r != nil {
+			logger.WarnCF("channels", "Channel media worker queue closed, skipping media message", map[string]any{
+				"channel": channel,
+			})
+			sent = false
+			stopped = false
+		}
+	}()
+
+	select {
+	case w.mediaQueue <- msg:
+		return true, false
+	case <-ctx.Done():
+		return false, true
+	}
+}
+
 // runWorker processes outbound messages for a single channel, splitting
 // messages that exceed the channel's maximum message length.
 func (m *Manager) runWorker(ctx context.Context, name string, w *channelWorker) {
@@ -206,12 +244,8 @@ func (m *Manager) dispatchOutbound(ctx context.Context) {
 		m.bus.SubscribeOutbound,
 		func(msg bus.OutboundMessage) string { return msg.Channel },
 		func(ctx context.Context, w *channelWorker, msg bus.OutboundMessage) bool {
-			select {
-			case w.queue <- msg:
-				return true
-			case <-ctx.Done():
-				return false
-			}
+			_, stopped := enqueueOutboundMessage(ctx, msg.Channel, w, msg)
+			return !stopped
 		},
 		"Outbound dispatcher started",
 		"Outbound dispatcher stopped",
@@ -226,12 +260,8 @@ func (m *Manager) dispatchOutboundMedia(ctx context.Context) {
 		m.bus.SubscribeOutboundMedia,
 		func(msg bus.OutboundMediaMessage) string { return msg.Channel },
 		func(ctx context.Context, w *channelWorker, msg bus.OutboundMediaMessage) bool {
-			select {
-			case w.mediaQueue <- msg:
-				return true
-			case <-ctx.Done():
-				return false
-			}
+			_, stopped := enqueueOutboundMediaMessage(ctx, msg.Channel, w, msg)
+			return !stopped
 		},
 		"Outbound media dispatcher started",
 		"Outbound media dispatcher stopped",

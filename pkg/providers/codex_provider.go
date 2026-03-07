@@ -416,7 +416,7 @@ func createCodexTokenSource() func() (string, string, error) {
 			return "", "", fmt.Errorf("loading auth credentials: %w", err)
 		}
 		if cred == nil {
-			return "", "", fmt.Errorf("no credentials for openai. Run: x-claw auth login --provider openai")
+			return "", "", missingOAuthCredentialError("openai")
 		}
 
 		if cred.AuthMethod == "oauth" && cred.NeedsRefresh() && cred.RefreshToken != "" {

@@ -149,17 +149,45 @@ func (cs *CronService) Stop() {
 }
 
 func (cs *CronService) runLoop(stopChan chan struct{}) {
-	ticker := time.NewTicker(1 * time.Second)
-	defer ticker.Stop()
-
 	for {
+		wait := cs.nextLoopWait()
+		timer := time.NewTimer(wait)
 		select {
 		case <-stopChan:
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
 			return
-		case <-ticker.C:
+		case <-timer.C:
 			cs.checkJobs()
 		}
 	}
+}
+
+func (cs *CronService) nextLoopWait() time.Duration {
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+
+	if !cs.running {
+		return 5 * time.Second
+	}
+
+	nextWake := cs.getNextWakeMS()
+	if nextWake == nil {
+		return 5 * time.Second
+	}
+
+	delay := time.Until(time.UnixMilli(*nextWake))
+	if delay <= 0 {
+		return 0
+	}
+	if delay > 5*time.Second {
+		return 5 * time.Second
+	}
+	return delay
 }
 
 func (cs *CronService) checkJobs() {

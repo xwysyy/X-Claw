@@ -12,10 +12,9 @@ import (
 	"github.com/chzyer/readline"
 
 	"github.com/xwysyy/X-Claw/cmd/x-claw/internal"
+	"github.com/xwysyy/X-Claw/cmd/x-claw/internal/cliutil"
 	"github.com/xwysyy/X-Claw/pkg/agent"
-	"github.com/xwysyy/X-Claw/pkg/bus"
 	"github.com/xwysyy/X-Claw/pkg/logger"
-	"github.com/xwysyy/X-Claw/pkg/providers"
 )
 
 func agentCmd(message, sessionKey, model string, debug bool) error {
@@ -28,28 +27,12 @@ func agentCmd(message, sessionKey, model string, debug bool) error {
 		fmt.Println("🔍 Debug mode enabled")
 	}
 
-	cfg, err := internal.LoadConfig()
+	runtime, err := cliutil.BootstrapRuntime(model)
 	if err != nil {
-		return fmt.Errorf("error loading config: %w", err)
+		return err
 	}
-
-	if model != "" {
-		cfg.Agents.Defaults.ModelName = model
-	}
-
-	provider, modelID, err := providers.CreateProvider(cfg)
-	if err != nil {
-		return fmt.Errorf("error creating provider: %w", err)
-	}
-
-	// Use the resolved model ID from provider creation
-	if modelID != "" {
-		cfg.Agents.Defaults.ModelName = modelID
-	}
-
-	msgBus := bus.NewMessageBus()
-	defer msgBus.Close()
-	agentLoop := agent.NewAgentLoop(cfg, msgBus, provider)
+	defer runtime.MessageBus.Close()
+	agentLoop := runtime.AgentLoop
 
 	startupInfo := agentLoop.GetStartupInfo()
 	logger.InfoCF("agent", "Agent initialized",

@@ -310,11 +310,14 @@ func (hs *HeartbeatService) sendResponse(response string) {
 
 	pubCtx, pubCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer pubCancel()
-	msgBus.PublishOutbound(pubCtx, bus.OutboundMessage{
+	if err := msgBus.PublishOutbound(pubCtx, bus.OutboundMessage{
 		Channel: platform,
 		ChatID:  userID,
 		Content: response,
-	})
+	}); err != nil {
+		hs.logErrorf("Failed to send heartbeat result to %s: %v", platform, err)
+		return
+	}
 
 	hs.logInfof("Heartbeat result sent to %s", platform)
 }

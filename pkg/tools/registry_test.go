@@ -166,6 +166,30 @@ func TestToolRegistry_Execute_NotFound(t *testing.T) {
 	}
 }
 
+func TestToolRegistry_ExecuteWithContext_NilToolResult(t *testing.T) {
+	r := NewToolRegistry()
+	r.Register(&mockRegistryTool{
+		name:   "nil-result",
+		desc:   "returns nil",
+		params: map[string]any{},
+		result: nil,
+	})
+
+	result := r.ExecuteWithContext(context.Background(), "nil-result", nil, "feishu", "chat-1", "", nil)
+	if result == nil {
+		t.Fatal("expected registry to synthesize an error result for nil tool output")
+	}
+	if !result.IsError {
+		t.Fatalf("expected IsError=true, got %+v", result)
+	}
+	if result.Err == nil {
+		t.Fatal("expected Err to be populated for nil tool output")
+	}
+	if !strings.Contains(result.ForLLM, "returned nil result") {
+		t.Fatalf("unexpected error message: %q", result.ForLLM)
+	}
+}
+
 func TestToolRegistry_ExecuteWithContext_InjectsToolContext(t *testing.T) {
 	r := NewToolRegistry()
 	ct := &mockContextAwareTool{

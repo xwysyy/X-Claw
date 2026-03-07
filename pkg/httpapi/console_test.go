@@ -1,8 +1,11 @@
 package httpapi
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -13,6 +16,17 @@ import (
 
 	"github.com/xwysyy/X-Claw/pkg/session"
 )
+
+func readStreamLine(t *testing.T, lines <-chan string, timeout time.Duration) string {
+	t.Helper()
+	select {
+	case line := <-lines:
+		return line
+	case <-time.After(timeout):
+		t.Fatal("timed out waiting for stream line")
+		return ""
+	}
+}
 
 func TestConsoleHandler_LoopbackOnlyWhenNoAPIKey(t *testing.T) {
 	ws := t.TempDir()
@@ -265,6 +279,246 @@ func TestConsoleHandler_Tail(t *testing.T) {
 	}
 	if len(payload.Lines) != 1 || strings.TrimSpace(payload.Lines[0]) != "{\"n\":2}" {
 		t.Fatalf("unexpected tail lines: %#v", payload.Lines)
+	}
+}
+
+func TestConsoleHandler_StreamFollowsRotate(t *testing.T) {
+	oldKeepAlive := consoleStreamKeepAliveInterval
+	oldStat := consoleStreamStatInterval
+	oldSleep := consoleStreamIdleSleep
+	consoleStreamKeepAliveInterval = 100 * time.Millisecond
+	consoleStreamStatInterval = 50 * time.Millisecond
+	consoleStreamIdleSleep = 10 * time.Millisecond
+	t.Cleanup(func() {
+		consoleStreamKeepAliveInterval = oldKeepAlive
+		consoleStreamStatInterval = oldStat
+		consoleStreamIdleSleep = oldSleep
+	})
+
+	ws := t.TempDir()
+	traceDir := filepath.Join(ws, ".x-claw", "audit", "runs", "feishu_oc_test")
+	if err := os.MkdirAll(traceDir, 0o755); err != nil {
+		t.Fatalf("mkdir trace: %v", err)
+	}
+	path := filepath.Join(traceDir, "events.jsonl")
+	if err := os.WriteFile(path, []byte("line-one\n"), 0o644); err != nil {
+		t.Fatalf("write events: %v", err)
+	}
+
+	h := NewConsoleHandler(ConsoleHandlerOptions{Workspace: ws})
+	srv := httptest.NewServer(h)
+	defer srv.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, srv.URL+"/api/console/stream?path=.x-claw/audit/runs/feishu_oc_test/events.jsonl&tail=1", nil)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("do request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	lines := make(chan string, 8)
+	go func() {
+		scanner := bufio.NewScanner(resp.Body)
+		for scanner.Scan() {
+			line := strings.TrimSpace(scanner.Text())
+			if line != "" {
+				lines <- line
+			}
+		}
+	}()
+
+	if got := readStreamLine(t, lines, time.Second); got != "line-one" {
+		t.Fatalf("first line = %q, want %q", got, "line-one")
+	}
+	if err := os.Rename(path, path+".1"); err != nil {
+		t.Fatalf("rotate old file: %v", err)
+	}
+	if err := os.WriteFile(path, []byte("line-two\n"), 0o644); err != nil {
+		t.Fatalf("write rotated file: %v", err)
+	}
+
+	if got := readStreamLine(t, lines, 2*time.Second); got != "line-two" {
+		t.Fatalf("rotated line = %q, want %q", got, "line-two")
+	}
+	cancel()
+}
+
+func TestConsoleHandler_StreamFollowsTruncate(t *testing.T) {
+	oldKeepAlive := consoleStreamKeepAliveInterval
+	oldStat := consoleStreamStatInterval
+	oldSleep := consoleStreamIdleSleep
+	consoleStreamKeepAliveInterval = 100 * time.Millisecond
+	consoleStreamStatInterval = 50 * time.Millisecond
+	consoleStreamIdleSleep = 10 * time.Millisecond
+	t.Cleanup(func() {
+		consoleStreamKeepAliveInterval = oldKeepAlive
+		consoleStreamStatInterval = oldStat
+		consoleStreamIdleSleep = oldSleep
+	})
+
+	ws := t.TempDir()
+	traceDir := filepath.Join(ws, ".x-claw", "audit", "runs", "feishu_oc_test")
+	if err := os.MkdirAll(traceDir, 0o755); err != nil {
+		t.Fatalf("mkdir trace: %v", err)
+	}
+	path := filepath.Join(traceDir, "events.jsonl")
+	if err := os.WriteFile(path, []byte("line-one\nline-two\n"), 0o644); err != nil {
+		t.Fatalf("write events: %v", err)
+	}
+
+	h := NewConsoleHandler(ConsoleHandlerOptions{Workspace: ws})
+	srv := httptest.NewServer(h)
+	defer srv.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, srv.URL+"/api/console/stream?path=.x-claw/audit/runs/feishu_oc_test/events.jsonl&tail=1", nil)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("do request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	lines := make(chan string, 8)
+	go func() {
+		scanner := bufio.NewScanner(resp.Body)
+		for scanner.Scan() {
+			line := strings.TrimSpace(scanner.Text())
+			if line != "" {
+				lines <- line
+			}
+		}
+	}()
+
+	if got := readStreamLine(t, lines, time.Second); got != "line-two" {
+		t.Fatalf("first line = %q, want %q", got, "line-two")
+	}
+	if err := os.WriteFile(path, []byte("line-three\n"), 0o644); err != nil {
+		t.Fatalf("truncate+rewrite file: %v", err)
+	}
+
+	if got := readStreamLine(t, lines, 2*time.Second); got != "line-three" {
+		t.Fatalf("truncated line = %q, want %q", got, "line-three")
+	}
+	cancel()
+}
+
+func TestConsoleHandler_StreamInitialTailReadFailureIsObservable(t *testing.T) {
+	oldTailLines := consoleStreamTailLines
+	consoleStreamTailLines = func(string, int, int64) ([]string, bool, error) {
+		return nil, false, errors.New("simulated tail failure")
+	}
+	t.Cleanup(func() {
+		consoleStreamTailLines = oldTailLines
+	})
+
+	ws := t.TempDir()
+	traceDir := filepath.Join(ws, ".x-claw", "audit", "runs", "feishu_oc_test")
+	if err := os.MkdirAll(traceDir, 0o755); err != nil {
+		t.Fatalf("mkdir trace: %v", err)
+	}
+	path := filepath.Join(traceDir, "events.jsonl")
+	if err := os.WriteFile(path, []byte("line-one\n"), 0o644); err != nil {
+		t.Fatalf("write events: %v", err)
+	}
+
+	h := NewConsoleHandler(ConsoleHandlerOptions{Workspace: ws})
+	srv := httptest.NewServer(h)
+	defer srv.Close()
+
+	req, err := http.NewRequest(http.MethodGet, srv.URL+"/api/console/stream?path=.x-claw/audit/runs/feishu_oc_test/events.jsonl&tail=1", nil)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("do request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	if !strings.Contains(string(body), "simulated tail failure") {
+		t.Fatalf("expected observable tail failure, got %q", string(body))
+	}
+	if !strings.Contains(string(body), `"ok":false`) {
+		t.Fatalf("expected error payload, got %q", string(body))
+	}
+}
+
+func TestConsoleHandler_StreamStopsOnClientCancel(t *testing.T) {
+	oldKeepAlive := consoleStreamKeepAliveInterval
+	oldStat := consoleStreamStatInterval
+	oldSleep := consoleStreamIdleSleep
+	consoleStreamKeepAliveInterval = 100 * time.Millisecond
+	consoleStreamStatInterval = 50 * time.Millisecond
+	consoleStreamIdleSleep = 10 * time.Millisecond
+	t.Cleanup(func() {
+		consoleStreamKeepAliveInterval = oldKeepAlive
+		consoleStreamStatInterval = oldStat
+		consoleStreamIdleSleep = oldSleep
+	})
+
+	ws := t.TempDir()
+	traceDir := filepath.Join(ws, ".x-claw", "audit", "runs", "feishu_oc_test")
+	if err := os.MkdirAll(traceDir, 0o755); err != nil {
+		t.Fatalf("mkdir trace: %v", err)
+	}
+	path := filepath.Join(traceDir, "events.jsonl")
+	if err := os.WriteFile(path, []byte("line-one\n"), 0o644); err != nil {
+		t.Fatalf("write events: %v", err)
+	}
+
+	h := NewConsoleHandler(ConsoleHandlerOptions{Workspace: ws})
+	srv := httptest.NewServer(h)
+	defer srv.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, srv.URL+"/api/console/stream?path=.x-claw/audit/runs/feishu_oc_test/events.jsonl&tail=1", nil)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("do request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	lines := make(chan string, 8)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		scanner := bufio.NewScanner(resp.Body)
+		for scanner.Scan() {
+			line := strings.TrimSpace(scanner.Text())
+			if line != "" {
+				lines <- line
+			}
+		}
+	}()
+
+	if got := readStreamLine(t, lines, time.Second); got != "line-one" {
+		t.Fatalf("first line = %q, want %q", got, "line-one")
+	}
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for stream to stop after client cancel")
 	}
 }
 

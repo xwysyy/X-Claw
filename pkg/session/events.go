@@ -54,7 +54,9 @@ func appendJSONLEvent(path string, event SessionEvent) error {
 	if _, err := f.Write(payload); err != nil {
 		return fmt.Errorf("append: %w", err)
 	}
-	_ = f.Sync()
+	if err := f.Sync(); err != nil {
+		return fmt.Errorf("sync: %w", err)
+	}
 	return nil
 }
 

@@ -7,10 +7,59 @@ package providers
 
 import (
 	"fmt"
+	"net/url"
 	"strings"
 
 	"github.com/xwysyy/X-Claw/pkg/config"
 )
+
+func missingOAuthCredentialError(provider string) error {
+	provider = strings.TrimSpace(provider)
+	return fmt.Errorf(
+		"no credentials for %s. Configure `api_key` in config, or populate the local auth store before using oauth/token auth",
+		provider,
+	)
+}
+
+func expiredOAuthCredentialError(provider string) error {
+	provider = strings.TrimSpace(provider)
+	return fmt.Errorf(
+		"%s credentials expired. Refresh the local auth store credential and retry",
+		provider,
+	)
+}
+
+func resolveHTTPProviderAPIBase(cfg *config.ModelConfig, protocol string) string {
+	if cfg == nil {
+		return getDefaultAPIBase(protocol)
+	}
+	if apiBase := strings.TrimSpace(cfg.APIBase); apiBase != "" {
+		return apiBase
+	}
+	return getDefaultAPIBase(protocol)
+}
+
+func isLocalAPIBase(apiBase string) bool {
+	apiBase = strings.TrimSpace(apiBase)
+	if apiBase == "" {
+		return false
+	}
+	u, err := url.Parse(apiBase)
+	if err != nil {
+		return false
+	}
+	hostname := strings.ToLower(strings.TrimSpace(u.Hostname()))
+	return hostname == "localhost" || hostname == "127.0.0.1" || hostname == "::1"
+}
+
+func httpProviderRequiresAPIKey(protocol, apiBase string) bool {
+	switch protocol {
+	case "litellm", "ollama", "vllm":
+		return !isLocalAPIBase(apiBase)
+	default:
+		return true
+	}
+}
 
 // createClaudeAuthProvider creates a Claude provider using OAuth credentials from auth store.
 func createClaudeAuthProvider() (LLMProvider, error) {
@@ -19,7 +68,7 @@ func createClaudeAuthProvider() (LLMProvider, error) {
 		return nil, fmt.Errorf("loading auth credentials: %w", err)
 	}
 	if cred == nil {
-		return nil, fmt.Errorf("no credentials for anthropic. Run: x-claw auth login --provider anthropic")
+		return nil, missingOAuthCredentialError("anthropic")
 	}
 	return NewClaudeProviderWithTokenSource(cred.AccessToken, createClaudeTokenSource()), nil
 }
@@ -31,7 +80,7 @@ func createCodexAuthProvider() (LLMProvider, error) {
 		return nil, fmt.Errorf("loading auth credentials: %w", err)
 	}
 	if cred == nil {
-		return nil, fmt.Errorf("no credentials for openai. Run: x-claw auth login --provider openai")
+		return nil, missingOAuthCredentialError("openai")
 	}
 	return NewCodexProviderWithTokenSource(cred.AccessToken, cred.AccountID, createCodexTokenSource()), nil
 }
@@ -77,6 +126,7 @@ func CreateProviderFromConfig(cfg *config.ModelConfig) (LLMProvider, string, err
 
 	switch protocol {
 	case "openai":
+		apiBase := resolveHTTPProviderAPIBase(cfg, protocol)
 		// OpenAI with OAuth/token auth (Codex-style)
 		if cfg.AuthMethod == "oauth" || cfg.AuthMethod == "token" || cfg.AuthMethod == "codex-cli" {
 			provider, err := createCodexAuthProvider()
@@ -86,12 +136,8 @@ func CreateProviderFromConfig(cfg *config.ModelConfig) (LLMProvider, string, err
 			return provider, modelID, nil
 		}
 		// OpenAI with API key
-		if apiKey == "" && cfg.APIBase == "" {
-			return nil, "", fmt.Errorf("api_key or api_base is required for HTTP-based protocol %q", protocol)
-		}
-		apiBase := cfg.APIBase
-		if apiBase == "" {
-			apiBase = getDefaultAPIBase(protocol)
+		if apiKey == "" && httpProviderRequiresAPIKey(protocol, apiBase) {
+			return nil, "", fmt.Errorf("api_key is required for HTTP-based protocol %q (api_base=%q)", protocol, apiBase)
 		}
 		return NewHTTPProviderWithMaxTokensFieldAndRequestTimeout(
 			apiKey,
@@ -105,12 +151,9 @@ func CreateProviderFromConfig(cfg *config.ModelConfig) (LLMProvider, string, err
 		"ollama", "moonshot", "shengsuanyun", "deepseek", "cerebras",
 		"volcengine", "vllm", "qwen", "mistral", "avian":
 		// All other OpenAI-compatible HTTP providers
-		if apiKey == "" && cfg.APIBase == "" {
-			return nil, "", fmt.Errorf("api_key or api_base is required for HTTP-based protocol %q", protocol)
-		}
-		apiBase := cfg.APIBase
-		if apiBase == "" {
-			apiBase = getDefaultAPIBase(protocol)
+		apiBase := resolveHTTPProviderAPIBase(cfg, protocol)
+		if apiKey == "" && httpProviderRequiresAPIKey(protocol, apiBase) {
+			return nil, "", fmt.Errorf("api_key is required for HTTP-based protocol %q (api_base=%q)", protocol, apiBase)
 		}
 		return NewHTTPProviderWithMaxTokensFieldAndRequestTimeout(
 			apiKey,

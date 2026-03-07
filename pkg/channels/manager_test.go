@@ -16,20 +16,34 @@ import (
 
 	"github.com/xwysyy/X-Claw/pkg/bus"
 	"github.com/xwysyy/X-Claw/pkg/config"
+	"github.com/xwysyy/X-Claw/pkg/health"
 )
 
 // mockChannel is a test double that delegates Send to a configurable function.
 type mockChannel struct {
 	BaseChannel
-	sendFn func(ctx context.Context, msg bus.OutboundMessage) error
+	sendFn  func(ctx context.Context, msg bus.OutboundMessage) error
+	startFn func(ctx context.Context) error
+	stopFn  func(ctx context.Context) error
 }
 
 func (m *mockChannel) Send(ctx context.Context, msg bus.OutboundMessage) error {
 	return m.sendFn(ctx, msg)
 }
 
-func (m *mockChannel) Start(ctx context.Context) error { return nil }
-func (m *mockChannel) Stop(ctx context.Context) error  { return nil }
+func (m *mockChannel) Start(ctx context.Context) error {
+	if m.startFn != nil {
+		return m.startFn(ctx)
+	}
+	return nil
+}
+
+func (m *mockChannel) Stop(ctx context.Context) error {
+	if m.stopFn != nil {
+		return m.stopFn(ctx)
+	}
+	return nil
+}
 
 // newTestManager creates a minimal Manager suitable for unit tests.
 func newTestManager() *Manager {
@@ -829,6 +843,88 @@ func TestSendWithRetry_PreSendEditsPlaceholder(t *testing.T) {
 	}
 }
 
+func TestSendToChannelAfterStopAllReturnsErrNotRunning(t *testing.T) {
+	mb := bus.NewMessageBus()
+	defer mb.Close()
+
+	m := &Manager{
+		channels: make(map[string]Channel),
+		workers:  make(map[string]*channelWorker),
+		bus:      mb,
+	}
+	m.RegisterChannel("test", &mockChannel{
+		sendFn: func(_ context.Context, _ bus.OutboundMessage) error { return nil },
+	})
+
+	if err := m.StartAll(context.Background()); err != nil {
+		t.Fatalf("StartAll() error = %v", err)
+	}
+	if err := m.StopAll(context.Background()); err != nil {
+		t.Fatalf("StopAll() error = %v", err)
+	}
+
+	err := m.SendToChannel(context.Background(), "test", "chat1", "hello")
+	if err == nil {
+		t.Fatal("expected SendToChannel to fail after StopAll")
+	}
+	if !errors.Is(err, ErrNotRunning) {
+		t.Fatalf("expected ErrNotRunning, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "no active worker") {
+		t.Fatalf("expected no active worker hint, got %v", err)
+	}
+}
+
+func TestDispatchOutboundSkipsClosedWorkerQueue(t *testing.T) {
+	mb := bus.NewMessageBus()
+	defer mb.Close()
+
+	ch := &mockChannel{
+		sendFn: func(_ context.Context, _ bus.OutboundMessage) error { return nil },
+	}
+	w := newChannelWorker("test", ch)
+	close(w.queue)
+
+	m := &Manager{
+		channels: map[string]Channel{"test": ch},
+		workers:  map[string]*channelWorker{"test": w},
+		bus:      mb,
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	panicCh := make(chan any, 1)
+
+	go func() {
+		defer close(done)
+		defer func() {
+			if r := recover(); r != nil {
+				panicCh <- r
+			}
+		}()
+		m.dispatchOutbound(ctx)
+	}()
+
+	if err := mb.PublishOutbound(context.Background(), bus.OutboundMessage{Channel: "test", ChatID: "chat1", Content: "hello"}); err != nil {
+		t.Fatalf("PublishOutbound() error = %v", err)
+	}
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("dispatchOutbound did not exit after cancel")
+	}
+
+	select {
+	case r := <-panicCh:
+		t.Fatalf("dispatchOutbound panicked on closed queue: %v", r)
+	default:
+	}
+}
+
 // --- Dispatcher exit tests (Step 1) ---
 
 func TestDispatcherExitsOnCancel(t *testing.T) {
@@ -995,6 +1091,133 @@ func TestPreSendStillWorksWithWrappedTypes(t *testing.T) {
 	}
 	if !edited {
 		t.Fatal("expected preSend to return true")
+	}
+}
+
+func TestStartAllReturnsErrorWhenAllChannelsFail(t *testing.T) {
+	m := newTestManager()
+	m.SetupHTTPServer("127.0.0.1:0", health.NewServer("127.0.0.1", 0))
+
+	startErr := errors.New("start failed")
+	for _, name := range []string{"one", "two"} {
+		m.RegisterChannel(name, &mockChannel{
+			sendFn:  func(_ context.Context, _ bus.OutboundMessage) error { return nil },
+			startFn: func(_ context.Context) error { return startErr },
+		})
+	}
+
+	err := m.StartAll(context.Background())
+	if err == nil {
+		t.Fatal("expected StartAll to fail when all channels fail to start")
+	}
+	if !strings.Contains(err.Error(), "no channels started successfully") {
+		t.Fatalf("expected no channels started error, got %v", err)
+	}
+
+	m.mu.RLock()
+	if len(m.workers) != 0 {
+		m.mu.RUnlock()
+		t.Fatalf("expected no workers to be created, got %d", len(m.workers))
+	}
+	if m.dispatchTask != nil {
+		m.mu.RUnlock()
+		t.Fatal("expected dispatch task to be cleared on all-start failure")
+	}
+	m.mu.RUnlock()
+
+	req := httptest.NewRequest(http.MethodGet, "/ready", nil)
+	rec := httptest.NewRecorder()
+	m.mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected ready endpoint to stay not ready, got %d", rec.Code)
+	}
+}
+
+func TestSendToChannelAfterStopAllReturnsNotRunning(t *testing.T) {
+	mb := bus.NewMessageBus()
+	defer mb.Close()
+
+	var sendCalled atomic.Bool
+	ch := &mockChannel{
+		sendFn: func(_ context.Context, _ bus.OutboundMessage) error {
+			sendCalled.Store(true)
+			return nil
+		},
+	}
+
+	m := &Manager{
+		channels: map[string]Channel{"test": ch},
+		workers:  map[string]*channelWorker{},
+		bus:      mb,
+	}
+
+	workerCtx, cancel := context.WithCancel(context.Background())
+	m.dispatchTask = &asyncTask{cancel: cancel}
+	w := newChannelWorker("test", ch)
+	m.workers["test"] = w
+
+	go m.runWorker(workerCtx, "test", w)
+	go m.runMediaWorker(workerCtx, "test", w)
+
+	if err := m.StopAll(context.Background()); err != nil {
+		t.Fatalf("StopAll() error = %v", err)
+	}
+
+	err := m.SendToChannel(context.Background(), "test", "chat-1", "hello")
+	if !errors.Is(err, ErrNotRunning) {
+		t.Fatalf("expected ErrNotRunning after StopAll, got %v", err)
+	}
+	if sendCalled.Load() {
+		t.Fatal("expected SendToChannel after StopAll to avoid direct send")
+	}
+
+	m.mu.RLock()
+	workers := len(m.workers)
+	m.mu.RUnlock()
+	if workers != 0 {
+		t.Fatalf("expected workers to be cleared after StopAll, got %d", workers)
+	}
+	_ = cancel
+	_ = workerCtx
+}
+
+func TestDispatcherDoesNotDeliverAfterStopAll(t *testing.T) {
+	mb := bus.NewMessageBus()
+	defer mb.Close()
+
+	var sendCalled atomic.Bool
+	ch := &mockChannel{
+		sendFn: func(_ context.Context, _ bus.OutboundMessage) error {
+			sendCalled.Store(true)
+			return nil
+		},
+	}
+
+	m := &Manager{
+		channels: map[string]Channel{"test": ch},
+		workers:  map[string]*channelWorker{},
+		bus:      mb,
+	}
+
+	workerCtx, cancel := context.WithCancel(context.Background())
+	m.dispatchTask = &asyncTask{cancel: cancel}
+	w := newChannelWorker("test", ch)
+	m.workers["test"] = w
+
+	go m.runWorker(workerCtx, "test", w)
+	go m.runMediaWorker(workerCtx, "test", w)
+	go m.dispatchOutbound(workerCtx)
+
+	if err := m.StopAll(context.Background()); err != nil {
+		t.Fatalf("StopAll() error = %v", err)
+	}
+	if err := mb.PublishOutbound(context.Background(), bus.OutboundMessage{Channel: "test", ChatID: "chat-1", Content: "hello"}); err != nil {
+		t.Fatalf("PublishOutbound() error = %v", err)
+	}
+
+	time.Sleep(50 * time.Millisecond)
+	if sendCalled.Load() {
+		t.Fatal("expected dispatcher to stop delivering after StopAll")
 	}
 }
 

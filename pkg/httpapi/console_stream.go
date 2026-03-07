@@ -12,6 +12,29 @@ import (
 	"time"
 )
 
+var (
+	consoleStreamKeepAliveInterval = 10 * time.Second
+	consoleStreamTailLines         = tailLines
+	consoleStreamStatInterval      = 2 * time.Second
+	consoleStreamIdleSleep         = 150 * time.Millisecond
+)
+
+func reopenConsoleStreamFile(current *os.File, abs string) (*os.File, *bufio.Reader, os.FileInfo, error) {
+	if current != nil {
+		_ = current.Close()
+	}
+	reopened, err := os.Open(abs)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	info, err := reopened.Stat()
+	if err != nil {
+		_ = reopened.Close()
+		return nil, nil, nil, err
+	}
+	return reopened, bufio.NewReader(reopened), info, nil
+}
+
 func (h *ConsoleHandler) handleStream(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		w.Header().Set("Allow", "GET")
@@ -70,37 +93,25 @@ func (h *ConsoleHandler) handleStream(w http.ResponseWriter, r *http.Request) {
 
 	if tail > 0 {
 		const maxBytes = int64(1 << 20)
-		if st, err := f.Stat(); err == nil && st != nil && st.Size() > 0 {
-			start := st.Size() - maxBytes
-			if start < 0 {
-				start = 0
-			}
-			if _, err := f.Seek(start, io.SeekStart); err == nil {
-				buf, _ := io.ReadAll(f)
-				lines := strings.Split(string(buf), "\n")
-				if start > 0 && len(lines) > 0 {
-					lines = lines[1:]
-				}
-				trimmed := make([]string, 0, len(lines))
-				for _, line := range lines {
-					line = strings.TrimSpace(line)
-					if line == "" {
-						continue
-					}
-					trimmed = append(trimmed, line)
-				}
-				if len(trimmed) > tail {
-					trimmed = trimmed[len(trimmed)-tail:]
-				}
-				for _, line := range trimmed {
-					_, _ = io.WriteString(w, line+"\n")
-				}
-				flusher.Flush()
-			}
+		lines, _, err := consoleStreamTailLines(abs, tail, maxBytes)
+		if err != nil {
+			_, _ = io.WriteString(w, fmt.Sprintf("{\"ok\":false,\"error\":%q,\"path\":%q}\n", err.Error(), relClean))
+			flusher.Flush()
+			return
 		}
+		for _, line := range lines {
+			_, _ = io.WriteString(w, line+"\n")
+		}
+		if _, err := f.Seek(0, io.SeekEnd); err != nil {
+			_, _ = io.WriteString(w, fmt.Sprintf("{\"ok\":false,\"error\":%q,\"path\":%q}\n", err.Error(), relClean))
+			flusher.Flush()
+			return
+		}
+		flusher.Flush()
 	}
 
 	reader := bufio.NewReader(f)
+	openedInfo, _ := f.Stat()
 	lastKeepAlive := time.Now()
 	lastStat := time.Now()
 	var lastSize int64
@@ -129,25 +140,39 @@ func (h *ConsoleHandler) handleStream(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 
-			if time.Since(lastKeepAlive) > 10*time.Second {
+			if time.Since(lastKeepAlive) > consoleStreamKeepAliveInterval {
 				_, _ = io.WriteString(w, "\n")
 				flusher.Flush()
 				lastKeepAlive = time.Now()
 			}
 
-			if time.Since(lastStat) > 2*time.Second {
+			if time.Since(lastStat) > consoleStreamStatInterval {
 				lastStat = time.Now()
 				if st, err := os.Stat(abs); err == nil && st != nil {
+					if openedInfo != nil && !os.SameFile(openedInfo, st) {
+						reopened, reopenedReader, reopenedInfo, reopenErr := reopenConsoleStreamFile(f, abs)
+						if reopenErr != nil {
+							_, _ = io.WriteString(w, fmt.Sprintf("{\"ok\":false,\"error\":%q,\"path\":%q}\n", reopenErr.Error(), relClean))
+							flusher.Flush()
+							return
+						}
+						f = reopened
+						reader = reopenedReader
+						openedInfo = reopenedInfo
+						lastSize = 0
+						continue
+					}
 					if st.Size() < lastSize {
 						if _, err := f.Seek(0, io.SeekStart); err == nil {
 							reader.Reset(f)
 						}
 					}
+					openedInfo = st
 					lastSize = st.Size()
 				}
 			}
 
-			time.Sleep(150 * time.Millisecond)
+			time.Sleep(consoleStreamIdleSleep)
 		}
 	}
 }

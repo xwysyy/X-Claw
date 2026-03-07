@@ -51,21 +51,17 @@ type resumeLastTaskResponse struct {
 }
 
 func (h *ResumeLastTaskHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
 	if r.Method != http.MethodPost {
 		w.Header().Set("Allow", http.MethodPost)
-		w.WriteHeader(http.StatusMethodNotAllowed)
-		_ = json.NewEncoder(w).Encode(resumeLastTaskResponse{OK: false, Error: "method not allowed"})
+		writeJSON(w, http.StatusMethodNotAllowed, resumeLastTaskResponse{OK: false, Error: "method not allowed"})
 		return
 	}
 	if h.resume == nil {
-		w.WriteHeader(http.StatusServiceUnavailable)
-		_ = json.NewEncoder(w).Encode(resumeLastTaskResponse{OK: false, Error: "resume service not configured"})
+		writeJSON(w, http.StatusServiceUnavailable, resumeLastTaskResponse{OK: false, Error: "resume service not configured"})
 		return
 	}
 	if !authorizeAPIKeyOrLoopback(h.apiKey, r) {
-		w.WriteHeader(http.StatusUnauthorized)
-		_ = json.NewEncoder(w).Encode(resumeLastTaskResponse{OK: false, Error: "unauthorized"})
+		writeJSON(w, http.StatusUnauthorized, resumeLastTaskResponse{OK: false, Error: "unauthorized"})
 		return
 	}
 
@@ -97,18 +93,15 @@ func (h *ResumeLastTaskHandler) ServeHTTP(w http.ResponseWriter, r *http.Request
 			logger.WarnCF("gateway.resume", "Resume failed", map[string]any{
 				"error": res.err.Error(),
 			})
-			w.WriteHeader(http.StatusInternalServerError)
 			errMsg := "resume failed"
 			if isLoopbackRemote(r.RemoteAddr) {
 				errMsg = res.err.Error()
 			}
-			_ = json.NewEncoder(w).Encode(resumeLastTaskResponse{OK: false, Error: errMsg, Candidate: res.candidate})
+			writeJSON(w, http.StatusInternalServerError, resumeLastTaskResponse{OK: false, Error: errMsg, Candidate: res.candidate})
 			return
 		}
-		w.WriteHeader(http.StatusOK)
-		_ = json.NewEncoder(w).Encode(resumeLastTaskResponse{OK: true, Candidate: res.candidate, Response: res.response})
+		writeJSON(w, http.StatusOK, resumeLastTaskResponse{OK: true, Candidate: res.candidate, Response: res.response})
 	case <-resumeCtx.Done():
-		w.WriteHeader(http.StatusGatewayTimeout)
-		_ = json.NewEncoder(w).Encode(resumeLastTaskResponse{OK: false, Error: "resume timeout"})
+		writeJSON(w, http.StatusGatewayTimeout, resumeLastTaskResponse{OK: false, Error: "resume timeout"})
 	}
 }

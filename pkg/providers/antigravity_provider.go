@@ -569,9 +569,7 @@ func createAntigravityTokenSource() func() (string, string, error) {
 			return "", "", fmt.Errorf("loading auth credentials: %w", err)
 		}
 		if cred == nil {
-			return "", "", fmt.Errorf(
-				"no credentials for google-antigravity. Run: x-claw auth login --provider google-antigravity",
-			)
+			return "", "", missingOAuthCredentialError("google-antigravity")
 		}
 
 		// Refresh if needed
@@ -592,9 +590,7 @@ func createAntigravityTokenSource() func() (string, string, error) {
 		}
 
 		if cred.IsExpired() {
-			return "", "", fmt.Errorf(
-				"antigravity credentials expired. Run: x-claw auth login --provider google-antigravity",
-			)
+			return "", "", expiredOAuthCredentialError("google-antigravity")
 		}
 
 		projectID := cred.ProjectID
@@ -609,7 +605,11 @@ func createAntigravityTokenSource() func() (string, string, error) {
 			} else {
 				projectID = fetchedID
 				cred.ProjectID = projectID
-				_ = auth.SetCredential("google-antigravity", cred)
+				if err := auth.SetCredential("google-antigravity", cred); err != nil {
+					logger.WarnCF("provider.antigravity", "Failed to save credential", map[string]any{
+						"error": err.Error(),
+					})
+				}
 			}
 		}
 
@@ -762,6 +762,8 @@ func truncateString(s string, maxLen int) string {
 	return s[:maxLen] + "..."
 }
 
+// randomString is only used for request correlation IDs and does not need
+// cryptographic strength.
 func randomString(n int) string {
 	const letters = "abcdefghijklmnopqrstuvwxyz0123456789"
 	b := make([]byte, n)

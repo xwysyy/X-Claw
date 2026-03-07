@@ -40,17 +40,21 @@ type ContextRuntimeSettings struct {
 }
 
 type ContextBuilder struct {
-	workspace             string
-	skillsLoader          *skills.SkillsLoader
-	memory                *MemoryStore
-	memoryScopesMu        sync.Mutex
-	memoryScopes          map[string]*MemoryStore
-	tools                 *tools.ToolRegistry // Direct reference to tool registry
-	settings              ContextRuntimeSettings
-	webEvidenceEnabled    bool
-	webEvidenceMinDomains int
-	bootstrapMu           sync.RWMutex
-	bootstrapCache        map[string]string
+	workspace              string
+	skillsLoader           *skills.SkillsLoader
+	memory                 *MemoryStore
+	runtimeMu              sync.RWMutex
+	memoryScopesMu         sync.Mutex
+	memoryScopes           map[string]*MemoryStore
+	memoryScopesLastUsed   map[string]uint64
+	memoryScopesUseTick    uint64
+	memoryScopesMaxEntries int
+	tools                  *tools.ToolRegistry // Direct reference to tool registry
+	settings               ContextRuntimeSettings
+	webEvidenceEnabled     bool
+	webEvidenceMinDomains  int
+	bootstrapMu            sync.RWMutex
+	bootstrapCache         map[string]string
 
 	// Cache for static system prompt to avoid rebuilding on every call.
 	// Dynamic per-request data (time/session/summary) is appended in BuildMessages.
@@ -69,6 +73,15 @@ type ContextBuilder struct {
 	// that may not update the top-level skill root directory mtime.
 	skillFilesAtCache map[string]time.Time
 }
+
+type contextRuntimeSnapshot struct {
+	settings              ContextRuntimeSettings
+	tools                 *tools.ToolRegistry
+	webEvidenceEnabled    bool
+	webEvidenceMinDomains int
+}
+
+const defaultContextMemoryScopesMaxEntries = 128
 
 func getGlobalConfigDir() string {
 	home, err := os.UserHomeDir()
@@ -120,107 +133,22 @@ func NewContextBuilder(workspace string) *ContextBuilder {
 	})
 
 	return &ContextBuilder{
-		workspace:      workspace,
-		skillsLoader:   skills.NewSkillsLoader(workspace, globalSkillsDir, builtinSkillsDir),
-		memory:         memoryStore,
-		memoryScopes:   map[string]*MemoryStore{},
-		bootstrapCache: map[string]string{},
-		settings:       defaultSettings,
-	}
-}
-
-func (cb *ContextBuilder) memoryVectorSettingsLocked() MemoryVectorSettings {
-	// Best-effort: read cb.settings without additional locking because it is
-	// treated as immutable during one agent loop iteration.
-	s := cb.settings
-	return MemoryVectorSettings{
-		Enabled:         s.MemoryVectorEnabled,
-		Dimensions:      s.MemoryVectorDimensions,
-		TopK:            s.MemoryVectorTopK,
-		MinScore:        s.MemoryVectorMinScore,
-		MaxContextChars: s.MemoryVectorMaxChars,
-		RecentDailyDays: s.MemoryVectorRecentDays,
-		Embedding:       s.MemoryVectorEmbedding,
-		Hybrid:          s.MemoryHybrid,
-	}
-}
-
-// MemoryForSession returns the effective MemoryStore for the current session.
-//
-// This enables Phase B3 (scoped memory) by routing:
-// - direct DM sessions -> user-scoped memory
-// - group/channel sessions -> session-scoped memory
-// - everything else -> agent-scoped memory (workspace/memory)
-func (cb *ContextBuilder) MemoryForSession(sessionKey, channel, chatID string) *MemoryStore {
-	if cb == nil {
-		return nil
-	}
-
-	scope := deriveMemoryScope(sessionKey, channel, chatID)
-	if scope.Kind == memoryScopeAgent {
-		return cb.memory
-	}
-
-	token := memoryScopeToken(scope.RawID)
-	memoryDir := filepath.Join(cb.workspace, "memory", "scopes", string(scope.Kind), token)
-
-	cb.memoryScopesMu.Lock()
-	defer cb.memoryScopesMu.Unlock()
-
-	if cb.memoryScopes == nil {
-		cb.memoryScopes = map[string]*MemoryStore{}
-	}
-	if store, ok := cb.memoryScopes[memoryDir]; ok && store != nil {
-		return store
-	}
-
-	store := NewMemoryStoreAt(memoryDir)
-	store.SetVectorSettings(cb.memoryVectorSettingsLocked())
-	cb.memoryScopes[memoryDir] = store
-	return store
-}
-
-// MemoryReadForSession returns a read-only memory view for the current session.
-//
-// For scoped sessions (user/session), reads are layered:
-//   - agent memory (shared baseline)
-//   - scoped memory (isolated overlay)
-//
-// This keeps durable global preferences available across channels, while still
-// routing new writes (memory flush) into the scoped store to avoid pollution.
-func (cb *ContextBuilder) MemoryReadForSession(sessionKey, channel, chatID string) MemoryReader {
-	if cb == nil {
-		return nil
-	}
-
-	scope := deriveMemoryScope(sessionKey, channel, chatID)
-	if scope.Kind == memoryScopeAgent {
-		return cb.memory
-	}
-
-	// Scoped store for this session (writes go here).
-	scoped := cb.MemoryForSession(sessionKey, channel, chatID)
-	if scoped == nil || cb.memory == nil || scoped == cb.memory {
-		// Best-effort fallback.
-		if scoped != nil {
-			return scoped
-		}
-		return cb.memory
-	}
-
-	token := memoryScopeToken(scope.RawID)
-	prefix := filepath.ToSlash(filepath.Join("scopes", string(scope.Kind), token))
-	return &memoryReadStack{
-		root:         cb.memory,
-		scoped:       scoped,
-		scopedKind:   scope.Kind,
-		scopedPrefix: prefix,
+		workspace:              workspace,
+		skillsLoader:           skills.NewSkillsLoader(workspace, globalSkillsDir, builtinSkillsDir),
+		memory:                 memoryStore,
+		memoryScopes:           map[string]*MemoryStore{},
+		memoryScopesLastUsed:   map[string]uint64{},
+		memoryScopesMaxEntries: defaultContextMemoryScopesMaxEntries,
+		bootstrapCache:         map[string]string{},
+		settings:               defaultSettings,
 	}
 }
 
 // SetToolsRegistry sets the tools registry for dynamic tool summary generation.
 func (cb *ContextBuilder) SetToolsRegistry(registry *tools.ToolRegistry) {
+	cb.runtimeMu.Lock()
 	cb.tools = registry
+	cb.runtimeMu.Unlock()
 	cb.InvalidateCache()
 }
 
@@ -253,7 +181,6 @@ func (cb *ContextBuilder) SetRuntimeSettings(settings ContextRuntimeSettings) {
 		settings.MemoryVectorRecentDays = defaultMemoryVectorRecentDailyDays
 	}
 	settings.MemoryHybrid = normalizeMemoryHybridSettings(settings.MemoryHybrid)
-	cb.settings = settings
 
 	vecSettings := MemoryVectorSettings{
 		Enabled:         settings.MemoryVectorEnabled,
@@ -265,6 +192,8 @@ func (cb *ContextBuilder) SetRuntimeSettings(settings ContextRuntimeSettings) {
 		Embedding:       settings.MemoryVectorEmbedding,
 		Hybrid:          settings.MemoryHybrid,
 	}
+	cb.runtimeMu.Lock()
+	cb.settings = settings
 	cb.memory.SetVectorSettings(vecSettings)
 
 	cb.memoryScopesMu.Lock()
@@ -274,6 +203,7 @@ func (cb *ContextBuilder) SetRuntimeSettings(settings ContextRuntimeSettings) {
 		}
 	}
 	cb.memoryScopesMu.Unlock()
+	cb.runtimeMu.Unlock()
 }
 
 // SetWebEvidenceMode enables/disables web "evidence mode" instructions in the system prompt.
@@ -287,20 +217,23 @@ func (cb *ContextBuilder) SetWebEvidenceMode(enabled bool, minDomains int) {
 	if minDomains <= 0 {
 		minDomains = 2
 	}
+	cb.runtimeMu.Lock()
 	cb.webEvidenceEnabled = enabled
 	cb.webEvidenceMinDomains = minDomains
+	cb.runtimeMu.Unlock()
 	cb.InvalidateCache()
 }
 
 func (cb *ContextBuilder) getIdentity() string {
 	workspacePath, _ := filepath.Abs(filepath.Join(cb.workspace))
+	runtimeSnapshot := cb.runtimeSnapshot()
 
 	// Build tools section dynamically
-	toolsSection := cb.buildToolsSection()
+	toolsSection := buildToolsSection(runtimeSnapshot.tools)
 
 	webEvidenceRule := ""
-	if cb.webEvidenceEnabled {
-		minDomains := cb.webEvidenceMinDomains
+	if runtimeSnapshot.webEvidenceEnabled {
+		minDomains := runtimeSnapshot.webEvidenceMinDomains
 		if minDomains <= 0 {
 			minDomains = 2
 		}
@@ -416,8 +349,9 @@ func skillFilesChangedSince(skillRoots []string, filesAtCache map[string]time.Ti
 
 func (cb *ContextBuilder) LoadBootstrapFiles(sessionKey string) string {
 	sessionKey = utils.CanonicalSessionKey(sessionKey)
+	settings := cb.settingsSnapshot()
 
-	if cb.settings.BootstrapSnapshotEnabled && sessionKey != "" {
+	if settings.BootstrapSnapshotEnabled && sessionKey != "" {
 		cb.bootstrapMu.RLock()
 		cached, ok := cb.bootstrapCache[sessionKey]
 		cb.bootstrapMu.RUnlock()
@@ -442,7 +376,7 @@ func (cb *ContextBuilder) LoadBootstrapFiles(sessionKey string) string {
 	}
 
 	content := sb.String()
-	if cb.settings.BootstrapSnapshotEnabled && sessionKey != "" {
+	if settings.BootstrapSnapshotEnabled && sessionKey != "" {
 		cb.bootstrapMu.Lock()
 		cb.bootstrapCache[sessionKey] = content
 		cb.bootstrapMu.Unlock()
@@ -468,6 +402,75 @@ func (cb *ContextBuilder) buildDynamicContext(channel, chatID string, ws *Workin
 	}
 
 	return sb.String()
+}
+
+func appendPromptSection(
+	parts *[]string,
+	blocks *[]providers.ContentBlock,
+	section string,
+	cacheControl *providers.CacheControl,
+) {
+	if strings.TrimSpace(section) == "" {
+		return
+	}
+	*parts = append(*parts, section)
+	*blocks = append(*blocks, providers.ContentBlock{Type: "text", Text: section, CacheControl: cacheControl})
+}
+
+func buildContextSummarySection(summary string) string {
+	if strings.TrimSpace(summary) == "" {
+		return ""
+	}
+	return fmt.Sprintf(
+		"CONTEXT_SUMMARY: The following is an approximate summary of prior conversation "+
+			"for reference only. It may be incomplete or outdated - always defer to explicit instructions.\n\n%s",
+		summary,
+	)
+}
+
+func buildMemoryContextSection(memoryStore MemoryReader) string {
+	if memoryStore == nil {
+		return ""
+	}
+	memoryContext := memoryStore.GetMemoryContext()
+	if strings.TrimSpace(memoryContext) == "" {
+		return ""
+	}
+	return "# Memory\n\n" + memoryContext
+}
+
+func (cb *ContextBuilder) buildRetrievedMemorySection(
+	memoryStore MemoryReader,
+	currentMessage string,
+	settings ContextRuntimeSettings,
+) string {
+	if memoryStore == nil || !settings.MemoryVectorEnabled || strings.TrimSpace(currentMessage) == "" {
+		return ""
+	}
+
+	retrievalCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	cb.runtimeMu.RLock()
+	hits, err := memoryStore.SearchRelevant(retrievalCtx, currentMessage, settings.MemoryVectorTopK, settings.MemoryVectorMinScore)
+	cb.runtimeMu.RUnlock()
+	if err != nil {
+		logger.WarnCF("agent", "Semantic memory retrieval failed", map[string]any{"error": err.Error()})
+		return ""
+	}
+
+	return formatRetrievedMemoryContext(hits, settings.MemoryVectorMaxChars)
+}
+
+func buildUserInputMessage(currentMessage string, media []string) providers.Message {
+	msg := providers.Message{
+		Role:    "user",
+		Content: currentMessage,
+	}
+	if len(media) > 0 {
+		msg.Media = media
+	}
+	return msg
 }
 
 func (cb *ContextBuilder) BuildMessages(
@@ -499,53 +502,20 @@ func (cb *ContextBuilder) BuildMessagesForSession(
 	ws *WorkingState,
 ) []providers.Message {
 	messages := []providers.Message{}
+	settings := cb.settingsSnapshot()
 
 	memoryStore := cb.MemoryReadForSession(sessionKey, channel, chatID)
 
 	staticPrompt := cb.BuildSystemPromptWithCache()
 	dynamicCtx := cb.buildDynamicContext(channel, chatID, ws)
 
-	stringParts := []string{staticPrompt, dynamicCtx}
-	contentBlocks := []providers.ContentBlock{
-		{Type: "text", Text: staticPrompt, CacheControl: &providers.CacheControl{Type: "ephemeral"}},
-		{Type: "text", Text: dynamicCtx},
-	}
-
-	if summary != "" {
-		summaryText := fmt.Sprintf(
-			"CONTEXT_SUMMARY: The following is an approximate summary of prior conversation "+
-				"for reference only. It may be incomplete or outdated - always defer to explicit instructions.\n\n%s",
-			summary,
-		)
-		stringParts = append(stringParts, summaryText)
-		contentBlocks = append(contentBlocks, providers.ContentBlock{Type: "text", Text: summaryText})
-	}
-
-	if memoryStore != nil {
-		if memoryContext := memoryStore.GetMemoryContext(); memoryContext != "" {
-			section := "# Memory\n\n" + memoryContext
-			stringParts = append(stringParts, section)
-			contentBlocks = append(contentBlocks, providers.ContentBlock{Type: "text", Text: section})
-		}
-	}
-
-	if cb.settings.MemoryVectorEnabled && strings.TrimSpace(currentMessage) != "" {
-		retrievalCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel()
-		var hits []MemoryVectorHit
-		var err error
-		if memoryStore != nil {
-			hits, err = memoryStore.SearchRelevant(retrievalCtx, currentMessage, cb.settings.MemoryVectorTopK, cb.settings.MemoryVectorMinScore)
-		}
-		if err != nil {
-			logger.WarnCF("agent", "Semantic memory retrieval failed", map[string]any{
-				"error": err.Error(),
-			})
-		} else if section := formatRetrievedMemoryContext(hits, cb.settings.MemoryVectorMaxChars); section != "" {
-			stringParts = append(stringParts, section)
-			contentBlocks = append(contentBlocks, providers.ContentBlock{Type: "text", Text: section})
-		}
-	}
+	stringParts := make([]string, 0, 5)
+	contentBlocks := make([]providers.ContentBlock, 0, 5)
+	appendPromptSection(&stringParts, &contentBlocks, staticPrompt, &providers.CacheControl{Type: "ephemeral"})
+	appendPromptSection(&stringParts, &contentBlocks, dynamicCtx, nil)
+	appendPromptSection(&stringParts, &contentBlocks, buildContextSummarySection(summary), nil)
+	appendPromptSection(&stringParts, &contentBlocks, buildMemoryContextSection(memoryStore), nil)
+	appendPromptSection(&stringParts, &contentBlocks, cb.buildRetrievedMemorySection(memoryStore, currentMessage, settings), nil)
 
 	fullSystemPrompt := strings.Join(stringParts, "\n\n---\n\n")
 
@@ -581,14 +551,7 @@ func (cb *ContextBuilder) BuildMessagesForSession(
 	messages = append(messages, history...)
 
 	if strings.TrimSpace(currentMessage) != "" {
-		msg := providers.Message{
-			Role:    "user",
-			Content: currentMessage,
-		}
-		if len(media) > 0 {
-			msg.Media = media
-		}
-		messages = append(messages, msg)
+		messages = append(messages, buildUserInputMessage(currentMessage, media))
 	}
 
 	return messages
@@ -677,13 +640,14 @@ func (cb *ContextBuilder) pruneHistoryForContext(
 	history []providers.Message,
 	systemPrompt string,
 ) []providers.Message {
-	if len(history) == 0 || cb.settings.PruningMode == "off" || cb.settings.ContextWindowTokens <= 0 {
+	settings := cb.settingsSnapshot()
+	if len(history) == 0 || settings.PruningMode == "off" || settings.ContextWindowTokens <= 0 {
 		return history
 	}
 
 	totalTokens := estimateTotalTokens(systemPrompt, history)
-	ratio := float64(totalTokens) / float64(cb.settings.ContextWindowTokens)
-	if ratio < cb.settings.TriggerRatio {
+	ratio := float64(totalTokens) / float64(settings.ContextWindowTokens)
+	if ratio < settings.TriggerRatio {
 		return history
 	}
 
@@ -696,11 +660,11 @@ func (cb *ContextBuilder) pruneHistoryForContext(
 	for i := 0; i < cutoff; i++ {
 		msg := history[i]
 
-		if cb.settings.PruningMode == "tools_only" && msg.Role == "tool" && cb.settings.SoftToolResultChars > 0 {
+		if settings.PruningMode == "tools_only" && msg.Role == "tool" && settings.SoftToolResultChars > 0 {
 			raw := msg.Content
-			if len(raw) > cb.settings.SoftToolResultChars {
-				head := cb.settings.SoftToolResultChars * 7 / 10
-				tail := cb.settings.SoftToolResultChars * 2 / 10
+			if len(raw) > settings.SoftToolResultChars {
+				head := settings.SoftToolResultChars * 7 / 10
+				tail := settings.SoftToolResultChars * 2 / 10
 				if head+tail > len(raw) {
 					head = len(raw)
 					tail = 0
@@ -715,28 +679,28 @@ func (cb *ContextBuilder) pruneHistoryForContext(
 	}
 	pruned = append(pruned, history[cutoff:]...)
 
-	if cb.settings.IncludeOldChitChat {
+	if settings.IncludeOldChitChat {
 		pruned = compactOldChitChat(pruned, cutoff)
 	}
 
 	totalTokens = estimateTotalTokens(systemPrompt, pruned)
-	ratio = float64(totalTokens) / float64(cb.settings.ContextWindowTokens)
-	if ratio < cb.settings.TriggerRatio || cb.settings.HardToolResultChars <= 0 {
+	ratio = float64(totalTokens) / float64(settings.ContextWindowTokens)
+	if ratio < settings.TriggerRatio || settings.HardToolResultChars <= 0 {
 		return pruned
 	}
 
 	scanLimit := minInt(cutoff, len(pruned))
 	for i := 0; i < scanLimit; i++ {
-		if ratio < cb.settings.TriggerRatio {
+		if ratio < settings.TriggerRatio {
 			break
 		}
 		msg := pruned[i]
-		if msg.Role != "tool" || len(msg.Content) <= cb.settings.HardToolResultChars {
+		if msg.Role != "tool" || len(msg.Content) <= settings.HardToolResultChars {
 			continue
 		}
 		pruned[i].Content = "[tool result omitted for context stability; details preserved in session history]"
 		totalTokens = estimateTotalTokens(systemPrompt, pruned)
-		ratio = float64(totalTokens) / float64(cb.settings.ContextWindowTokens)
+		ratio = float64(totalTokens) / float64(settings.ContextWindowTokens)
 	}
 
 	return pruned
@@ -915,12 +879,12 @@ func estimateTotalTokens(systemPrompt string, messages []providers.Message) int 
 	return total
 }
 
-func (cb *ContextBuilder) buildToolsSection() string {
-	if cb.tools == nil {
+func buildToolsSection(registry *tools.ToolRegistry) string {
+	if registry == nil {
 		return ""
 	}
 
-	summaries := cb.tools.GetSummaries()
+	summaries := registry.GetSummaries()
 	if len(summaries) == 0 {
 		return ""
 	}

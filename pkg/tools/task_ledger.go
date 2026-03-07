@@ -9,6 +9,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/xwysyy/X-Claw/pkg/logger"
 )
 
 type TaskStatus string
@@ -74,7 +76,12 @@ func NewTaskLedger(path string) *TaskLedger {
 		path:  path,
 		tasks: make(map[string]*TaskLedgerEntry),
 	}
-	_ = l.load()
+	if err := l.load(); err != nil {
+		logger.WarnCF("tools/task", "Failed to load task ledger", map[string]any{
+			"path":  l.path,
+			"error": err.Error(),
+		})
+	}
 	return l
 }
 

@@ -70,30 +70,24 @@ type notifyResponse struct {
 }
 
 func (h *NotifyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-
 	if r.Method != http.MethodPost {
 		w.Header().Set("Allow", http.MethodPost)
-		w.WriteHeader(http.StatusMethodNotAllowed)
-		_ = json.NewEncoder(w).Encode(notifyResponse{OK: false, Error: "method not allowed"})
+		writeJSON(w, http.StatusMethodNotAllowed, notifyResponse{OK: false, Error: "method not allowed"})
 		return
 	}
 	if h.sender == nil {
-		w.WriteHeader(http.StatusServiceUnavailable)
-		_ = json.NewEncoder(w).Encode(notifyResponse{OK: false, Error: "notify service not configured"})
+		writeJSON(w, http.StatusServiceUnavailable, notifyResponse{OK: false, Error: "notify service not configured"})
 		return
 	}
 	if !authorizeAPIKeyOrLoopback(h.apiKey, r) {
-		w.WriteHeader(http.StatusUnauthorized)
-		_ = json.NewEncoder(w).Encode(notifyResponse{OK: false, Error: "unauthorized"})
+		writeJSON(w, http.StatusUnauthorized, notifyResponse{OK: false, Error: "unauthorized"})
 		return
 	}
 
 	r.Body = http.MaxBytesReader(w, r.Body, h.maxBody)
 	var req notifyRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		w.WriteHeader(http.StatusBadRequest)
-		_ = json.NewEncoder(w).Encode(notifyResponse{OK: false, Error: "invalid json body"})
+		writeJSON(w, http.StatusBadRequest, notifyResponse{OK: false, Error: "invalid json body"})
 		return
 	}
 
@@ -110,16 +104,14 @@ func (h *NotifyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		channel, to = strings.TrimSpace(lastCh), strings.TrimSpace(lastTo)
 	}
 	if channel == "" {
-		w.WriteHeader(http.StatusBadRequest)
-		_ = json.NewEncoder(w).Encode(notifyResponse{OK: false, Error: "channel is required (or omit both channel/to to use last active)"})
+		writeJSON(w, http.StatusBadRequest, notifyResponse{OK: false, Error: "channel is required (or omit both channel/to to use last active)"})
 		return
 	}
 	if to == "" && channel == strings.TrimSpace(lastCh) {
 		to = strings.TrimSpace(lastTo)
 	}
 	if to == "" {
-		w.WriteHeader(http.StatusBadRequest)
-		_ = json.NewEncoder(w).Encode(notifyResponse{OK: false, Error: "to/chat_id is required (or omit both channel/to to use last active)"})
+		writeJSON(w, http.StatusBadRequest, notifyResponse{OK: false, Error: "to/chat_id is required (or omit both channel/to to use last active)"})
 		return
 	}
 
@@ -138,8 +130,7 @@ func (h *NotifyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if strings.TrimSpace(content) == "" {
-		w.WriteHeader(http.StatusBadRequest)
-		_ = json.NewEncoder(w).Encode(notifyResponse{OK: false, Error: "content is required"})
+		writeJSON(w, http.StatusBadRequest, notifyResponse{OK: false, Error: "content is required"})
 		return
 	}
 
@@ -156,12 +147,11 @@ func (h *NotifyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if isLoopbackRemote(r.RemoteAddr) {
 			errMsg = err.Error()
 		}
-		_ = json.NewEncoder(w).Encode(notifyResponse{OK: false, Channel: channel, To: to, Error: errMsg})
+		writeJSON(w, http.StatusInternalServerError, notifyResponse{OK: false, Channel: channel, To: to, Error: errMsg})
 		return
 	}
 
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(notifyResponse{OK: true, Channel: channel, To: to})
+	writeJSON(w, http.StatusOK, notifyResponse{OK: true, Channel: channel, To: to})
 }
 
 func authorizeAPIKeyOrLoopback(apiKey string, r *http.Request) bool {
