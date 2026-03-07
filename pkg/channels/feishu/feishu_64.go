@@ -17,6 +17,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 	"unicode/utf8"
 
 	lark "github.com/larksuite/oapi-sdk-go/v3"
@@ -275,11 +276,19 @@ func (c *FeishuChannel) ReactToMessage(ctx context.Context, chatID, messageID st
 		if !undone.CompareAndSwap(false, true) {
 			return
 		}
+		delCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		defer cancel()
 		delReq := larkim.NewDeleteMessageReactionReqBuilder().
 			MessageId(messageID).
 			ReactionId(reactionID).
 			Build()
-		_, _ = c.client.Im.V1.MessageReaction.Delete(context.Background(), delReq)
+		if _, err := c.client.Im.V1.MessageReaction.Delete(delCtx, delReq); err != nil {
+			logger.DebugCF("feishu", "Failed to undo reaction", map[string]any{
+				"message_id":  messageID,
+				"reaction_id": reactionID,
+				"error":       err.Error(),
+			})
+		}
 	}
 	return undo, nil
 }

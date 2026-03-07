@@ -58,7 +58,12 @@ func newSessionManagerWithGC(storage string, maxSessions int, ttl time.Duration)
 	}
 
 	if storage != "" {
-		os.MkdirAll(storage, 0o755)
+		if err := os.MkdirAll(storage, 0o755); err != nil {
+			logger.WarnCF("session", "Failed to create session storage directory", map[string]any{
+				"storage": storage,
+				"error":   err.Error(),
+			})
+		}
 		sm.loadSessions()
 	}
 
@@ -655,7 +660,12 @@ func (sm *SessionManager) loadSessions() error {
 				sess.LastEventID = strings.TrimSpace(meta.LastEventID)
 			}
 
-			_ = applyEvents(sess, sf.jsonl, sess.LastEventID)
+			if err := applyEvents(sess, sf.jsonl, sess.LastEventID); err != nil {
+				logger.WarnCF("session", "Failed to apply JSONL events", map[string]any{
+					"key":   sess.Key,
+					"error": err.Error(),
+				})
+			}
 			if sess.Created.IsZero() {
 				sess.Created = time.Now()
 			}
@@ -680,7 +690,12 @@ func (sm *SessionManager) loadSessions() error {
 
 			// Best-effort: migrate legacy snapshot into JSONL for future durability.
 			if sm.storage != "" {
-				_ = sm.migrateLegacyToJSONL(sess)
+				if err := sm.migrateLegacyToJSONL(sess); err != nil {
+					logger.WarnCF("session", "Legacy migration failed", map[string]any{
+						"key":   sess.Key,
+						"error": err.Error(),
+					})
+				}
 			}
 
 			sess.Key = utils.CanonicalSessionKey(sess.Key)
@@ -751,7 +766,13 @@ func (sm *SessionManager) migrateLegacyToJSONL(sess *Session) error {
 
 	// Write a meta snapshot for the console.
 	if path := sm.metaPath(key); path != "" {
-		_ = writeMetaFile(path, buildSessionMeta(sess))
+		if err := writeMetaFile(path, buildSessionMeta(sess)); err != nil {
+			logger.WarnCF("session", "Failed to persist migrated session meta", map[string]any{
+				"key":   key,
+				"path":  path,
+				"error": err.Error(),
+			})
+		}
 	}
 	return nil
 }

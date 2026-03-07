@@ -8,6 +8,7 @@ import (
 
 	coregateway "github.com/xwysyy/X-Claw/internal/gateway"
 	pkghttpapi "github.com/xwysyy/X-Claw/pkg/httpapi"
+	"github.com/xwysyy/X-Claw/pkg/logger"
 	"github.com/xwysyy/X-Claw/pkg/session"
 )
 
@@ -111,7 +112,10 @@ func registerGatewayHTTPAPI(svc *gatewayServices) error {
 	}
 	for _, reg := range regs {
 		if err := svc.channelManager.RegisterHTTPHandler(reg.pattern, reg.handler); err != nil {
-			fmt.Printf("⚠ Warning: failed to register %s: %v\n", reg.pattern, err)
+			logger.WarnCF("gateway", "Failed to register HTTP handler", map[string]any{
+				"pattern": reg.pattern,
+				"error":   err.Error(),
+			})
 		}
 	}
 	return nil

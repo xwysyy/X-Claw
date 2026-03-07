@@ -145,7 +145,9 @@ func Record(workspace string, ev Event) {
 	if w.maxBytes > 0 {
 		if st, err := os.Stat(w.path); err == nil && st != nil {
 			if st.Size()+int64(len(line)) > w.maxBytes {
-				_ = w.rotateLocked(now)
+				if err := w.rotateLocked(now); err != nil {
+					fmt.Fprintf(os.Stderr, "auditlog: rotate error: %v\n", err)
+				}
 			}
 		}
 	}
@@ -154,8 +156,12 @@ func Record(workspace string, ev Event) {
 	if err != nil {
 		return
 	}
-	_, _ = f.Write(line)
-	_ = f.Close()
+	if _, err := f.Write(line); err != nil {
+		fmt.Fprintf(os.Stderr, "auditlog: write error: %v\n", err)
+	}
+	if err := f.Close(); err != nil {
+		fmt.Fprintf(os.Stderr, "auditlog: close error: %v\n", err)
+	}
 }
 
 func VerifyHMACSignature(ev Event, key []byte) (bool, error) {

@@ -283,8 +283,7 @@ func (ms *MemoryStore) SearchRelevant(ctx context.Context, query string, topK in
 	return hits, nil
 }
 
-func (ms *MemoryStore) GetBySource(ctx context.Context, source string) (MemoryVectorHit, bool, error) {
-	_ = ctx
+func (ms *MemoryStore) GetBySource(_ context.Context, source string) (MemoryVectorHit, bool, error) {
 
 	src := strings.TrimSpace(source)
 	if src == "" {

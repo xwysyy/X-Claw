@@ -3,25 +3,14 @@ package config
 import (
 	"encoding/json"
 	"fmt"
-	"net"
 	"strings"
 
 	"github.com/xwysyy/X-Claw/pkg/fileutil"
+	"github.com/xwysyy/X-Claw/pkg/utils"
 )
 
 func isLoopbackHost(host string) bool {
-	host = strings.TrimSpace(host)
-	if host == "" {
-		return false
-	}
-	if strings.EqualFold(host, "localhost") {
-		return true
-	}
-	ip := net.ParseIP(host)
-	if ip == nil {
-		return false
-	}
-	return ip.IsLoopback()
+	return utils.IsLoopbackAddr(host)
 }
 
 func (c *Config) ValidateSecurity() error {

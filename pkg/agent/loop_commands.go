@@ -78,7 +78,6 @@ func (al *AgentLoop) handlePlanCommand(ctx context.Context, msg bus.InboundMessa
 			"error":       err.Error(),
 		})
 	}
-	_ = agent
 	return fmt.Sprintf("Plan mode enabled. Pending task captured:\n%s\n\nSend /approve (or /run) to execute, /cancel to discard.", pendingPreview), true
 }
 
@@ -344,7 +343,12 @@ func (al *AgentLoop) handleSwitchCommand(_ context.Context, _ bus.InboundMessage
 
 		normalized := strings.ToLower(strings.TrimSpace(value))
 		if normalized == "" || normalized == "default" || normalized == "clear" || normalized == "off" {
-			_, _ = agent.Sessions.ClearModelOverride(sessionKey)
+			if _, err := agent.Sessions.ClearModelOverride(sessionKey); err != nil {
+				logger.WarnCF("agent", "Failed to clear session model override", map[string]any{
+					"session_key": sessionKey,
+					"error":       err.Error(),
+				})
+			}
 			return "Cleared session model override (using default model).", true
 		}
 

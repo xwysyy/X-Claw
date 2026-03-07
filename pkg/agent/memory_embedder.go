@@ -256,8 +256,7 @@ func (e *hashedMemoryVectorEmbedder) Signature() string {
 	return fmt.Sprintf("hashed:dims=%d", e.dims)
 }
 
-func (e *hashedMemoryVectorEmbedder) Embed(ctx context.Context, inputs []string) ([][]float32, error) {
-	_ = ctx
+func (e *hashedMemoryVectorEmbedder) Embed(_ context.Context, inputs []string) ([][]float32, error) {
 	if len(inputs) == 0 {
 		return nil, nil
 	}
@@ -282,9 +281,7 @@ func (e *errorMemoryVectorEmbedder) Signature() string {
 	return "error:" + e.kind
 }
 
-func (e *errorMemoryVectorEmbedder) Embed(ctx context.Context, inputs []string) ([][]float32, error) {
-	_ = ctx
-	_ = inputs
+func (e *errorMemoryVectorEmbedder) Embed(_ context.Context, _ []string) ([][]float32, error) {
 	if e.err != nil {
 		return nil, e.err
 	}

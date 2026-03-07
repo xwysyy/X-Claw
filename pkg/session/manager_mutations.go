@@ -5,6 +5,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/xwysyy/X-Claw/pkg/logger"
 	"github.com/xwysyy/X-Claw/pkg/providers"
 )
 
@@ -176,6 +177,12 @@ func (sm *SessionManager) persistMetaLocked(key string, session *Session) {
 		return
 	}
 	if path := sm.metaPath(key); path != "" {
-		_ = writeMetaFile(path, buildSessionMeta(session))
+		if err := writeMetaFile(path, buildSessionMeta(session)); err != nil {
+			logger.WarnCF("session", "Failed to persist session meta", map[string]any{
+				"key":   key,
+				"path":  path,
+				"error": err.Error(),
+			})
+		}
 	}
 }

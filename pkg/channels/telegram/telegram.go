@@ -40,13 +40,14 @@ var (
 
 type TelegramChannel struct {
 	*channels.BaseChannel
-	bot      *telego.Bot
-	bh       *th.BotHandler
-	commands TelegramCommander
-	config   *config.Config
-	chatIDs  map[string]int64
-	ctx      context.Context
-	cancel   context.CancelFunc
+	bot       *telego.Bot
+	bh        *th.BotHandler
+	commands  TelegramCommander
+	config    *config.Config
+	mentionRe *regexp.Regexp
+	chatIDs   map[string]int64
+	ctx       context.Context
+	cancel    context.CancelFunc
 }
 
 func NewTelegramChannel(cfg *config.Config, bus *bus.MessageBus) (*TelegramChannel, error) {
@@ -105,8 +106,17 @@ func NewTelegramChannel(cfg *config.Config, bus *bus.MessageBus) (*TelegramChann
 		commands:    NewTelegramCommands(bot, cfg),
 		bot:         bot,
 		config:      cfg,
+		mentionRe:   buildMentionRegexp(bot.Username()),
 		chatIDs:     make(map[string]int64),
 	}, nil
+}
+
+func buildMentionRegexp(username string) *regexp.Regexp {
+	username = strings.TrimSpace(username)
+	if username == "" {
+		return nil
+	}
+	return regexp.MustCompile(`(?i)@` + regexp.QuoteMeta(username))
 }
 
 func (c *TelegramChannel) Start(ctx context.Context) error {
@@ -155,6 +165,7 @@ func (c *TelegramChannel) Start(ctx context.Context) error {
 	}, th.AnyMessage())
 
 	c.SetRunning(true)
+	c.mentionRe = buildMentionRegexp(c.bot.Username())
 	logger.InfoCF("telegram", "Telegram bot connected", map[string]any{
 		"username": c.bot.Username(),
 	})
@@ -778,8 +789,10 @@ func (c *TelegramChannel) stripBotMention(content string) string {
 	if botUsername == "" {
 		return content
 	}
-	// Case-insensitive replacement
-	re := regexp.MustCompile(`(?i)@` + regexp.QuoteMeta(botUsername))
+	re := c.mentionRe
+	if re == nil {
+		return strings.TrimSpace(content)
+	}
 	content = re.ReplaceAllString(content, "")
 	return strings.TrimSpace(content)
 }

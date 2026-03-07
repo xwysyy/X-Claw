@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/xwysyy/X-Claw/pkg/logger"
 	"github.com/xwysyy/X-Claw/pkg/utils"
 	"golang.org/x/sync/singleflight"
 	"html"
@@ -204,7 +205,9 @@ func (p *BraveSearchProvider) Search(ctx context.Context, query string, count in
 
 	if err := json.Unmarshal(body, &searchResp); err != nil {
 		// Log error body for debugging
-		fmt.Printf("Brave API Error Body: %s\n", string(body))
+		logger.DebugCF("tools/web_search", "Brave API error body", map[string]any{
+			"body": utils.Truncate(string(body), 500),
+		})
 		return SearchProviderResult{}, fmt.Errorf("failed to parse response: %w", err)
 	}
 

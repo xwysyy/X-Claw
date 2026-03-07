@@ -119,3 +119,52 @@ func TestInternalCoreDoesNotImportAppOrPkg(t *testing.T) {
 		t.Fatalf("architecture violation: internal/core imports non-core repo packages:\n%s", strings.Join(violations, "\n"))
 	}
 }
+
+func TestToolsDoesNotImportChannels(t *testing.T) {
+	root := findRepoRoot(t)
+	toolsDir := filepath.Join(root, "pkg", "tools")
+	importsByFile := scanImports(t, toolsDir)
+	banned := map[string]bool{
+		"github.com/xwysyy/X-Claw/pkg/channels": true,
+	}
+
+	var violations []string
+	for file, imports := range importsByFile {
+		for _, imp := range imports {
+			if banned[imp] || strings.HasPrefix(imp, "github.com/xwysyy/X-Claw/pkg/channels/") {
+				rel, _ := filepath.Rel(root, file)
+				violations = append(violations, rel+": "+imp)
+			}
+		}
+	}
+
+	if len(violations) > 0 {
+		t.Fatalf("architecture violation: pkg/tools imports channels:\n%s", strings.Join(violations, "\n"))
+	}
+}
+
+func TestConfigDoesNotImportAgentOrSession(t *testing.T) {
+	root := findRepoRoot(t)
+	configDir := filepath.Join(root, "pkg", "config")
+	importsByFile := scanImports(t, configDir)
+	banned := []string{
+		"github.com/xwysyy/X-Claw/pkg/agent",
+		"github.com/xwysyy/X-Claw/pkg/session",
+	}
+
+	var violations []string
+	for file, imports := range importsByFile {
+		for _, imp := range imports {
+			for _, bannedPath := range banned {
+				if imp == bannedPath || strings.HasPrefix(imp, bannedPath+"/") {
+					rel, _ := filepath.Rel(root, file)
+					violations = append(violations, rel+": "+imp)
+				}
+			}
+		}
+	}
+
+	if len(violations) > 0 {
+		t.Fatalf("architecture violation: pkg/config imports agent/session:\n%s", strings.Join(violations, "\n"))
+	}
+}

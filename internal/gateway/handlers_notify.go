@@ -2,11 +2,14 @@ package gateway
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
-	"net"
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/xwysyy/X-Claw/pkg/logger"
+	"github.com/xwysyy/X-Claw/pkg/utils"
 )
 
 type MessageSender interface {
@@ -143,8 +146,17 @@ func (h *NotifyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	sendCtx, cancel := context.WithTimeout(r.Context(), h.sendTimeout)
 	defer cancel()
 	if err := h.sender.SendToChannel(sendCtx, channel, to, content); err != nil {
+		logger.WarnCF("gateway.notify", "Send failed", map[string]any{
+			"channel": channel,
+			"to":      to,
+			"error":   err.Error(),
+		})
 		w.WriteHeader(http.StatusInternalServerError)
-		_ = json.NewEncoder(w).Encode(notifyResponse{OK: false, Channel: channel, To: to, Error: err.Error()})
+		errMsg := "send failed"
+		if isLoopbackRemote(r.RemoteAddr) {
+			errMsg = err.Error()
+		}
+		_ = json.NewEncoder(w).Encode(notifyResponse{OK: false, Channel: channel, To: to, Error: errMsg})
 		return
 	}
 
@@ -157,28 +169,17 @@ func authorizeAPIKeyOrLoopback(apiKey string, r *http.Request) bool {
 	if apiKey == "" {
 		return isLoopbackRemote(r.RemoteAddr)
 	}
-	if strings.TrimSpace(r.Header.Get("X-API-Key")) == apiKey {
+	if subtle.ConstantTimeCompare([]byte(strings.TrimSpace(r.Header.Get("X-API-Key"))), []byte(apiKey)) == 1 {
 		return true
 	}
 	auth := strings.TrimSpace(r.Header.Get("Authorization"))
 	if len(auth) > 7 && strings.EqualFold(auth[:7], "bearer ") {
 		token := strings.TrimSpace(auth[7:])
-		return token != "" && token == apiKey
+		return token != "" && subtle.ConstantTimeCompare([]byte(token), []byte(apiKey)) == 1
 	}
 	return false
 }
 
 func isLoopbackRemote(remoteAddr string) bool {
-	host := strings.TrimSpace(remoteAddr)
-	if host == "" {
-		return false
-	}
-	if h, _, err := net.SplitHostPort(host); err == nil {
-		host = h
-	}
-	ip := net.ParseIP(host)
-	if ip == nil {
-		return false
-	}
-	return ip.IsLoopback()
+	return utils.IsLoopbackAddr(remoteAddr)
 }

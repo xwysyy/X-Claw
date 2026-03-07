@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/xwysyy/X-Claw/pkg/logger"
 )
 
 type ResumeLastTaskHandlerOptions struct {
@@ -92,8 +94,15 @@ func (h *ResumeLastTaskHandler) ServeHTTP(w http.ResponseWriter, r *http.Request
 	select {
 	case res := <-done:
 		if res.err != nil {
+			logger.WarnCF("gateway.resume", "Resume failed", map[string]any{
+				"error": res.err.Error(),
+			})
 			w.WriteHeader(http.StatusInternalServerError)
-			_ = json.NewEncoder(w).Encode(resumeLastTaskResponse{OK: false, Error: res.err.Error(), Candidate: res.candidate})
+			errMsg := "resume failed"
+			if isLoopbackRemote(r.RemoteAddr) {
+				errMsg = res.err.Error()
+			}
+			_ = json.NewEncoder(w).Encode(resumeLastTaskResponse{OK: false, Error: errMsg, Candidate: res.candidate})
 			return
 		}
 		w.WriteHeader(http.StatusOK)

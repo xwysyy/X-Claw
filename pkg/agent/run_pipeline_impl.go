@@ -54,7 +54,6 @@ func (al *AgentLoop) processMessageImpl(ctx context.Context, msg bus.InboundMess
 	if err != nil {
 		return "", err
 	}
-	al.ensureActiveAgentForSession(sessionKey, agent)
 	resetMessageToolState(agent)
 
 	if response, handled := al.handleCommand(ctx, msg, agent, sessionKey); handled {
@@ -121,8 +120,6 @@ func (al *AgentLoop) processSystemMessageImpl(
 	if err != nil {
 		return "", err
 	}
-	al.ensureActiveAgentForSession(sessionKey, agent)
-
 	return al.runAgentLoop(ctx, agent, processOptions{
 		SessionKey:      sessionKey,
 		Channel:         originChannel,
@@ -252,11 +249,6 @@ func (al *AgentLoop) resolveAgentForSession(
 		return nil, fmt.Errorf("no agent available for route (agent_id=%s)", route.AgentID)
 	}
 	return agent, nil
-}
-
-func (al *AgentLoop) ensureActiveAgentForSession(sessionKey string, agent *AgentInstance) {
-	_ = sessionKey
-	_ = agent
 }
 
 func resetMessageToolState(agent *AgentInstance) {

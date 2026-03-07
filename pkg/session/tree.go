@@ -9,6 +9,7 @@ import (
 	"github.com/xwysyy/X-Claw/pkg/utils"
 
 	coresession "github.com/xwysyy/X-Claw/internal/core/session"
+	"github.com/xwysyy/X-Claw/pkg/logger"
 	"github.com/xwysyy/X-Claw/pkg/providers"
 )
 
@@ -166,7 +167,13 @@ func (sm *SessionManager) SwitchLeaf(key, leafID string) (fromLeaf string, toLea
 
 	if sm.storage != "" {
 		if path := sm.metaPath(key); path != "" {
-			_ = writeMetaFile(path, buildSessionMeta(sess))
+			if err := writeMetaFile(path, buildSessionMeta(sess)); err != nil {
+				logger.WarnCF("session", "Failed to persist session tree meta", map[string]any{
+					"key":   key,
+					"path":  path,
+					"error": err.Error(),
+				})
+			}
 		}
 	}
 

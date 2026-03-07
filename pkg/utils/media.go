@@ -14,6 +14,8 @@ import (
 	"github.com/xwysyy/X-Claw/pkg/logger"
 )
 
+var defaultDownloadClient = &http.Client{Timeout: 60 * time.Second}
+
 // IsAudioFile checks if a file is an audio file based on its filename extension and content type.
 func IsAudioFile(filename, contentType string) bool {
 	audioExtensions := []string{".mp3", ".wav", ".ogg", ".m4a", ".flac", ".aac", ".wma"}
@@ -93,7 +95,10 @@ func DownloadFile(urlStr, filename string, opts DownloadOptions) string {
 		req.Header.Set(key, value)
 	}
 
-	client := &http.Client{Timeout: opts.Timeout}
+	client := defaultDownloadClient
+	if opts.Timeout != defaultDownloadClient.Timeout || opts.ProxyURL != "" {
+		client = &http.Client{Timeout: opts.Timeout}
+	}
 	if opts.ProxyURL != "" {
 		proxyURL, parseErr := url.Parse(opts.ProxyURL)
 		if parseErr != nil {

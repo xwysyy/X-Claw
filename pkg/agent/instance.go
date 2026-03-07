@@ -2,7 +2,6 @@ package agent
 
 import (
 	"context"
-	"fmt"
 	"log"
 	"os"
 	"path/filepath"
@@ -72,7 +71,12 @@ func NewAgentInstance(
 	provider providers.LLMProvider,
 ) *AgentInstance {
 	workspace := resolveAgentWorkspace(agentCfg, defaults)
-	os.MkdirAll(workspace, 0o755)
+	if err := os.MkdirAll(workspace, 0o755); err != nil {
+		logger.WarnCF("agent", "Failed to create agent workspace", map[string]any{
+			"workspace": workspace,
+			"error":     err.Error(),
+		})
+	}
 
 	model := resolveAgentModel(agentCfg, defaults)
 	fallbacks := resolveAgentFallbacks(agentCfg, defaults)
@@ -301,7 +305,10 @@ func compilePatterns(patterns []string) []*regexp.Regexp {
 	for _, p := range patterns {
 		re, err := regexp.Compile(p)
 		if err != nil {
-			fmt.Printf("Warning: invalid path pattern %q: %v\n", p, err)
+			logger.WarnCF("agent", "Invalid path pattern", map[string]any{
+				"pattern": p,
+				"error":   err.Error(),
+			})
 			continue
 		}
 		compiled = append(compiled, re)

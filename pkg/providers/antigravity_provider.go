@@ -22,7 +22,10 @@ const (
 	antigravityUserAgent    = "antigravity"
 	antigravityXGoogClient  = "google-cloud-sdk vscode_cloudshelleditor/0.1"
 	antigravityVersion      = "1.15.8"
+	antigravityFetchTimeout = 15 * time.Second
 )
+
+var antigravityFetchClient = &http.Client{Timeout: antigravityFetchTimeout}
 
 // AntigravityProvider implements LLMProvider using Google's Cloud Code Assist (Antigravity) API.
 // This provider authenticates via Google OAuth and provides access to models like Claude and Gemini
@@ -633,14 +636,16 @@ func FetchAntigravityProjectID(accessToken string) (string, error) {
 	req.Header.Set("User-Agent", antigravityUserAgent)
 	req.Header.Set("X-Goog-Api-Client", antigravityXGoogClient)
 
-	client := &http.Client{Timeout: 15 * time.Second}
-	resp, err := client.Do(req)
+	resp, err := antigravityFetchClient.Do(req)
 	if err != nil {
 		return "", err
 	}
 	defer resp.Body.Close()
 
-	body, _ := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("read response body: %w", err)
+	}
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("loadCodeAssist failed: %s", string(body))
 	}
@@ -674,14 +679,16 @@ func FetchAntigravityModels(accessToken, projectID string) ([]AntigravityModelIn
 	req.Header.Set("User-Agent", antigravityUserAgent)
 	req.Header.Set("X-Goog-Api-Client", antigravityXGoogClient)
 
-	client := &http.Client{Timeout: 15 * time.Second}
-	resp, err := client.Do(req)
+	resp, err := antigravityFetchClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
 
-	body, _ := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read response body: %w", err)
+	}
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf(
 			"fetchAvailableModels failed (HTTP %d): %s",

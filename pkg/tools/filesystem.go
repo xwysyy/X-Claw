@@ -1043,8 +1043,7 @@ func extractPDFPlainText(ctx context.Context, path string, maxChars int) (string
 	}
 }
 
-func extractDOCXPlainText(ctx context.Context, path string, maxChars int) (string, bool, error) {
-	_ = ctx
+func extractDOCXPlainText(_ context.Context, path string, maxChars int) (string, bool, error) {
 
 	const maxXMLBytes = 12 * 1024 * 1024 // 12MB cap for document.xml
 

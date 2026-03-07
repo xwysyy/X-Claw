@@ -117,7 +117,12 @@ func (al *AgentLoop) forceCompression(agent *AgentInstance, sessionKey string) {
 
 	// Update session
 	agent.Sessions.SetHistory(sessionKey, newHistory)
-	agent.Sessions.Save(sessionKey)
+	if err := agent.Sessions.Save(sessionKey); err != nil {
+		logger.WarnCF("agent.compaction", "Failed to save session after forced compression", map[string]any{
+			"session_key": sessionKey,
+			"error":       err.Error(),
+		})
+	}
 
 	logger.WarnCF("agent", "Forced compression executed", map[string]any{
 		"session_key":  sessionKey,
@@ -169,8 +174,20 @@ func (al *AgentLoop) summarizeSession(agent *AgentInstance, sessionKey string) {
 		part1 := validMessages[:mid]
 		part2 := validMessages[mid:]
 
-		s1, _ := al.summarizeBatch(ctx, agent, part1, "")
-		s2, _ := al.summarizeBatch(ctx, agent, part2, "")
+		s1, err1 := al.summarizeBatch(ctx, agent, part1, "")
+		if err1 != nil {
+			logger.WarnCF("agent.compaction", "Summarize first batch failed", map[string]any{
+				"session_key": sessionKey,
+				"error":       err1.Error(),
+			})
+		}
+		s2, err2 := al.summarizeBatch(ctx, agent, part2, "")
+		if err2 != nil {
+			logger.WarnCF("agent.compaction", "Summarize second batch failed", map[string]any{
+				"session_key": sessionKey,
+				"error":       err2.Error(),
+			})
+		}
 
 		mergePrompt := fmt.Sprintf(
 			"Merge these two conversation summaries into one cohesive summary:\n\n1: %s\n\n2: %s",
@@ -194,7 +211,14 @@ func (al *AgentLoop) summarizeSession(agent *AgentInstance, sessionKey string) {
 			finalSummary = s1 + " " + s2
 		}
 	} else {
-		finalSummary, _ = al.summarizeBatch(ctx, agent, validMessages, summary)
+		var batchErr error
+		finalSummary, batchErr = al.summarizeBatch(ctx, agent, validMessages, summary)
+		if batchErr != nil {
+			logger.WarnCF("agent.compaction", "Summarize batch failed", map[string]any{
+				"session_key": sessionKey,
+				"error":       batchErr.Error(),
+			})
+		}
 	}
 
 	if omitted && finalSummary != "" {
@@ -204,7 +228,12 @@ func (al *AgentLoop) summarizeSession(agent *AgentInstance, sessionKey string) {
 	if finalSummary != "" {
 		agent.Sessions.SetSummary(sessionKey, finalSummary)
 		agent.Sessions.TruncateHistory(sessionKey, 4)
-		agent.Sessions.Save(sessionKey)
+		if err := agent.Sessions.Save(sessionKey); err != nil {
+			logger.WarnCF("agent.compaction", "Failed to save session after summarization", map[string]any{
+				"session_key": sessionKey,
+				"error":       err.Error(),
+			})
+		}
 	}
 }
 
@@ -328,7 +357,12 @@ func (al *AgentLoop) maybeFlushMemoryBeforeCompaction(
 	}
 
 	agent.Sessions.MarkMemoryFlush(sessionKey, compactionCount)
-	_ = agent.Sessions.Save(sessionKey)
+	if err := agent.Sessions.Save(sessionKey); err != nil {
+		logger.WarnCF("agent.compaction", "Failed to save session after memory flush mark", map[string]any{
+			"session_key": sessionKey,
+			"error":       err.Error(),
+		})
+	}
 	return true, nil
 }
 
@@ -410,7 +444,12 @@ func (al *AgentLoop) compactWithSafeguard(
 		afterSummary := strings.TrimSpace(agent.Sessions.GetSummary(sessionKey))
 		if afterHistory < beforeHistory || afterSummary != beforeSummary {
 			agent.Sessions.IncrementCompactionCount(sessionKey)
-			_ = agent.Sessions.Save(sessionKey)
+			if err := agent.Sessions.Save(sessionKey); err != nil {
+				logger.WarnCF("agent.compaction", "Failed to save session after legacy compaction", map[string]any{
+					"session_key": sessionKey,
+					"error":       err.Error(),
+				})
+			}
 			return true, nil
 		}
 		return false, nil
@@ -470,7 +509,12 @@ func (al *AgentLoop) compactWithSafeguard(
 	agent.Sessions.SetSummary(sessionKey, summary)
 	agent.Sessions.SetHistory(sessionKey, kept)
 	agent.Sessions.IncrementCompactionCount(sessionKey)
-	_ = agent.Sessions.Save(sessionKey)
+	if err := agent.Sessions.Save(sessionKey); err != nil {
+		logger.WarnCF("agent.compaction", "Failed to save session after safeguard compaction", map[string]any{
+			"session_key": sessionKey,
+			"error":       err.Error(),
+		})
+	}
 
 	logger.InfoCF("agent", "Compaction safeguard completed", map[string]any{
 		"session_key":           sessionKey,
