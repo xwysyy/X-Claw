@@ -2,9 +2,9 @@ package gateway
 
 import (
 	"github.com/spf13/cobra"
-
-	"github.com/xwysyy/X-Claw/internal/app"
 )
+
+var gatewayCommandRunner = gatewayCmd
 
 func NewGatewayCommand() *cobra.Command {
 	var debug bool
@@ -15,7 +15,7 @@ func NewGatewayCommand() *cobra.Command {
 		Short:   "Start X-Claw gateway",
 		Args:    cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
-			return app.RunGateway(debug)
+			return gatewayCommandRunner(debug)
 		},
 	}
 
