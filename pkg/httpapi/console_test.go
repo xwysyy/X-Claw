@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -8,6 +9,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/xwysyy/X-Claw/pkg/session"
 )
 
 func TestConsoleHandler_LoopbackOnlyWhenNoAPIKey(t *testing.T) {
@@ -261,5 +265,259 @@ func TestConsoleHandler_Tail(t *testing.T) {
 	}
 	if len(payload.Lines) != 1 || strings.TrimSpace(payload.Lines[0]) != "{\"n\":2}" {
 		t.Fatalf("unexpected tail lines: %#v", payload.Lines)
+	}
+}
+
+type recordSender struct {
+	calls       int
+	lastChannel string
+	lastTo      string
+	lastContent string
+	err         error
+}
+
+func (s *recordSender) SendToChannel(_ context.Context, channelName, chatID, content string) error {
+	s.calls++
+	s.lastChannel = channelName
+	s.lastTo = chatID
+	s.lastContent = content
+	return s.err
+}
+
+func TestNotifyHandler_MethodNotAllowed(t *testing.T) {
+	h := NewNotifyHandler(NotifyHandlerOptions{Sender: &recordSender{}})
+	req := httptest.NewRequest(http.MethodGet, "http://example.com/api/notify", nil)
+	req.RemoteAddr = "127.0.0.1:1234"
+	rr := httptest.NewRecorder()
+
+	h.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("expected 405, got %d", rr.Code)
+	}
+}
+
+func TestNotifyHandler_LoopbackOnlyWhenNoAPIKey(t *testing.T) {
+	h := NewNotifyHandler(NotifyHandlerOptions{
+		Sender: &recordSender{},
+		LastActive: func() (string, string) {
+			return "feishu", "oc_test"
+		},
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "http://example.com/api/notify", strings.NewReader(`{"content":"hi"}`))
+	req.RemoteAddr = "203.0.113.10:1234"
+	rr := httptest.NewRecorder()
+
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", rr.Code)
+	}
+}
+
+func TestNotifyHandler_APIKeyRequiredWhenConfigured(t *testing.T) {
+	h := NewNotifyHandler(NotifyHandlerOptions{
+		Sender: &recordSender{},
+		APIKey: "secret",
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "http://example.com/api/notify", strings.NewReader(`{"content":"hi"}`))
+	req.RemoteAddr = "127.0.0.1:1234"
+	rr := httptest.NewRecorder()
+
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", rr.Code)
+	}
+}
+
+func TestNotifyHandler_UsesLastActiveWhenOmitted(t *testing.T) {
+	sender := &recordSender{}
+	h := NewNotifyHandler(NotifyHandlerOptions{
+		Sender: sender,
+		LastActive: func() (string, string) {
+			return "feishu", "oc_test"
+		},
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "http://example.com/api/notify", strings.NewReader(`{"content":"done"}`))
+	req.RemoteAddr = "127.0.0.1:1234"
+	rr := httptest.NewRecorder()
+
+	h.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rr.Code)
+	}
+	if sender.calls != 1 {
+		t.Fatalf("expected 1 send call, got %d", sender.calls)
+	}
+	if sender.lastChannel != "feishu" || sender.lastTo != "oc_test" || sender.lastContent != "done" {
+		t.Fatalf("unexpected send args: %q %q %q", sender.lastChannel, sender.lastTo, sender.lastContent)
+	}
+}
+
+func TestNotifyHandler_ChannelProvidedToFromLastActiveSameChannel(t *testing.T) {
+	sender := &recordSender{}
+	h := NewNotifyHandler(NotifyHandlerOptions{
+		Sender: sender,
+		LastActive: func() (string, string) {
+			return "feishu", "oc_last"
+		},
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "http://example.com/api/notify", strings.NewReader(`{"channel":"feishu","content":"ok"}`))
+	req.RemoteAddr = "127.0.0.1:1234"
+	rr := httptest.NewRecorder()
+
+	h.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rr.Code)
+	}
+	if sender.lastTo != "oc_last" {
+		t.Fatalf("expected last active to be used, got %q", sender.lastTo)
+	}
+}
+
+func TestNotifyHandler_ChannelProvidedToMissingDifferentLastActiveChannel(t *testing.T) {
+	h := NewNotifyHandler(NotifyHandlerOptions{
+		Sender: &recordSender{},
+		LastActive: func() (string, string) {
+			return "telegram", "123"
+		},
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "http://example.com/api/notify", strings.NewReader(`{"channel":"feishu","content":"ok"}`))
+	req.RemoteAddr = "127.0.0.1:1234"
+	rr := httptest.NewRecorder()
+
+	h.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", rr.Code)
+	}
+	var resp notifyResponse
+	_ = json.NewDecoder(rr.Body).Decode(&resp)
+	if resp.OK {
+		t.Fatalf("expected ok=false, got ok=true")
+	}
+}
+
+func TestResumeLastTaskHandler_Timeout(t *testing.T) {
+	h := NewResumeLastTaskHandler(ResumeLastTaskHandlerOptions{
+		Timeout: 20 * time.Millisecond,
+		Resume: func(_ctx context.Context) (any, string, error) {
+			time.Sleep(50 * time.Millisecond)
+			return nil, "", nil
+		},
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "http://example.com/api/resume_last_task", strings.NewReader(`{}`))
+	req.RemoteAddr = "127.0.0.1:1234"
+	rr := httptest.NewRecorder()
+
+	h.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusGatewayTimeout {
+		t.Fatalf("expected 504, got %d", rr.Code)
+	}
+	var resp resumeLastTaskResponse
+	_ = json.NewDecoder(rr.Body).Decode(&resp)
+	if resp.OK {
+		t.Fatalf("expected ok=false, got ok=true")
+	}
+	if resp.Error != "resume timeout" {
+		t.Fatalf("expected error=%q, got %q", "resume timeout", resp.Error)
+	}
+}
+
+func TestSessionModelHandler_SetGetClear(t *testing.T) {
+	sm := session.NewSessionManager("")
+	h := NewSessionModelHandler(SessionModelHandlerOptions{
+		APIKey:   "k",
+		Sessions: sm,
+		Enabled:  true,
+	})
+
+	// Unauthenticated request should be rejected.
+	{
+		req := httptest.NewRequest(http.MethodPost, "http://example.com/api/session_model", strings.NewReader(`{}`))
+		req.RemoteAddr = "127.0.0.1:1234"
+		rr := httptest.NewRecorder()
+
+		h.ServeHTTP(rr, req)
+		if rr.Code != http.StatusUnauthorized {
+			t.Fatalf("expected 401, got %d", rr.Code)
+		}
+	}
+
+	// Set override.
+	{
+		req := httptest.NewRequest(http.MethodPost, "http://example.com/api/session_model", strings.NewReader(`{"session_key":"s1","model":"m1","ttl_minutes":5}`))
+		req.RemoteAddr = "127.0.0.1:1234"
+		req.Header.Set("X-API-Key", "k")
+		rr := httptest.NewRecorder()
+
+		h.ServeHTTP(rr, req)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d", rr.Code)
+		}
+		var resp sessionModelResponse
+		_ = json.NewDecoder(rr.Body).Decode(&resp)
+		if !resp.OK {
+			t.Fatalf("expected ok=true, got ok=false (err=%q)", resp.Error)
+		}
+		if resp.SessionKey != "s1" {
+			t.Fatalf("expected session_key=%q, got %q", "s1", resp.SessionKey)
+		}
+		if !resp.HasOverride || resp.Model != "m1" {
+			t.Fatalf("expected override model=%q, got has=%v model=%q", "m1", resp.HasOverride, resp.Model)
+		}
+		if resp.ExpiresAt == "" || resp.ExpiresAtMS == nil || *resp.ExpiresAtMS <= 0 {
+			t.Fatalf("expected expires_at populated, got expires_at=%q expires_at_ms=%v", resp.ExpiresAt, resp.ExpiresAtMS)
+		}
+	}
+
+	// Get override.
+	{
+		req := httptest.NewRequest(http.MethodGet, "http://example.com/api/session_model?session_key=s1", nil)
+		req.RemoteAddr = "127.0.0.1:1234"
+		req.Header.Set("X-API-Key", "k")
+		rr := httptest.NewRecorder()
+
+		h.ServeHTTP(rr, req)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d", rr.Code)
+		}
+		var resp sessionModelResponse
+		_ = json.NewDecoder(rr.Body).Decode(&resp)
+		if !resp.OK {
+			t.Fatalf("expected ok=true, got ok=false (err=%q)", resp.Error)
+		}
+		if !resp.HasOverride || resp.Model != "m1" {
+			t.Fatalf("expected override model=%q, got has=%v model=%q", "m1", resp.HasOverride, resp.Model)
+		}
+	}
+
+	// Clear override.
+	{
+		req := httptest.NewRequest(http.MethodPost, "http://example.com/api/session_model", strings.NewReader(`{"session_key":"s1","model":"clear"}`))
+		req.RemoteAddr = "127.0.0.1:1234"
+		req.Header.Set("X-API-Key", "k")
+		rr := httptest.NewRecorder()
+
+		h.ServeHTTP(rr, req)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d", rr.Code)
+		}
+		var resp sessionModelResponse
+		_ = json.NewDecoder(rr.Body).Decode(&resp)
+		if !resp.OK {
+			t.Fatalf("expected ok=true, got ok=false (err=%q)", resp.Error)
+		}
+		if resp.HasOverride || resp.Model != "" {
+			t.Fatalf("expected override cleared, got has=%v model=%q", resp.HasOverride, resp.Model)
+		}
 	}
 }

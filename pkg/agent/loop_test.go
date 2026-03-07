@@ -2,11 +2,15 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"slices"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -15,6 +19,7 @@ import (
 	"github.com/xwysyy/X-Claw/pkg/config"
 	"github.com/xwysyy/X-Claw/pkg/media"
 	"github.com/xwysyy/X-Claw/pkg/providers"
+	"github.com/xwysyy/X-Claw/pkg/routing"
 	"github.com/xwysyy/X-Claw/pkg/tools"
 )
 
@@ -898,5 +903,720 @@ func TestResolveMediaRefs_UsesMetaContentType(t *testing.T) {
 	}
 	if !strings.HasPrefix(result[0].Media[0], "data:image/jpeg;base64,") {
 		t.Fatalf("expected jpeg prefix, got %q", result[0].Media[0][:30])
+	}
+}
+
+func TestResolveAgentForSession_IgnoresSessionActiveAgentInSlimRuntime(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Agents.List = []config.AgentConfig{
+		{ID: "main", Default: true, Name: "Main"},
+		{ID: "worker", Name: "Worker"},
+	}
+
+	registry := NewAgentRegistry(cfg, nil)
+	loop := &AgentLoop{registry: registry}
+	agent, err := loop.resolveAgentForSession("conv:direct:user-1", routing.ResolvedRoute{AgentID: "main"})
+	if err != nil {
+		t.Fatalf("resolveAgentForSession error: %v", err)
+	}
+	if agent == nil {
+		t.Fatal("expected agent")
+	}
+	if agent.ID != "main" {
+		t.Fatalf("agent.ID = %q, want %q", agent.ID, "main")
+	}
+}
+
+func TestParseThinkingLevel(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  ThinkingLevel
+	}{
+		{"off", "off", ThinkingOff},
+		{"empty", "", ThinkingOff},
+		{"low", "low", ThinkingLow},
+		{"medium", "medium", ThinkingMedium},
+		{"high", "high", ThinkingHigh},
+		{"xhigh", "xhigh", ThinkingXHigh},
+		{"adaptive", "adaptive", ThinkingAdaptive},
+		{"unknown", "unknown", ThinkingOff},
+		// Case-insensitive and whitespace-tolerant
+		{"upper_Medium", "Medium", ThinkingMedium},
+		{"upper_HIGH", "HIGH", ThinkingHigh},
+		{"mixed_Adaptive", "Adaptive", ThinkingAdaptive},
+		{"leading_space", " high", ThinkingHigh},
+		{"trailing_space", "low ", ThinkingLow},
+		{"both_spaces", " medium ", ThinkingMedium},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := parseThinkingLevel(tt.input); got != tt.want {
+				t.Errorf("parseThinkingLevel(%q) = %q, want %q", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestFindLastUnfinishedRun_OnlyHeartbeatIsIgnored(t *testing.T) {
+	workspace := t.TempDir()
+
+	heartbeatDir := filepath.Join(workspace, ".x-claw", "audit", "runs", "heartbeat")
+	if err := os.MkdirAll(heartbeatDir, 0o755); err != nil {
+		t.Fatalf("mkdir heartbeat dir: %v", err)
+	}
+	// Heartbeat run: unfinished, but should be ignored by resume discovery.
+	if err := os.WriteFile(filepath.Join(heartbeatDir, "events.jsonl"), []byte(
+		`{"type":"run.start","ts_ms":3000,"run_id":"hb-1","session_key":"heartbeat","channel":"feishu","chat_id":"oc_hb"}`+"\n",
+	), 0o600); err != nil {
+		t.Fatalf("write heartbeat events: %v", err)
+	}
+
+	cand, err := findLastUnfinishedRun(workspace)
+	if err == nil {
+		t.Fatalf("expected error, got candidate: %+v", cand)
+	}
+}
+
+func TestFindLastUnfinishedRun_PrefersNonHeartbeatEvenIfNewer(t *testing.T) {
+	workspace := t.TempDir()
+
+	// Heartbeat run (newer ts_ms): should still be ignored.
+	heartbeatDir := filepath.Join(workspace, ".x-claw", "audit", "runs", "heartbeat")
+	if err := os.MkdirAll(heartbeatDir, 0o755); err != nil {
+		t.Fatalf("mkdir heartbeat dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(heartbeatDir, "events.jsonl"), []byte(
+		`{"type":"run.start","ts_ms":9000,"run_id":"hb-2","session_key":"heartbeat","channel":"feishu","chat_id":"oc_hb"}`+"\n",
+	), 0o600); err != nil {
+		t.Fatalf("write heartbeat events: %v", err)
+	}
+
+	// Real user-ish session run.
+	userDir := filepath.Join(workspace, ".x-claw", "audit", "runs", "agent_main_main")
+	if err := os.MkdirAll(userDir, 0o755); err != nil {
+		t.Fatalf("mkdir user dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(userDir, "events.jsonl"), []byte(
+		`{"type":"run.start","ts_ms":2000,"run_id":"run-1","session_key":"agent:main:main","channel":"feishu","chat_id":"oc_user","sender_id":"u1"}`+"\n",
+	), 0o600); err != nil {
+		t.Fatalf("write user events: %v", err)
+	}
+
+	cand, err := findLastUnfinishedRun(workspace)
+	if err != nil {
+		t.Fatalf("expected candidate, got error: %v", err)
+	}
+	if cand.RunID != "run-1" {
+		t.Fatalf("expected run_id=run-1, got %q", cand.RunID)
+	}
+	if cand.SessionKey != "agent:main:main" {
+		t.Fatalf("expected session_key=agent:main:main, got %q", cand.SessionKey)
+	}
+	if cand.Channel != "feishu" || cand.ChatID != "oc_user" {
+		t.Fatalf("unexpected route: channel=%q chat_id=%q", cand.Channel, cand.ChatID)
+	}
+}
+
+func TestResumeLastTaskPrompt_SlimPrompt(t *testing.T) {
+	prompt := resumeLastTaskPrompt()
+	if strings.Contains(strings.ToLower(prompt), "tool_confirm") {
+		t.Fatalf("expected resume prompt to drop tool_confirm guidance, got: %s", prompt)
+	}
+	if !strings.Contains(prompt, "Continue the unfinished task") {
+		t.Fatalf("unexpected resume prompt: %s", prompt)
+	}
+}
+
+func TestTokenUsageStoreRecord_IgnoresEmptyUsage(t *testing.T) {
+	workspace := t.TempDir()
+	store := newTokenUsageStore(workspace)
+	if store == nil {
+		t.Fatalf("expected store")
+	}
+
+	store.Record("gpt-x", &providers.UsageInfo{})
+
+	if _, err := os.Stat(filepath.Join(workspace, "state", "token_usage.json")); err == nil {
+		t.Fatalf("expected token_usage.json not to be created for empty usage")
+	} else if !os.IsNotExist(err) {
+		t.Fatalf("stat token_usage.json: %v", err)
+	}
+}
+
+func TestTokenUsageStoreRecord_ComputesTotalWhenMissing(t *testing.T) {
+	workspace := t.TempDir()
+	store := newTokenUsageStore(workspace)
+	if store == nil {
+		t.Fatalf("expected store")
+	}
+
+	store.Record("m1", &providers.UsageInfo{
+		PromptTokens:     10,
+		CompletionTokens: 5,
+		TotalTokens:      0,
+	})
+
+	data, err := os.ReadFile(filepath.Join(workspace, "state", "token_usage.json"))
+	if err != nil {
+		t.Fatalf("read token_usage.json: %v", err)
+	}
+
+	var snap tokenUsageSnapshot
+	if err := json.Unmarshal(data, &snap); err != nil {
+		t.Fatalf("unmarshal snapshot: %v", err)
+	}
+
+	if got, want := snap.Totals.TotalTokens, int64(15); got != want {
+		t.Fatalf("totals.total_tokens = %d, want %d", got, want)
+	}
+	if got, want := snap.ByModel["m1"].TotalTokens, int64(15); got != want {
+		t.Fatalf("by_model[m1].total_tokens = %d, want %d", got, want)
+	}
+}
+
+func TestTokenUsageStoreRecord_AccumulatesByModelAndTotals(t *testing.T) {
+	workspace := t.TempDir()
+	store := newTokenUsageStore(workspace)
+	if store == nil {
+		t.Fatalf("expected store")
+	}
+
+	store.Record("m1", &providers.UsageInfo{PromptTokens: 2, CompletionTokens: 3, TotalTokens: 5})
+	store.Record("m2", &providers.UsageInfo{PromptTokens: 7, CompletionTokens: 11, TotalTokens: 18})
+	store.Record("m1", &providers.UsageInfo{PromptTokens: 1, CompletionTokens: 1, TotalTokens: 2})
+
+	data, err := os.ReadFile(filepath.Join(workspace, "state", "token_usage.json"))
+	if err != nil {
+		t.Fatalf("read token_usage.json: %v", err)
+	}
+
+	var snap tokenUsageSnapshot
+	if err := json.Unmarshal(data, &snap); err != nil {
+		t.Fatalf("unmarshal snapshot: %v", err)
+	}
+
+	if got, want := snap.Totals.Requests, int64(3); got != want {
+		t.Fatalf("totals.requests = %d, want %d", got, want)
+	}
+	if got, want := snap.Totals.PromptTokens, int64(10); got != want {
+		t.Fatalf("totals.prompt_tokens = %d, want %d", got, want)
+	}
+	if got, want := snap.Totals.CompletionTokens, int64(15); got != want {
+		t.Fatalf("totals.completion_tokens = %d, want %d", got, want)
+	}
+	if got, want := snap.Totals.TotalTokens, int64(25); got != want {
+		t.Fatalf("totals.total_tokens = %d, want %d", got, want)
+	}
+
+	if got, want := snap.ByModel["m1"].Requests, int64(2); got != want {
+		t.Fatalf("by_model[m1].requests = %d, want %d", got, want)
+	}
+	if got, want := snap.ByModel["m1"].TotalTokens, int64(7); got != want {
+		t.Fatalf("by_model[m1].total_tokens = %d, want %d", got, want)
+	}
+	if got, want := snap.ByModel["m2"].Requests, int64(1); got != want {
+		t.Fatalf("by_model[m2].requests = %d, want %d", got, want)
+	}
+	if got, want := snap.ByModel["m2"].TotalTokens, int64(18); got != want {
+		t.Fatalf("by_model[m2].total_tokens = %d, want %d", got, want)
+	}
+}
+
+type mockProvider struct{}
+
+func (m *mockProvider) Chat(
+	ctx context.Context,
+	messages []providers.Message,
+	tools []providers.ToolDefinition,
+	model string,
+	opts map[string]any,
+) (*providers.LLMResponse, error) {
+	return &providers.LLMResponse{
+		Content:   "Mock response",
+		ToolCalls: []providers.ToolCall{},
+	}, nil
+}
+
+func (m *mockProvider) GetDefaultModel() string {
+	return "mock-model"
+}
+
+func TestRunTaskAudit_DetectsMissedAndQualityIssues(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Agents.Defaults.Workspace = t.TempDir()
+	cfg.Audit.Enabled = true
+	cfg.Audit.LookbackMinutes = 360
+	cfg.Audit.Supervisor.Enabled = false
+	cfg.Orchestration.DefaultTaskTimeoutSeconds = 1
+	cfg.Orchestration.RetryLimitPerTask = 2
+
+	loop := NewAgentLoop(cfg, bus.NewMessageBus(), &mockProvider{})
+	ledger := loop.GetTaskLedger()
+	if ledger == nil {
+		t.Fatal("expected task ledger")
+	}
+
+	oldTS := time.Now().Add(-10 * time.Minute).UnixMilli()
+	_ = ledger.UpsertTask(tools.TaskLedgerEntry{
+		ID:          "task-planned-old",
+		Status:      tools.TaskStatusPlanned,
+		Intent:      "do something",
+		CreatedAtMS: oldTS,
+		UpdatedAtMS: oldTS,
+	})
+	_ = ledger.UpsertTask(tools.TaskLedgerEntry{
+		ID:          "task-completed-empty",
+		Status:      tools.TaskStatusCompleted,
+		CreatedAtMS: oldTS,
+		UpdatedAtMS: oldTS,
+		Result:      "",
+	})
+
+	report, err := loop.RunTaskAudit(context.Background())
+	if err != nil {
+		t.Fatalf("RunTaskAudit error: %v", err)
+	}
+	if report == nil {
+		t.Fatal("expected non-nil report")
+	}
+	if len(report.Findings) < 2 {
+		t.Fatalf("expected at least 2 findings, got %d", len(report.Findings))
+	}
+
+	hasMissed := false
+	hasQuality := false
+	for _, f := range report.Findings {
+		if f.TaskID == "task-planned-old" && f.Category == "missed" {
+			hasMissed = true
+		}
+		if f.TaskID == "task-completed-empty" && f.Category == "quality" {
+			hasQuality = true
+		}
+	}
+	if !hasMissed {
+		t.Fatal("expected missed finding for overdue planned task")
+	}
+	if !hasQuality {
+		t.Fatal("expected quality finding for empty completed task")
+	}
+}
+
+func TestParseSupervisorReview_EmbeddedJSON(t *testing.T) {
+	raw := "review result:\n{\"score\":0.42,\"issues\":[{\"category\":\"quality\",\"severity\":\"high\",\"message\":\"missing evidence\"}]}"
+	review, err := parseSupervisorReview(raw)
+	if err != nil {
+		t.Fatalf("parseSupervisorReview error: %v", err)
+	}
+	if review.Score != 0.42 {
+		t.Fatalf("score = %v, want 0.42", review.Score)
+	}
+	if len(review.Issues) != 1 {
+		t.Fatalf("issues len = %d, want 1", len(review.Issues))
+	}
+	if !strings.EqualFold(review.Issues[0].Category, "quality") {
+		t.Fatalf("issue category = %q", review.Issues[0].Category)
+	}
+}
+
+// TestMain applies conservative GC/memory knobs to keep the agent test suite
+// stable in memory-constrained environments. Some tests exercise memory and
+// embedding paths that can temporarily increase heap usage.
+//
+// To disable, set X_CLAW_TEST_MEMLIMIT=0.
+func TestMain(m *testing.M) {
+	memLimit := int64(384 << 20) // 384 MiB default
+	raw := strings.TrimSpace(os.Getenv("X_CLAW_TEST_MEMLIMIT"))
+	if raw != "" {
+		if n, err := strconv.ParseInt(raw, 10, 64); err == nil {
+			memLimit = n
+		}
+	}
+
+	if memLimit > 0 {
+		debug.SetMemoryLimit(memLimit)
+		debug.SetGCPercent(20)
+	}
+
+	os.Exit(m.Run())
+}
+
+func TestImportInboundMediaToWorkspace_CopiesFileAndBuildsNote(t *testing.T) {
+	workspace := t.TempDir()
+	srcDir := t.TempDir()
+
+	srcPath := filepath.Join(srcDir, "hello.txt")
+	if err := os.WriteFile(srcPath, []byte("hello world\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile failed: %v", err)
+	}
+
+	store := media.NewFileMediaStore()
+	ref, err := store.Store(srcPath, media.MediaMeta{
+		Filename:    "hello.txt",
+		ContentType: "text/plain",
+		Source:      "test",
+	}, "scope")
+	if err != nil {
+		t.Fatalf("Store failed: %v", err)
+	}
+
+	al := &AgentLoop{mediaResolver: media.AsMediaResolver(store)}
+	msg := bus.InboundMessage{
+		Channel:   "feishu",
+		ChatID:    "oc_test",
+		MessageID: "om_test",
+		Media:     []string{ref},
+	}
+
+	imported, skipped := al.importInboundMediaToWorkspace(workspace, msg)
+	if skipped != 0 {
+		t.Fatalf("unexpected skipped=%d", skipped)
+	}
+	if len(imported) != 1 {
+		t.Fatalf("expected 1 imported file, got %d", len(imported))
+	}
+
+	dstPath := filepath.Join(workspace, filepath.FromSlash(imported[0].RelativePath))
+	data, err := os.ReadFile(dstPath)
+	if err != nil {
+		t.Fatalf("ReadFile(dst) failed: %v", err)
+	}
+	if string(data) != "hello world\n" {
+		t.Fatalf("unexpected dst content: %q", string(data))
+	}
+
+	note := formatInboundMediaNote(imported, skipped)
+	if !strings.Contains(note, imported[0].RelativePath) {
+		t.Fatalf("note should contain relative path, got: %s", note)
+	}
+	if !strings.Contains(note, "content_type=text/plain") {
+		t.Fatalf("note should contain content type, got: %s", note)
+	}
+}
+
+type failPrimaryProvider struct {
+	mu    sync.Mutex
+	calls []string
+}
+
+func (p *failPrimaryProvider) Chat(
+	_ context.Context,
+	_ []providers.Message,
+	_ []providers.ToolDefinition,
+	model string,
+	_ map[string]any,
+) (*providers.LLMResponse, error) {
+	p.mu.Lock()
+	p.calls = append(p.calls, model)
+	p.mu.Unlock()
+
+	switch model {
+	case "primary-model":
+		return nil, fmt.Errorf("timeout: simulated primary failure")
+	case "fallback-model":
+		return &providers.LLMResponse{Content: "ok", ToolCalls: []providers.ToolCall{}}, nil
+	default:
+		return &providers.LLMResponse{Content: "ok", ToolCalls: []providers.ToolCall{}}, nil
+	}
+}
+
+func (p *failPrimaryProvider) GetDefaultModel() string { return "primary-model" }
+
+func (p *failPrimaryProvider) Models() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	out := make([]string, 0, len(p.calls))
+	out = append(out, p.calls...)
+	return out
+}
+
+func TestAgentLoop_SessionModelAutoDowngrade_AppliesAfterConsecutiveFallbacks(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "agent-test-autodowngrade-*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	cfg := &config.Config{
+		Agents: config.AgentsConfig{
+			Defaults: config.AgentDefaults{
+				Workspace:                 tmpDir,
+				Model:                     "primary-model",
+				ModelFallbacks:            []string{"anthropic/fallback-model"},
+				MaxTokens:                 4096,
+				MaxToolIterations:         3,
+				SessionModelAutoDowngrade: config.SessionModelAutoDowngradeConfig{Enabled: true, Threshold: 2, WindowMinutes: 60, TTLMinutes: 10},
+			},
+		},
+	}
+
+	msgBus := bus.NewMessageBus()
+	provider := &failPrimaryProvider{}
+	al := NewAgentLoop(cfg, msgBus, provider)
+
+	defaultAgent := al.registry.GetDefaultAgent()
+	if defaultAgent == nil {
+		t.Fatal("No default agent found")
+	}
+
+	sessionKey := "test-session-autodowngrade"
+
+	// First run: fallback happens, but threshold not reached.
+	if _, err := al.ProcessDirectWithChannel(context.Background(), "msg-1", sessionKey, "cli", "direct"); err != nil {
+		t.Fatalf("first run failed: %v", err)
+	}
+	if got, ok := defaultAgent.Sessions.EffectiveModelOverride(sessionKey); ok || got != "" {
+		t.Fatalf("expected no override after first fallback, got=%q ok=%v", got, ok)
+	}
+	firstCalls := provider.Models()
+	seenPrimary := false
+	for _, m := range firstCalls {
+		if m == "primary-model" {
+			seenPrimary = true
+			break
+		}
+	}
+	if !seenPrimary {
+		t.Fatalf("expected at least one primary-model call in first run, got %v", firstCalls)
+	}
+
+	// Second run: fallback happens again; should trigger auto-downgrade.
+	if _, err := al.ProcessDirectWithChannel(context.Background(), "msg-2", sessionKey, "cli", "direct"); err != nil {
+		t.Fatalf("second run failed: %v", err)
+	}
+	if got, ok := defaultAgent.Sessions.EffectiveModelOverride(sessionKey); !ok || got != "fallback-model" {
+		t.Fatalf("expected override to fallback-model after threshold, got=%q ok=%v", got, ok)
+	}
+	beforeThird := provider.Models()
+
+	// Third run: should use the override directly (no primary failure call).
+	if _, err := al.ProcessDirectWithChannel(context.Background(), "msg-3", sessionKey, "cli", "direct"); err != nil {
+		t.Fatalf("third run failed: %v", err)
+	}
+
+	afterThird := provider.Models()
+	if len(afterThird) <= len(beforeThird) {
+		t.Fatalf("expected at least one additional provider.Chat call in third run, got before=%d after=%d", len(beforeThird), len(afterThird))
+	}
+	newCalls := afterThird[len(beforeThird):]
+	if len(newCalls) != 1 || newCalls[0] != "fallback-model" {
+		t.Fatalf("expected third run to call fallback-model exactly once, got %v (all=%v)", newCalls, afterThird)
+	}
+}
+
+func TestDetectToolCallLoop_NoLoopWhenBelowThreshold(t *testing.T) {
+	recent := []toolCallSignature{
+		mustSig(t, "read_file", map[string]any{"path": "a.txt"}),
+		mustSig(t, "read_file", map[string]any{"path": "a.txt"}),
+	}
+	current := []providers.ToolCall{
+		{Name: "read_file", Arguments: map[string]any{"path": "a.txt"}},
+	}
+
+	if got := detectToolCallLoop(recent, current, 3); got != "" {
+		t.Fatalf("detectToolCallLoop = %q, want empty (no loop)", got)
+	}
+}
+
+func TestDetectToolCallLoop_TriggersAtThreshold(t *testing.T) {
+	recent := []toolCallSignature{
+		mustSig(t, "read_file", map[string]any{"path": "a.txt"}),
+		mustSig(t, "read_file", map[string]any{"path": "a.txt"}),
+		mustSig(t, "read_file", map[string]any{"path": "a.txt"}),
+	}
+	current := []providers.ToolCall{
+		{Name: "read_file", Arguments: map[string]any{"path": "a.txt"}},
+	}
+
+	if got := detectToolCallLoop(recent, current, 3); got != "read_file" {
+		t.Fatalf("detectToolCallLoop = %q, want %q", got, "read_file")
+	}
+}
+
+func TestDetectToolCallLoop_DifferentArgsDoNotCount(t *testing.T) {
+	recent := []toolCallSignature{
+		mustSig(t, "read_file", map[string]any{"path": "a.txt"}),
+		mustSig(t, "read_file", map[string]any{"path": "b.txt"}),
+		mustSig(t, "read_file", map[string]any{"path": "a.txt"}),
+	}
+	current := []providers.ToolCall{
+		{Name: "read_file", Arguments: map[string]any{"path": "a.txt"}},
+	}
+
+	// Only 2 exact matches for a.txt, so threshold 3 should not trigger.
+	if got := detectToolCallLoop(recent, current, 3); got != "" {
+		t.Fatalf("detectToolCallLoop = %q, want empty (no loop)", got)
+	}
+}
+
+func TestDetectToolCallLoop_MultipleCurrent_ReturnsFirstMatch(t *testing.T) {
+	recent := []toolCallSignature{
+		mustSig(t, "tool_a", map[string]any{"x": 1}),
+		mustSig(t, "tool_a", map[string]any{"x": 1}),
+		mustSig(t, "tool_b", map[string]any{"y": "ok"}),
+		mustSig(t, "tool_b", map[string]any{"y": "ok"}),
+	}
+
+	current := []providers.ToolCall{
+		{Name: "tool_b", Arguments: map[string]any{"y": "ok"}},
+		{Name: "tool_a", Arguments: map[string]any{"x": 1}},
+	}
+
+	// Threshold 2: both tool_a and tool_b are looping, but tool_b comes first in current.
+	if got := detectToolCallLoop(recent, current, 2); got != "tool_b" {
+		t.Fatalf("detectToolCallLoop = %q, want %q", got, "tool_b")
+	}
+}
+
+func mustSig(t *testing.T, name string, args map[string]any) toolCallSignature {
+	t.Helper()
+	b, err := json.Marshal(args)
+	if err != nil {
+		t.Fatalf("json.Marshal args: %v", err)
+	}
+	return toolCallSignature{
+		Name: name,
+		Args: string(b),
+	}
+}
+
+type parallelLoopMockProvider struct {
+	callCount int
+}
+
+func (m *parallelLoopMockProvider) Chat(
+	_ context.Context,
+	messages []providers.Message,
+	_ []providers.ToolDefinition,
+	_ string,
+	_ map[string]any,
+) (*providers.LLMResponse, error) {
+	m.callCount++
+	if m.callCount == 1 {
+		return &providers.LLMResponse{
+			ToolCalls: []providers.ToolCall{
+				{ID: "tc-1", Name: "slow_parallel", Arguments: map[string]any{}},
+				{ID: "tc-2", Name: "fast_parallel", Arguments: map[string]any{}},
+			},
+		}, nil
+	}
+
+	if m.callCount == 2 {
+		toolMessages := make([]providers.Message, 0, 2)
+		for _, msg := range messages {
+			if msg.Role == "tool" {
+				toolMessages = append(toolMessages, msg)
+			}
+		}
+		if len(toolMessages) != 2 {
+			return nil, fmt.Errorf("tool message count = %d, want 2", len(toolMessages))
+		}
+		if toolMessages[0].ToolCallID != "tc-1" || toolMessages[0].Content != "slow-ok" {
+			return nil, fmt.Errorf("first tool message = %+v, want tc-1/slow-ok", toolMessages[0])
+		}
+		if toolMessages[1].ToolCallID != "tc-2" || toolMessages[1].Content != "fast-ok" {
+			return nil, fmt.Errorf("second tool message = %+v, want tc-2/fast-ok", toolMessages[1])
+		}
+		return &providers.LLMResponse{Content: "final-from-provider"}, nil
+	}
+
+	return &providers.LLMResponse{Content: "unexpected-extra-call"}, nil
+}
+
+func (m *parallelLoopMockProvider) GetDefaultModel() string {
+	return "parallel-loop-mock"
+}
+
+type parallelTestTool struct {
+	name   string
+	result string
+	delay  time.Duration
+}
+
+func (t *parallelTestTool) Name() string {
+	return t.name
+}
+
+func (t *parallelTestTool) Description() string {
+	return "parallel test tool"
+}
+
+func (t *parallelTestTool) Parameters() map[string]any {
+	return map[string]any{
+		"type": "object",
+	}
+}
+
+func (t *parallelTestTool) ParallelPolicy() tools.ToolParallelPolicy {
+	return tools.ToolParallelReadOnly
+}
+
+func (t *parallelTestTool) Execute(_ context.Context, _ map[string]any) *tools.ToolResult {
+	if t.delay > 0 {
+		time.Sleep(t.delay)
+	}
+	return tools.SilentResult(t.result)
+}
+
+func TestAgentLoop_RunLLMIteration_ParallelToolCallsPreserveOrder(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "agent-loop-parallel-*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	cfg := config.DefaultConfig()
+	cfg.Agents.Defaults.Workspace = tmpDir
+	cfg.Agents.Defaults.Model = "test-model"
+	cfg.Agents.Defaults.MaxToolIterations = 4
+	cfg.Orchestration.ToolCallsParallelEnabled = true
+	cfg.Orchestration.MaxToolCallConcurrency = 8
+	cfg.Orchestration.ParallelToolsMode = tools.ParallelToolsModeReadOnlyOnly
+
+	msgBus := bus.NewMessageBus()
+	provider := &parallelLoopMockProvider{}
+	al := NewAgentLoop(cfg, msgBus, provider)
+	al.RegisterTool(&parallelTestTool{
+		name:   "slow_parallel",
+		result: "slow-ok",
+		delay:  50 * time.Millisecond,
+	})
+	al.RegisterTool(&parallelTestTool{
+		name:   "fast_parallel",
+		result: "fast-ok",
+		delay:  5 * time.Millisecond,
+	})
+
+	agent := al.registry.GetDefaultAgent()
+	if agent == nil {
+		t.Fatal("default agent not found")
+	}
+
+	finalContent, iterations, _, err := al.runLLMIteration(
+		context.Background(),
+		agent,
+		[]providers.Message{
+			{Role: "system", Content: "you are a test assistant"},
+			{Role: "user", Content: "run parallel tools"},
+		},
+		processOptions{
+			SessionKey:   "parallel-session",
+			Channel:      "cli",
+			ChatID:       "direct",
+			SenderID:     "tester",
+			SendResponse: false,
+		},
+		nil,
+		agent.Model,
+	)
+	if err != nil {
+		t.Fatalf("runLLMIteration() error = %v", err)
+	}
+	if iterations != 2 {
+		t.Fatalf("iterations = %d, want 2", iterations)
+	}
+	if finalContent != "final-from-provider" {
+		t.Fatalf("finalContent = %q, want %q", finalContent, "final-from-provider")
 	}
 }

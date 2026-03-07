@@ -2,7 +2,12 @@ package tools
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
+	"math"
 	"strings"
+
+	"github.com/xwysyy/X-Claw/pkg/utils"
 )
 
 // Tool is the interface that all tools must implement.
@@ -13,13 +18,58 @@ type Tool interface {
 	Execute(ctx context.Context, args map[string]any) *ToolResult
 }
 
+// ToolResult represents the structured return value from tool execution.
+// It provides clear semantics for different types of results and supports
+// async operations, user-facing messages, and error handling.
+type ToolResult struct {
+	ForLLM  string   `json:"for_llm"`
+	ForUser string   `json:"for_user,omitempty"`
+	Silent  bool     `json:"silent"`
+	IsError bool     `json:"is_error"`
+	Async   bool     `json:"async"`
+	Err     error    `json:"-"`
+	Media   []string `json:"media,omitempty"`
+}
+
+func NewToolResult(forLLM string) *ToolResult {
+	return &ToolResult{ForLLM: forLLM}
+}
+
+func SilentResult(forLLM string) *ToolResult {
+	return &ToolResult{ForLLM: forLLM, Silent: true, IsError: false, Async: false}
+}
+
+func AsyncResult(forLLM string) *ToolResult {
+	return &ToolResult{ForLLM: forLLM, Silent: false, IsError: false, Async: true}
+}
+
+func ErrorResult(message string) *ToolResult {
+	return &ToolResult{ForLLM: message, Silent: false, IsError: true, Async: false}
+}
+
+func UserResult(content string) *ToolResult {
+	return &ToolResult{ForLLM: content, ForUser: content, Silent: false, IsError: false, Async: false}
+}
+
+func MediaResult(forLLM string, mediaRefs []string) *ToolResult {
+	return &ToolResult{ForLLM: forLLM, Media: mediaRefs}
+}
+
+func (tr *ToolResult) MarshalJSON() ([]byte, error) {
+	type Alias ToolResult
+	return json.Marshal(&struct{ *Alias }{Alias: (*Alias)(tr)})
+}
+
+func ErrorWithSuggestion(message, suggestion string) *ToolResult {
+	return &ToolResult{ForLLM: message + "\nSuggestion: " + suggestion, Silent: false, IsError: true, Async: false}
+}
+
+func (tr *ToolResult) WithError(err error) *ToolResult {
+	tr.Err = err
+	return tr
+}
+
 // --- Request-scoped tool context (channel / chatID) ---
-//
-// Carried via context.Value so that concurrent tool calls each receive
-// their own immutable copy — no mutable state on singleton tool instances.
-//
-// Keys are unexported pointer-typed vars — guaranteed collision-free,
-// and only accessible through the helper functions below.
 
 type toolCtxKey struct{ name string }
 
@@ -28,7 +78,6 @@ var (
 	ctxKeyChatID  = &toolCtxKey{"chatID"}
 )
 
-// WithToolContext returns a child context carrying channel and chatID.
 func WithToolContext(ctx context.Context, channel, chatID string) context.Context {
 	if ctx == nil {
 		ctx = context.Background()
@@ -40,95 +89,50 @@ func WithToolContext(ctx context.Context, channel, chatID string) context.Contex
 	return ctx
 }
 
-// ToolChannel extracts the channel from ctx, or "" if unset.
 func ToolChannel(ctx context.Context) string {
 	v, _ := ctx.Value(ctxKeyChannel).(string)
 	v = strings.TrimSpace(v)
 	if v != "" {
 		return v
 	}
-	// Backward-compat: allow tools/tests that still use the legacy execution context keys.
 	return toolExecutionChannel(ctx)
 }
 
-// ToolChatID extracts the chatID from ctx, or "" if unset.
 func ToolChatID(ctx context.Context) string {
 	v, _ := ctx.Value(ctxKeyChatID).(string)
 	v = strings.TrimSpace(v)
 	if v != "" {
 		return v
 	}
-	// Backward-compat: allow tools/tests that still use the legacy execution context keys.
 	return toolExecutionChatID(ctx)
 }
 
 // AsyncCallback is a function type that async tools use to notify completion.
-// When an async tool finishes its work, it calls this callback with the result.
-//
-// The ctx parameter allows the callback to be canceled if the agent is shutting down.
-// The result parameter contains the tool's execution result.
 type AsyncCallback func(ctx context.Context, result *ToolResult)
 
-// AsyncExecutor is an optional interface that tools can implement to support
-// asynchronous execution with completion callbacks.
-//
-// Unlike the old AsyncTool pattern (SetCallback + Execute), AsyncExecutor
-// receives the callback as a parameter of ExecuteAsync. This eliminates the
-// data race where concurrent calls could overwrite each other's callbacks
-// on a shared tool instance.
-//
-// This is useful for:
-//   - Long-running operations that shouldn't block the agent loop
-//   - Long-running background tasks that complete independently
-//   - Background tasks that need to report results later
-//
-// Example:
-//
-//	func (t *BackgroundTool) ExecuteAsync(ctx context.Context, args map[string]any, cb AsyncCallback) *ToolResult {
-//	    go func() {
-//	        result := t.runSubagent(ctx, args)
-//	        if cb != nil { cb(ctx, result) }
-//	    }()
-//	    return AsyncResult("Subagent spawned, will report back")
-//	}
+// AsyncExecutor is an optional interface that tools can implement to support asynchronous execution.
 type AsyncExecutor interface {
 	Tool
-	// ExecuteAsync runs the tool asynchronously. The callback cb will be
-	// invoked (possibly from another goroutine) when the async operation
-	// completes. cb is guaranteed to be non-nil by the caller (registry).
 	ExecuteAsync(ctx context.Context, args map[string]any, cb AsyncCallback) *ToolResult
 }
 
-// ToolParallelPolicy declares whether a tool is safe to run concurrently
-// within a single LLM tool-call batch.
+// ToolParallelPolicy declares whether a tool is safe to run concurrently.
 type ToolParallelPolicy string
 
 const (
-	// ToolParallelSerialOnly is the safe default for tools with side effects.
 	ToolParallelSerialOnly ToolParallelPolicy = "serial_only"
-	// ToolParallelReadOnly marks tools that are safe to run in parallel.
-	ToolParallelReadOnly ToolParallelPolicy = "parallel_read_only"
+	ToolParallelReadOnly   ToolParallelPolicy = "parallel_read_only"
 )
 
 const (
-	// ParallelToolsModeReadOnlyOnly allows parallel execution only for tools
-	// explicitly marked as ToolParallelReadOnly.
 	ParallelToolsModeReadOnlyOnly = "read_only_only"
-	// ParallelToolsModeAll allows all tools to run in parallel.
-	ParallelToolsModeAll = "all"
+	ParallelToolsModeAll          = "all"
 )
 
-// ParallelPolicyProvider is an optional interface that tools can implement
-// to opt into parallel batch execution.
 type ParallelPolicyProvider interface {
 	ParallelPolicy() ToolParallelPolicy
 }
 
-// ConcurrentSafeTool is an optional interface for tool instances that can
-// safely handle concurrent ExecuteWithContext calls on the same singleton object.
-//
-// Tools that rely on mutable per-call instance state (for example through
-// SetContext or SetCallback) should return false.
 type ConcurrentSafeTool interface {
 	SupportsConcurrentExecution() bool
 }
@@ -141,5 +145,331 @@ func ToolToSchema(tool Tool) map[string]any {
 			"description": tool.Description(),
 			"parameters":  tool.Parameters(),
 		},
+	}
+}
+
+type executionContextKey string
+
+const (
+	executionContextChannelKey  executionContextKey = "tool_execution_channel"
+	executionContextChatIDKey   executionContextKey = "tool_execution_chat_id"
+	executionContextSenderIDKey executionContextKey = "tool_execution_sender_id"
+	executionContextSessionKey  executionContextKey = "tool_execution_session_key"
+	executionContextRunIDKey    executionContextKey = "tool_execution_run_id"
+	executionContextIsResumeKey executionContextKey = "tool_execution_is_resume"
+	executionContextAsyncCBKey  executionContextKey = "tool_execution_async_callback"
+)
+
+func withExecutionContext(ctx context.Context, channel, chatID, senderID string) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if strings.TrimSpace(channel) != "" {
+		ctx = context.WithValue(ctx, executionContextChannelKey, strings.TrimSpace(channel))
+	}
+	if strings.TrimSpace(chatID) != "" {
+		ctx = context.WithValue(ctx, executionContextChatIDKey, strings.TrimSpace(chatID))
+	}
+	if strings.TrimSpace(senderID) != "" {
+		ctx = context.WithValue(ctx, executionContextSenderIDKey, strings.TrimSpace(senderID))
+	}
+	return ctx
+}
+
+func withExecutionSessionKey(ctx context.Context, sessionKey string) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	sessionKey = utils.CanonicalSessionKey(sessionKey)
+	if sessionKey != "" {
+		ctx = context.WithValue(ctx, executionContextSessionKey, sessionKey)
+	}
+	return ctx
+}
+
+func withExecutionRunID(ctx context.Context, runID string) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if strings.TrimSpace(runID) != "" {
+		ctx = context.WithValue(ctx, executionContextRunIDKey, strings.TrimSpace(runID))
+	}
+	return ctx
+}
+
+func withExecutionIsResume(ctx context.Context, isResume bool) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if isResume {
+		ctx = context.WithValue(ctx, executionContextIsResumeKey, true)
+	}
+	return ctx
+}
+
+func withExecutionAsyncCallback(ctx context.Context, cb AsyncCallback) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if cb != nil {
+		ctx = context.WithValue(ctx, executionContextAsyncCBKey, cb)
+	}
+	return ctx
+}
+
+func toolExecutionChannel(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	v, _ := ctx.Value(executionContextChannelKey).(string)
+	return strings.TrimSpace(v)
+}
+
+func toolExecutionChatID(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	v, _ := ctx.Value(executionContextChatIDKey).(string)
+	return strings.TrimSpace(v)
+}
+
+func toolExecutionSenderID(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	v, _ := ctx.Value(executionContextSenderIDKey).(string)
+	return strings.TrimSpace(v)
+}
+
+func toolExecutionSessionKey(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	v, _ := ctx.Value(executionContextSessionKey).(string)
+	return utils.CanonicalSessionKey(v)
+}
+
+func toolExecutionRunID(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	v, _ := ctx.Value(executionContextRunIDKey).(string)
+	return strings.TrimSpace(v)
+}
+
+func toolExecutionIsResume(ctx context.Context) bool {
+	if ctx == nil {
+		return false
+	}
+	v, _ := ctx.Value(executionContextIsResumeKey).(bool)
+	return v
+}
+
+func toolExecutionAsyncCallback(ctx context.Context) AsyncCallback {
+	if ctx == nil {
+		return nil
+	}
+	v, _ := ctx.Value(executionContextAsyncCBKey).(AsyncCallback)
+	return v
+}
+
+func ExecutionSessionKey(ctx context.Context) string { return toolExecutionSessionKey(ctx) }
+func ExecutionRunID(ctx context.Context) string      { return toolExecutionRunID(ctx) }
+func ExecutionIsResume(ctx context.Context) bool     { return toolExecutionIsResume(ctx) }
+
+func parseIntArg(args map[string]any, key string, defaultVal, minVal, maxVal int) (int, error) {
+	val, exists := args[key]
+	if !exists {
+		return defaultVal, nil
+	}
+	n, err := toInt(val)
+	if err != nil {
+		return 0, fmt.Errorf("%s must be an integer", key)
+	}
+	if n < minVal || n > maxVal {
+		return 0, fmt.Errorf("%s must be between %d and %d", key, minVal, maxVal)
+	}
+	return n, nil
+}
+
+func parseOptionalIntArg(args map[string]any, key string, defaultVal, minVal, maxVal int) (int, error) {
+	val, exists := args[key]
+	if !exists {
+		return defaultVal, nil
+	}
+	n, err := toInt(val)
+	if err != nil {
+		return 0, fmt.Errorf("%s must be an integer", key)
+	}
+	if n < minVal || n > maxVal {
+		return 0, fmt.Errorf("%s must be between %d and %d", key, minVal, maxVal)
+	}
+	return n, nil
+}
+
+func parseBoolArg(args map[string]any, key string, defaultVal bool) (bool, error) {
+	val, exists := args[key]
+	if !exists {
+		return defaultVal, nil
+	}
+	b, ok := val.(bool)
+	if !ok {
+		return false, fmt.Errorf("%s must be a boolean", key)
+	}
+	return b, nil
+}
+
+func parseStringSliceArg(args map[string]any, key string) ([]string, error) {
+	val, exists := args[key]
+	if !exists {
+		return nil, nil
+	}
+	raw, ok := val.([]any)
+	if !ok {
+		if s, ok := val.([]string); ok {
+			out := make([]string, 0, len(s))
+			for _, item := range s {
+				item = strings.TrimSpace(item)
+				if item != "" {
+					out = append(out, item)
+				}
+			}
+			return out, nil
+		}
+		return nil, fmt.Errorf("%s must be an array of strings", key)
+	}
+	out := make([]string, 0, len(raw))
+	for _, item := range raw {
+		s, ok := item.(string)
+		if !ok {
+			return nil, fmt.Errorf("%s must be an array of strings", key)
+		}
+		s = strings.TrimSpace(s)
+		if s != "" {
+			out = append(out, s)
+		}
+	}
+	return out, nil
+}
+
+func getStringArg(args map[string]any, key string) (string, bool) {
+	val, exists := args[key]
+	if !exists {
+		return "", false
+	}
+	s, ok := val.(string)
+	if !ok {
+		return "", false
+	}
+	return s, true
+}
+
+func toInt(v any) (int, error) {
+	switch t := v.(type) {
+	case int:
+		return t, nil
+	case int32:
+		return int(t), nil
+	case int64:
+		if t > math.MaxInt || t < math.MinInt {
+			return 0, fmt.Errorf("out of range")
+		}
+		return int(t), nil
+	case float64:
+		if t > float64(math.MaxInt) || t < float64(math.MinInt) {
+			return 0, fmt.Errorf("out of range")
+		}
+		return int(t), nil
+	default:
+		return 0, fmt.Errorf("invalid type")
+	}
+}
+
+type SendCallback func(channel, chatID, content string) error
+
+type MessageTool struct {
+	sendCallback SendCallback
+}
+
+func NewMessageTool() *MessageTool {
+	return &MessageTool{}
+}
+
+func (t *MessageTool) Name() string {
+	return "message"
+}
+
+func (t *MessageTool) Description() string {
+	return "Send a message to user on a chat channel. " +
+		"Input: content (string, required), channel (string, optional), chat_id (string, optional). " +
+		"Output: confirmation that the message was sent (silent — user receives the message directly). " +
+		"If channel/chat_id are omitted, uses the current conversation context. " +
+		"Use this to proactively communicate results, progress updates, or ask follow-up questions."
+}
+
+func (t *MessageTool) Parameters() map[string]any {
+	return map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"content": map[string]any{
+				"type":        "string",
+				"description": "The message content to send",
+			},
+			"channel": map[string]any{
+				"type":        "string",
+				"description": "Optional: target channel (telegram, whatsapp, etc.)",
+			},
+			"chat_id": map[string]any{
+				"type":        "string",
+				"description": "Optional: target chat/user ID",
+			},
+		},
+		"required": []string{"content"},
+	}
+}
+
+func (t *MessageTool) SetSendCallback(callback SendCallback) {
+	t.sendCallback = callback
+}
+
+func (t *MessageTool) Execute(ctx context.Context, args map[string]any) *ToolResult {
+	content, ok := args["content"].(string)
+	if !ok {
+		return &ToolResult{ForLLM: "content is required", IsError: true}
+	}
+
+	channel, _ := args["channel"].(string)
+	chatID, _ := args["chat_id"].(string)
+
+	if channel == "" {
+		channel = toolExecutionChannel(ctx)
+	}
+	if chatID == "" {
+		chatID = toolExecutionChatID(ctx)
+	}
+
+	if channel == "" || chatID == "" {
+		return &ToolResult{ForLLM: "No target channel/chat specified", IsError: true}
+	}
+
+	if t.sendCallback == nil {
+		return &ToolResult{ForLLM: "Message sending not configured", IsError: true}
+	}
+
+	if err := t.sendCallback(channel, chatID, content); err != nil {
+		return &ToolResult{
+			ForLLM:  fmt.Sprintf("sending message: %v", err),
+			IsError: true,
+			Err:     err,
+		}
+	}
+
+	if tracker := messageRoundTrackerFromContext(ctx); tracker != nil {
+		tracker.MarkSent()
+	}
+	// Silent: user already received the message directly
+	return &ToolResult{
+		ForLLM: fmt.Sprintf("Message sent to %s:%s", channel, chatID),
+		Silent: true,
 	}
 }

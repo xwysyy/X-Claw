@@ -2,10 +2,14 @@ package tools
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"runtime"
+	"runtime/debug"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -583,4 +587,239 @@ func TestShellTool_HostLimits_WrapsCommand(t *testing.T) {
 	if !strings.HasSuffix(got, "echo hi") {
 		t.Fatalf("expected wrapped command to end with original command, got: %q", got)
 	}
+}
+
+func decodeSessionID(t *testing.T, payload string) string {
+	t.Helper()
+	var out struct {
+		SessionID string `json:"session_id"`
+	}
+	if err := json.Unmarshal([]byte(payload), &out); err != nil {
+		t.Fatalf("failed to decode exec payload: %v", err)
+	}
+	if out.SessionID == "" {
+		t.Fatalf("missing session_id in payload: %s", payload)
+	}
+	return out.SessionID
+}
+
+func TestExecBackground_WithProcessPoll(t *testing.T) {
+	execTool, err := NewExecTool(t.TempDir(), false)
+	if err != nil {
+		t.Fatalf("unable to configure exec tool: %v", err)
+	}
+	processTool := NewProcessTool(execTool.ProcessManager())
+
+	debug.FreeOSMemory()
+	start := execTool.Execute(context.Background(), map[string]any{
+		"command":    "sleep 0.2; echo done",
+		"background": true,
+	})
+	if start.IsError {
+		t.Fatalf("exec background failed: %s", start.ForLLM)
+	}
+	sessionID := decodeSessionID(t, start.ForLLM)
+
+	poll := processTool.Execute(context.Background(), map[string]any{
+		"action":     "poll",
+		"session_id": sessionID,
+		"timeout_ms": 3000,
+	})
+	if poll.IsError {
+		t.Fatalf("process poll failed: %s", poll.ForLLM)
+	}
+
+	var payload struct {
+		Output  string `json:"output"`
+		Session struct {
+			Status string `json:"status"`
+		} `json:"session"`
+	}
+	if err := json.Unmarshal([]byte(poll.ForLLM), &payload); err != nil {
+		t.Fatalf("failed to decode poll payload: %v", err)
+	}
+	if payload.Session.Status == "running" {
+		poll = processTool.Execute(context.Background(), map[string]any{
+			"action":     "poll",
+			"session_id": sessionID,
+			"timeout_ms": 2000,
+		})
+		if poll.IsError {
+			t.Fatalf("second poll failed: %s", poll.ForLLM)
+		}
+		if err := json.Unmarshal([]byte(poll.ForLLM), &payload); err != nil {
+			t.Fatalf("failed to decode second poll payload: %v", err)
+		}
+	}
+	if !strings.Contains(payload.Output, "done") && payload.Session.Status != "completed" {
+		t.Fatalf("expected output to contain done or completed status, got: status=%q output=%q", payload.Session.Status, payload.Output)
+	}
+	if payload.Session.Status != "completed" {
+		t.Fatalf("expected completed status, got %q", payload.Session.Status)
+	}
+}
+
+func TestProcessTool_KillAndRemove(t *testing.T) {
+	execTool, err := NewExecTool(t.TempDir(), false)
+	if err != nil {
+		t.Fatalf("unable to configure exec tool: %v", err)
+	}
+	processTool := NewProcessTool(execTool.ProcessManager())
+
+	debug.FreeOSMemory()
+	start := execTool.Execute(context.Background(), map[string]any{
+		"command":    "sleep 60",
+		"background": true,
+	})
+	if start.IsError {
+		t.Fatalf("exec background failed: %s", start.ForLLM)
+	}
+	sessionID := decodeSessionID(t, start.ForLLM)
+
+	kill := processTool.Execute(context.Background(), map[string]any{
+		"action":     "kill",
+		"session_id": sessionID,
+	})
+	if kill.IsError {
+		t.Fatalf("process kill failed: %s", kill.ForLLM)
+	}
+
+	poll := processTool.Execute(context.Background(), map[string]any{
+		"action":     "poll",
+		"session_id": sessionID,
+		"timeout_ms": 3000,
+	})
+	if poll.IsError {
+		t.Fatalf("process poll after kill failed: %s", poll.ForLLM)
+	}
+
+	var pollPayload struct {
+		Session struct {
+			Status string `json:"status"`
+		} `json:"session"`
+	}
+	if err := json.Unmarshal([]byte(poll.ForLLM), &pollPayload); err != nil {
+		t.Fatalf("failed to decode poll payload: %v", err)
+	}
+	if pollPayload.Session.Status == "running" {
+		t.Fatalf("expected killed session to stop running")
+	}
+
+	remove := processTool.Execute(context.Background(), map[string]any{
+		"action":     "remove",
+		"session_id": sessionID,
+	})
+	if remove.IsError {
+		t.Fatalf("process remove failed: %s", remove.ForLLM)
+	}
+}
+
+func TestProcessTool_Write(t *testing.T) {
+	execTool, err := NewExecTool(t.TempDir(), false)
+	if err != nil {
+		t.Fatalf("unable to configure exec tool: %v", err)
+	}
+	processTool := NewProcessTool(execTool.ProcessManager())
+
+	debug.FreeOSMemory()
+	start := execTool.Execute(context.Background(), map[string]any{
+		"command":    "cat",
+		"background": true,
+	})
+	if start.IsError {
+		t.Fatalf("exec background failed: %s", start.ForLLM)
+	}
+	sessionID := decodeSessionID(t, start.ForLLM)
+
+	write := processTool.Execute(context.Background(), map[string]any{
+		"action":     "write",
+		"session_id": sessionID,
+		"data":       "ping\n",
+		"eof":        true,
+	})
+	if write.IsError {
+		t.Fatalf("process write failed: %s", write.ForLLM)
+	}
+
+	poll := processTool.Execute(context.Background(), map[string]any{
+		"action":     "poll",
+		"session_id": sessionID,
+		"timeout_ms": 3000,
+	})
+	if poll.IsError {
+		t.Fatalf("poll after write failed: %s", poll.ForLLM)
+	}
+
+	var payload struct {
+		Output string `json:"output"`
+	}
+	if err := json.Unmarshal([]byte(poll.ForLLM), &payload); err != nil {
+		t.Fatalf("failed to decode poll payload: %v", err)
+	}
+	if !strings.Contains(payload.Output, "ping") {
+		t.Fatalf("expected output to contain ping, got %q", payload.Output)
+	}
+}
+
+func processExists(pid int) bool {
+	if pid <= 0 {
+		return false
+	}
+	err := syscall.Kill(pid, 0)
+	return err == nil || err == syscall.EPERM
+}
+
+func TestShellTool_TimeoutKillsChildProcess(t *testing.T) {
+	v := strings.TrimSpace(os.Getenv("X_CLAW_TEST_MEMLIMIT"))
+	if v != "" {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 && n < (512<<20) {
+			t.Skipf("skipping fork-heavy timeout test in constrained env (X_CLAW_TEST_MEMLIMIT=%d)", n)
+		}
+	}
+
+	tool, err := NewExecTool(t.TempDir(), false)
+	if err != nil {
+		t.Errorf("unable to configure exec tool: %s", err)
+	}
+
+	tool.SetTimeout(500 * time.Millisecond)
+
+	args := map[string]any{
+		// Spawn a child process that would outlive the shell unless process-group kill is used.
+		"command": "sleep 5 & echo $! > child.pid; wait",
+	}
+
+	// This test forks a child process. In memory-constrained environments,
+	// forcing a GC + returning pages to the OS avoids the OOM killer targeting
+	// the test binary at fork time.
+	debug.FreeOSMemory()
+
+	result := tool.Execute(context.Background(), args)
+	if !result.IsError {
+		t.Fatalf("expected timeout error, got success: %s", result.ForLLM)
+	}
+	if !strings.Contains(result.ForLLM, "timed out") {
+		t.Fatalf("expected timeout message, got: %s", result.ForLLM)
+	}
+
+	childPIDPath := filepath.Join(tool.workingDir, "child.pid")
+	data, err := os.ReadFile(childPIDPath)
+	if err != nil {
+		t.Fatalf("failed to read child pid file: %v", err)
+	}
+
+	childPID, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	if err != nil {
+		t.Fatalf("failed to parse child pid: %v", err)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if !processExists(childPID) {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	t.Fatalf("child process %d is still running after timeout", childPID)
 }

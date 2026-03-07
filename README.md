@@ -285,52 +285,6 @@ curl -sS -X POST http://127.0.0.1:18790/api/notify \
   这适合 cron/后台巡检类任务：无更新不打扰，有更新才提醒。
 
 
-前置条件：
-- 配置中 `tools.estop.enabled=true`（默认开启）
-- `/api/estop` 的鉴权策略与 `/api/notify` 相同（`gateway.api_key` 为空时仅允许 loopback）
-
-查看当前 estop 状态：
-
-```bash
-curl -sS http://127.0.0.1:18790/api/estop
-```
-
-开启全停（`kill_all`，所有工具调用都会返回 `ESTOP_DENY`）：
-
-```bash
-curl -sS -X POST http://127.0.0.1:18790/api/estop \
-  -H 'Content-Type: application/json' \
-  -d '{"mode":"kill_all","note":"maintenance"}'
-```
-
-禁网（`network_kill`，会禁用 `web_search`/`web_fetch` 以及 `mcp_*` 外部工具调用）：
-
-```bash
-curl -sS -X POST http://127.0.0.1:18790/api/estop \
-  -H 'Content-Type: application/json' \
-  -d '{"mode":"network_kill"}'
-```
-
-关闭 estop（恢复正常）：
-
-```bash
-curl -sS -X POST http://127.0.0.1:18790/api/estop \
-  -H 'Content-Type: application/json' \
-  -d '{"mode":"off"}'
-```
-
-状态文件落盘位置：
-- ` <workspace>/.x-claw/state/estop.json `
-
-CLI（等价于直接写 state file）：
-
-```bash
-./build/x-claw estop status
-./build/x-claw estop kill_all --note "maintenance"
-./build/x-claw estop network_kill
-./build/x-claw estop off
-```
-
 ### Web 证据模式（tools.web.evidence_mode）
 
 当你把 `tools.web.evidence_mode.enabled=true` 时：
@@ -652,9 +606,6 @@ Cron 的任务状态会持久化到工作区：
 CLI 侧常用命令：
 
 ```bash
-./build/x-claw cron list
-./build/x-claw cron show <job_id>
-./build/x-claw cron show <job_id> --json
 ```
 
 #### Cron 无更新不提醒（NO_UPDATE）
@@ -718,13 +669,9 @@ docker compose -p x-claw -f docker/docker-compose.yml down
 
 ## 常用命令
 
-- `x-claw onboard` 初始化工作区与配置
 - `x-claw agent` 交互式对话
 - `x-claw agent -m "..."` 单轮对话
 - `x-claw gateway` 启动网关服务
-- `x-claw status` 查看运行状态
-- `x-claw cron list` 查看定时任务
-- `x-claw cron add ...` 新增定时任务
 
 ## 配置说明
 

@@ -4,6 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -996,5 +999,855 @@ func TestBuildMediaScope_WithMessageID(t *testing.T) {
 	expected := "discord:chat99:msg123"
 	if scope != expected {
 		t.Fatalf("expected %s, got %s", expected, scope)
+	}
+}
+
+func TestBaseChannelIsAllowed(t *testing.T) {
+	tests := []struct {
+		name      string
+		allowList []string
+		senderID  string
+		want      bool
+	}{
+		{
+			name:      "empty allowlist allows all",
+			allowList: nil,
+			senderID:  "anyone",
+			want:      true,
+		},
+		{
+			name:      "compound sender matches numeric allowlist",
+			allowList: []string{"123456"},
+			senderID:  "123456|alice",
+			want:      true,
+		},
+		{
+			name:      "compound sender matches username allowlist",
+			allowList: []string{"@alice"},
+			senderID:  "123456|alice",
+			want:      true,
+		},
+		{
+			name:      "numeric sender matches legacy compound allowlist",
+			allowList: []string{"123456|alice"},
+			senderID:  "123456",
+			want:      true,
+		},
+		{
+			name:      "non matching sender is denied",
+			allowList: []string{"123456"},
+			senderID:  "654321|bob",
+			want:      false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ch := NewBaseChannel("test", nil, nil, tt.allowList)
+			if got := ch.IsAllowed(tt.senderID); got != tt.want {
+				t.Fatalf("IsAllowed(%q) = %v, want %v", tt.senderID, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestShouldRespondInGroup(t *testing.T) {
+	tests := []struct {
+		name        string
+		gt          config.GroupTriggerConfig
+		isMentioned bool
+		content     string
+		wantRespond bool
+		wantContent string
+	}{
+		{
+			name:        "no config - safe default (ignore)",
+			gt:          config.GroupTriggerConfig{},
+			isMentioned: false,
+			content:     "hello world",
+			wantRespond: false,
+			wantContent: "hello world",
+		},
+		{
+			name:        "no config - mentioned",
+			gt:          config.GroupTriggerConfig{},
+			isMentioned: true,
+			content:     "hello world",
+			wantRespond: true,
+			wantContent: "hello world",
+		},
+		{
+			name:        "command bypass (default /)",
+			gt:          config.GroupTriggerConfig{CommandBypass: true},
+			isMentioned: false,
+			content:     "/tree list",
+			wantRespond: true,
+			wantContent: "/tree list",
+		},
+		{
+			name:        "command bypass works even when mention_only=true",
+			gt:          config.GroupTriggerConfig{MentionOnly: true, CommandBypass: true},
+			isMentioned: false,
+			content:     "/switch plan to run",
+			wantRespond: true,
+			wantContent: "/switch plan to run",
+		},
+		{
+			name:        "mention_only - not mentioned",
+			gt:          config.GroupTriggerConfig{MentionOnly: true},
+			isMentioned: false,
+			content:     "hello world",
+			wantRespond: false,
+			wantContent: "hello world",
+		},
+		{
+			name:        "mention_only - mentioned",
+			gt:          config.GroupTriggerConfig{MentionOnly: true},
+			isMentioned: true,
+			content:     "hello world",
+			wantRespond: true,
+			wantContent: "hello world",
+		},
+		{
+			name:        "mentionless - respond without mention/prefix",
+			gt:          config.GroupTriggerConfig{Mentionless: true},
+			isMentioned: false,
+			content:     "hello world",
+			wantRespond: true,
+			wantContent: "hello world",
+		},
+		{
+			name:        "prefix match",
+			gt:          config.GroupTriggerConfig{Prefixes: []string{"/ask"}},
+			isMentioned: false,
+			content:     "/ask hello",
+			wantRespond: true,
+			wantContent: "hello",
+		},
+		{
+			name:        "prefix no match - not mentioned",
+			gt:          config.GroupTriggerConfig{Prefixes: []string{"/ask"}},
+			isMentioned: false,
+			content:     "hello world",
+			wantRespond: false,
+			wantContent: "hello world",
+		},
+		{
+			name:        "prefix no match - but mentioned",
+			gt:          config.GroupTriggerConfig{Prefixes: []string{"/ask"}},
+			isMentioned: true,
+			content:     "hello world",
+			wantRespond: true,
+			wantContent: "hello world",
+		},
+		{
+			name:        "multiple prefixes - second matches",
+			gt:          config.GroupTriggerConfig{Prefixes: []string{"/ask", "/bot"}},
+			isMentioned: false,
+			content:     "/bot help me",
+			wantRespond: true,
+			wantContent: "help me",
+		},
+		{
+			name:        "mention_only with prefixes - mentioned overrides",
+			gt:          config.GroupTriggerConfig{MentionOnly: true, Prefixes: []string{"/ask"}},
+			isMentioned: true,
+			content:     "hello",
+			wantRespond: true,
+			wantContent: "hello",
+		},
+		{
+			name:        "mention_only with prefixes - not mentioned, no prefix",
+			gt:          config.GroupTriggerConfig{MentionOnly: true, Prefixes: []string{"/ask"}},
+			isMentioned: false,
+			content:     "hello",
+			wantRespond: false,
+			wantContent: "hello",
+		},
+		{
+			name:        "empty prefix in list is skipped",
+			gt:          config.GroupTriggerConfig{Prefixes: []string{"", "/ask"}},
+			isMentioned: false,
+			content:     "/ask test",
+			wantRespond: true,
+			wantContent: "test",
+		},
+		{
+			name:        "prefix strips leading whitespace after prefix",
+			gt:          config.GroupTriggerConfig{Prefixes: []string{"/ask "}},
+			isMentioned: false,
+			content:     "/ask hello",
+			wantRespond: true,
+			wantContent: "hello",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ch := NewBaseChannel("test", nil, nil, nil, WithGroupTrigger(tt.gt))
+			gotRespond, gotContent := ch.ShouldRespondInGroup(tt.isMentioned, tt.content)
+			if gotRespond != tt.wantRespond {
+				t.Errorf("ShouldRespondInGroup() respond = %v, want %v", gotRespond, tt.wantRespond)
+			}
+			if gotContent != tt.wantContent {
+				t.Errorf("ShouldRespondInGroup() content = %q, want %q", gotContent, tt.wantContent)
+			}
+		})
+	}
+}
+
+func TestIsAllowedSender(t *testing.T) {
+	tests := []struct {
+		name      string
+		allowList []string
+		sender    bus.SenderInfo
+		want      bool
+	}{
+		{
+			name:      "empty allowlist allows all",
+			allowList: nil,
+			sender:    bus.SenderInfo{PlatformID: "anyone"},
+			want:      true,
+		},
+		{
+			name:      "numeric ID matches PlatformID",
+			allowList: []string{"123456"},
+			sender: bus.SenderInfo{
+				Platform:    "telegram",
+				PlatformID:  "123456",
+				CanonicalID: "telegram:123456",
+			},
+			want: true,
+		},
+		{
+			name:      "canonical format matches",
+			allowList: []string{"telegram:123456"},
+			sender: bus.SenderInfo{
+				Platform:    "telegram",
+				PlatformID:  "123456",
+				CanonicalID: "telegram:123456",
+			},
+			want: true,
+		},
+		{
+			name:      "canonical format wrong platform",
+			allowList: []string{"discord:123456"},
+			sender: bus.SenderInfo{
+				Platform:    "telegram",
+				PlatformID:  "123456",
+				CanonicalID: "telegram:123456",
+			},
+			want: false,
+		},
+		{
+			name:      "@username matches",
+			allowList: []string{"@alice"},
+			sender: bus.SenderInfo{
+				Platform:    "telegram",
+				PlatformID:  "123456",
+				CanonicalID: "telegram:123456",
+				Username:    "alice",
+			},
+			want: true,
+		},
+		{
+			name:      "compound id|username matches by ID",
+			allowList: []string{"123456|alice"},
+			sender: bus.SenderInfo{
+				Platform:    "telegram",
+				PlatformID:  "123456",
+				CanonicalID: "telegram:123456",
+				Username:    "alice",
+			},
+			want: true,
+		},
+		{
+			name:      "non matching sender denied",
+			allowList: []string{"654321"},
+			sender: bus.SenderInfo{
+				Platform:    "telegram",
+				PlatformID:  "123456",
+				CanonicalID: "telegram:123456",
+			},
+			want: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ch := NewBaseChannel("test", nil, nil, tt.allowList)
+			if got := ch.IsAllowedSender(tt.sender); got != tt.want {
+				t.Fatalf("IsAllowedSender(%+v) = %v, want %v", tt.sender, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestBaseChannelHandleMessageAllowList(t *testing.T) {
+	msgBus := bus.NewMessageBus()
+	ch := NewBaseChannel("test", nil, msgBus, []string{"allowed"})
+
+	ctx := context.Background()
+	ch.HandleMessage(ctx, bus.Peer{Kind: "direct", ID: "blocked"}, "msg-1", "blocked", "chat-1", "denied", nil, nil)
+
+	deniedCtx, deniedCancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer deniedCancel()
+	if msg, ok := msgBus.ConsumeInbound(deniedCtx); ok {
+		t.Fatalf("expected denied sender to be dropped, got message: %+v", msg)
+	}
+
+	ch.HandleMessage(
+		ctx,
+		bus.Peer{Kind: "direct", ID: "allowed"},
+		"msg-2",
+		"allowed",
+		"chat-1",
+		"accepted",
+		[]string{"m1"},
+		map[string]string{"k": "v"},
+	)
+
+	allowedCtx, allowedCancel := context.WithTimeout(context.Background(), time.Second)
+	defer allowedCancel()
+	msg, ok := msgBus.ConsumeInbound(allowedCtx)
+	if !ok {
+		t.Fatal("expected allowed sender message to be published")
+	}
+	if msg.Channel != "test" || msg.SenderID != "allowed" || msg.ChatID != "chat-1" || msg.Content != "accepted" {
+		t.Fatalf("unexpected inbound message: %+v", msg)
+	}
+	if msg.MessageID != "msg-2" {
+		t.Fatalf("unexpected message_id: %q", msg.MessageID)
+	}
+	if msg.MediaScope != "test:chat-1:msg-2" {
+		t.Fatalf("unexpected media_scope: %q", msg.MediaScope)
+	}
+	if msg.Peer.Kind != "direct" || msg.Peer.ID != "allowed" {
+		t.Fatalf("unexpected peer: %+v", msg.Peer)
+	}
+	if len(msg.Media) != 1 || msg.Media[0] != "m1" {
+		t.Fatalf("unexpected media payload: %+v", msg.Media)
+	}
+	if msg.Metadata["k"] != "v" {
+		t.Fatalf("unexpected metadata: %+v", msg.Metadata)
+	}
+}
+
+func TestWithSecurityHeaders_SetsBaselineHeaders(t *testing.T) {
+	h := withSecurityHeaders(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		_, _ = w.Write([]byte("ok"))
+	}))
+
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/x", nil)
+	h.ServeHTTP(rr, req)
+
+	if got := rr.Header().Get("X-Content-Type-Options"); got != "nosniff" {
+		t.Fatalf("X-Content-Type-Options = %q, want %q", got, "nosniff")
+	}
+	if got := rr.Header().Get("X-Frame-Options"); got != "DENY" {
+		t.Fatalf("X-Frame-Options = %q, want %q", got, "DENY")
+	}
+	if got := rr.Header().Get("Referrer-Policy"); got != "no-referrer" {
+		t.Fatalf("Referrer-Policy = %q, want %q", got, "no-referrer")
+	}
+	if got := rr.Header().Get("Permissions-Policy"); got == "" {
+		t.Fatalf("Permissions-Policy should be set")
+	}
+}
+
+func TestErrorsIs(t *testing.T) {
+	wrapped := fmt.Errorf("telegram API: %w", ErrRateLimit)
+	if !errors.Is(wrapped, ErrRateLimit) {
+		t.Error("wrapped ErrRateLimit should match")
+	}
+	if errors.Is(wrapped, ErrTemporary) {
+		t.Error("wrapped ErrRateLimit should not match ErrTemporary")
+	}
+}
+
+func TestErrorsIsAllTypes(t *testing.T) {
+	sentinels := []error{ErrNotRunning, ErrRateLimit, ErrTemporary, ErrSendFailed}
+
+	for _, sentinel := range sentinels {
+		wrapped := fmt.Errorf("context: %w", sentinel)
+		if !errors.Is(wrapped, sentinel) {
+			t.Errorf("wrapped %v should match itself", sentinel)
+		}
+
+		// Verify it doesn't match other sentinel errors
+		for _, other := range sentinels {
+			if other == sentinel {
+				continue
+			}
+			if errors.Is(wrapped, other) {
+				t.Errorf("wrapped %v should not match %v", sentinel, other)
+			}
+		}
+	}
+}
+
+func TestErrorMessages(t *testing.T) {
+	tests := []struct {
+		err  error
+		want string
+	}{
+		{ErrNotRunning, "channel not running"},
+		{ErrRateLimit, "rate limited"},
+		{ErrTemporary, "temporary failure"},
+		{ErrSendFailed, "send failed"},
+	}
+
+	for _, tt := range tests {
+		if got := tt.err.Error(); got != tt.want {
+			t.Errorf("error message = %q, want %q", got, tt.want)
+		}
+	}
+}
+
+func TestClassifySendError(t *testing.T) {
+	raw := fmt.Errorf("some API error")
+
+	tests := []struct {
+		name       string
+		statusCode int
+		wantIs     error
+		wantNil    bool
+	}{
+		{"429 -> ErrRateLimit", 429, ErrRateLimit, false},
+		{"500 -> ErrTemporary", 500, ErrTemporary, false},
+		{"502 -> ErrTemporary", 502, ErrTemporary, false},
+		{"503 -> ErrTemporary", 503, ErrTemporary, false},
+		{"400 -> ErrSendFailed", 400, ErrSendFailed, false},
+		{"403 -> ErrSendFailed", 403, ErrSendFailed, false},
+		{"404 -> ErrSendFailed", 404, ErrSendFailed, false},
+		{"200 -> raw error", 200, nil, false},
+		{"201 -> raw error", 201, nil, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := ClassifySendError(tt.statusCode, raw)
+			if err == nil {
+				t.Fatal("expected non-nil error")
+			}
+			if tt.wantIs != nil {
+				if !errors.Is(err, tt.wantIs) {
+					t.Errorf("errors.Is(err, %v) = false, want true; err = %v", tt.wantIs, err)
+				}
+			} else {
+				// Should return the raw error unchanged
+				if err != raw {
+					t.Errorf("expected raw error to be returned unchanged for status %d, got %v", tt.statusCode, err)
+				}
+			}
+		})
+	}
+}
+
+func TestClassifySendErrorNoFalsePositive(t *testing.T) {
+	raw := fmt.Errorf("some error")
+
+	// 429 should NOT match ErrTemporary or ErrSendFailed
+	err := ClassifySendError(429, raw)
+	if errors.Is(err, ErrTemporary) {
+		t.Error("429 should not match ErrTemporary")
+	}
+	if errors.Is(err, ErrSendFailed) {
+		t.Error("429 should not match ErrSendFailed")
+	}
+
+	// 500 should NOT match ErrRateLimit or ErrSendFailed
+	err = ClassifySendError(500, raw)
+	if errors.Is(err, ErrRateLimit) {
+		t.Error("500 should not match ErrRateLimit")
+	}
+	if errors.Is(err, ErrSendFailed) {
+		t.Error("500 should not match ErrSendFailed")
+	}
+
+	// 400 should NOT match ErrRateLimit or ErrTemporary
+	err = ClassifySendError(400, raw)
+	if errors.Is(err, ErrRateLimit) {
+		t.Error("400 should not match ErrRateLimit")
+	}
+	if errors.Is(err, ErrTemporary) {
+		t.Error("400 should not match ErrTemporary")
+	}
+}
+
+func TestClassifyNetError(t *testing.T) {
+	t.Run("nil error returns nil", func(t *testing.T) {
+		if err := ClassifyNetError(nil); err != nil {
+			t.Errorf("expected nil, got %v", err)
+		}
+	})
+
+	t.Run("non-nil error wraps as ErrTemporary", func(t *testing.T) {
+		raw := fmt.Errorf("connection refused")
+		err := ClassifyNetError(raw)
+		if err == nil {
+			t.Fatal("expected non-nil error")
+		}
+		if !errors.Is(err, ErrTemporary) {
+			t.Errorf("errors.Is(err, ErrTemporary) = false, want true; err = %v", err)
+		}
+	})
+}
+
+func TestSplitMessage(t *testing.T) {
+	longText := strings.Repeat("a", 2500)
+	longCode := "```go\n" + strings.Repeat("fmt.Println(\"hello\")\n", 100) + "```" // ~2100 chars
+
+	tests := []struct {
+		name         string
+		content      string
+		maxLen       int
+		expectChunks int                                 // Check number of chunks
+		checkContent func(t *testing.T, chunks []string) // Custom validation
+	}{
+		{
+			name:         "Empty message",
+			content:      "",
+			maxLen:       2000,
+			expectChunks: 0,
+		},
+		{
+			name:         "Short message fits in one chunk",
+			content:      "Hello world",
+			maxLen:       2000,
+			expectChunks: 1,
+		},
+		{
+			name:         "Simple split regular text",
+			content:      longText,
+			maxLen:       2000,
+			expectChunks: 2,
+			checkContent: func(t *testing.T, chunks []string) {
+				if len([]rune(chunks[0])) > 2000 {
+					t.Errorf("Chunk 0 too large: %d runes", len([]rune(chunks[0])))
+				}
+				if len([]rune(chunks[0]))+len([]rune(chunks[1])) != len([]rune(longText)) {
+					t.Errorf(
+						"Total rune length mismatch. Got %d, want %d",
+						len([]rune(chunks[0]))+len([]rune(chunks[1])),
+						len([]rune(longText)),
+					)
+				}
+			},
+		},
+		{
+			name: "Split at newline",
+			// 1750 chars then newline, then more chars.
+			// Dynamic buffer: 2000 / 10 = 200.
+			// Effective limit: 2000 - 200 = 1800.
+			// Split should happen at newline because it's at 1750 (< 1800).
+			// Total length must > 2000 to trigger split. 1750 + 1 + 300 = 2051.
+			content:      strings.Repeat("a", 1750) + "\n" + strings.Repeat("b", 300),
+			maxLen:       2000,
+			expectChunks: 2,
+			checkContent: func(t *testing.T, chunks []string) {
+				if len([]rune(chunks[0])) != 1750 {
+					t.Errorf("Expected chunk 0 to be 1750 runes (split at newline), got %d", len([]rune(chunks[0])))
+				}
+				if chunks[1] != strings.Repeat("b", 300) {
+					t.Errorf("Chunk 1 content mismatch. Len: %d", len([]rune(chunks[1])))
+				}
+			},
+		},
+		{
+			name:         "Long code block split",
+			content:      "Prefix\n" + longCode,
+			maxLen:       2000,
+			expectChunks: 2,
+			checkContent: func(t *testing.T, chunks []string) {
+				// Check that first chunk ends with closing fence
+				if !strings.HasSuffix(chunks[0], "\n```") {
+					t.Error("First chunk should end with injected closing fence")
+				}
+				// Check that second chunk starts with execution header
+				if !strings.HasPrefix(chunks[1], "```go") {
+					t.Error("Second chunk should start with injected code block header")
+				}
+			},
+		},
+		{
+			name:         "Preserve Unicode characters (rune-aware)",
+			content:      strings.Repeat("\u4e16", 2500), // 2500 runes, 7500 bytes
+			maxLen:       2000,
+			expectChunks: 2,
+			checkContent: func(t *testing.T, chunks []string) {
+				// Verify chunks contain valid unicode and don't split mid-rune
+				for i, chunk := range chunks {
+					runeCount := len([]rune(chunk))
+					if runeCount > 2000 {
+						t.Errorf("Chunk %d has %d runes, exceeds maxLen 2000", i, runeCount)
+					}
+					if !strings.Contains(chunk, "\u4e16") {
+						t.Errorf("Chunk %d should contain unicode characters", i)
+					}
+				}
+				// Verify total rune count is preserved
+				totalRunes := 0
+				for _, chunk := range chunks {
+					totalRunes += len([]rune(chunk))
+				}
+				if totalRunes != 2500 {
+					t.Errorf("Total rune count mismatch. Got %d, want 2500", totalRunes)
+				}
+			},
+		},
+		{
+			name:         "Zero maxLen returns single chunk",
+			content:      "Hello world",
+			maxLen:       0,
+			expectChunks: 1,
+			checkContent: func(t *testing.T, chunks []string) {
+				if chunks[0] != "Hello world" {
+					t.Errorf("Expected original content, got %q", chunks[0])
+				}
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := SplitMessage(tc.content, tc.maxLen)
+
+			if tc.expectChunks == 0 {
+				if len(got) != 0 {
+					t.Errorf("Expected 0 chunks, got %d", len(got))
+				}
+				return
+			}
+
+			if len(got) != tc.expectChunks {
+				t.Errorf("Expected %d chunks, got %d", tc.expectChunks, len(got))
+				// Log sizes for debugging
+				for i, c := range got {
+					t.Logf("Chunk %d length: %d", i, len(c))
+				}
+				return // Stop further checks if count assumes specific split
+			}
+
+			if tc.checkContent != nil {
+				tc.checkContent(t, got)
+			}
+		})
+	}
+}
+
+// --- Helper function tests for index-based rune operations ---
+
+func TestFindLastNewlineInRange(t *testing.T) {
+	runes := []rune("aaa\nbbb\nccc")
+	// Indices:        0123 4567 89 10
+
+	tests := []struct {
+		name         string
+		start, end   int
+		searchWindow int
+		want         int
+	}{
+		{"finds last newline in full range", 0, 11, 200, 7},
+		{"finds newline within search window", 0, 11, 4, 7},
+		{"narrow window misses newline outside window", 4, 11, 3, 3}, // returns start-1 (not found)
+		{"no newline in range", 0, 3, 200, -1},                       // start-1 = -1
+		{"range limited to first segment", 0, 4, 200, 3},
+		{"search window of 1 at newline", 0, 8, 1, 7},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := findLastNewlineInRange(runes, tc.start, tc.end, tc.searchWindow)
+			if got != tc.want {
+				t.Errorf("findLastNewlineInRange(runes, %d, %d, %d) = %d, want %d",
+					tc.start, tc.end, tc.searchWindow, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestFindLastSpaceInRange(t *testing.T) {
+	runes := []rune("abc def\tghi")
+	// Indices:        0123 4567 89 10
+
+	tests := []struct {
+		name         string
+		start, end   int
+		searchWindow int
+		want         int
+	}{
+		{"finds tab as last space/tab", 0, 11, 200, 7},
+		{"finds space when tab out of window", 0, 7, 200, 3},
+		{"no space in range", 0, 3, 200, -1},
+		{"narrow window finds tab", 5, 11, 4, 7},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := findLastSpaceInRange(runes, tc.start, tc.end, tc.searchWindow)
+			if got != tc.want {
+				t.Errorf("findLastSpaceInRange(runes, %d, %d, %d) = %d, want %d",
+					tc.start, tc.end, tc.searchWindow, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestFindNewlineFrom(t *testing.T) {
+	runes := []rune("hello\nworld\n")
+
+	tests := []struct {
+		name string
+		from int
+		want int
+	}{
+		{"from start", 0, 5},
+		{"from after first newline", 6, 11},
+		{"from past all newlines", 12, -1},
+		{"from newline itself", 5, 5},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := findNewlineFrom(runes, tc.from)
+			if got != tc.want {
+				t.Errorf("findNewlineFrom(runes, %d) = %d, want %d", tc.from, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestFindLastUnclosedCodeBlockInRange(t *testing.T) {
+	tests := []struct {
+		name       string
+		content    string
+		start, end int
+		want       int
+	}{
+		{
+			name:    "no code blocks",
+			content: "hello world",
+			start:   0, end: 11,
+			want: -1,
+		},
+		{
+			name:    "complete code block",
+			content: "```go\ncode\n```",
+			start:   0, end: 14,
+			want: -1,
+		},
+		{
+			name:    "unclosed code block",
+			content: "text\n```go\ncode here",
+			start:   0, end: 20,
+			want: 5,
+		},
+		{
+			name:    "closed then unclosed",
+			content: "```a\n```\n```b\ncode",
+			start:   0, end: 17,
+			want: 9,
+		},
+		{
+			name:    "search within subrange",
+			content: "```a\n```\n```b\ncode",
+			start:   9, end: 17,
+			want: 9,
+		},
+		{
+			name:    "subrange with no code blocks",
+			content: "```a\n```\nhello",
+			start:   9, end: 14,
+			want: -1,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			runes := []rune(tc.content)
+			got := findLastUnclosedCodeBlockInRange(runes, tc.start, tc.end)
+			if got != tc.want {
+				t.Errorf("findLastUnclosedCodeBlockInRange(%q, %d, %d) = %d, want %d",
+					tc.content, tc.start, tc.end, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestFindNextClosingCodeBlockInRange(t *testing.T) {
+	tests := []struct {
+		name     string
+		content  string
+		startIdx int
+		end      int
+		want     int
+	}{
+		{
+			name:     "finds closing fence",
+			content:  "code\n```\nmore",
+			startIdx: 0, end: 13,
+			want: 8, // position after ```
+		},
+		{
+			name:     "no closing fence",
+			content:  "just code here",
+			startIdx: 0, end: 14,
+			want: -1,
+		},
+		{
+			name:     "fence at start of search",
+			content:  "```end",
+			startIdx: 0, end: 6,
+			want: 3,
+		},
+		{
+			name:     "fence outside range",
+			content:  "code\n```",
+			startIdx: 0, end: 4,
+			want: -1,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			runes := []rune(tc.content)
+			got := findNextClosingCodeBlockInRange(runes, tc.startIdx, tc.end)
+			if got != tc.want {
+				t.Errorf("findNextClosingCodeBlockInRange(%q, %d, %d) = %d, want %d",
+					tc.content, tc.startIdx, tc.end, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestSplitMessage_CodeBlockIntegrity(t *testing.T) {
+	// Focused test for the core requirement: splitting inside a code block preserves syntax highlighting
+
+	// 60 chars total approximately
+	content := "```go\npackage main\n\nfunc main() {\n\tprintln(\"Hello\")\n}\n```"
+	maxLen := 40
+
+	chunks := SplitMessage(content, maxLen)
+
+	if len(chunks) != 2 {
+		t.Fatalf("Expected 2 chunks, got %d: %q", len(chunks), chunks)
+	}
+
+	// First chunk must end with "\n```"
+	if !strings.HasSuffix(chunks[0], "\n```") {
+		t.Errorf("First chunk should end with closing fence. Got: %q", chunks[0])
+	}
+
+	// Second chunk must start with the header "```go"
+	if !strings.HasPrefix(chunks[1], "```go") {
+		t.Errorf("Second chunk should start with code block header. Got: %q", chunks[1])
+	}
+
+	// First chunk should contain meaningful content
+	if len([]rune(chunks[0])) > 40 {
+		t.Errorf("First chunk exceeded maxLen: length %d runes", len([]rune(chunks[0])))
 	}
 }
