@@ -102,8 +102,9 @@ func TestCronToolAddJob_NegativeSecondsRejected(t *testing.T) {
 }
 
 type stubCronExecutor struct {
-	lastCh string
-	lastID string
+	lastCh         string
+	lastID         string
+	lastSessionKey string
 
 	gotChannel     string
 	gotChatID      string
@@ -116,6 +117,10 @@ type stubCronExecutor struct {
 
 func (s *stubCronExecutor) LastActive() (string, string) {
 	return s.lastCh, s.lastID
+}
+
+func (s *stubCronExecutor) LastActiveContext() (string, string, string) {
+	return s.lastSessionKey, s.lastCh, s.lastID
 }
 
 func (s *stubCronExecutor) ProcessDirectWithChannel(_ context.Context, _content, sessionKey, channel, chatID string) (string, error) {
@@ -175,6 +180,34 @@ func TestCronToolExecuteJob_DeliverFalseUsesDedicatedCronSession(t *testing.T) {
 	}
 	if exec.gotSessionKey != "cron-job_session" {
 		t.Fatalf("expected cron session key, got %q", exec.gotSessionKey)
+	}
+}
+
+func TestCronToolExecuteJob_DeliverFalseReusesLastActiveSessionContext(t *testing.T) {
+	mb := bus.NewMessageBus()
+	exec := &stubCronExecutor{
+		lastCh:         "feishu",
+		lastID:         "oc_test",
+		lastSessionKey: "conv:feishu:direct:oc_test",
+		response:       "ok",
+	}
+	tool := newCronToolWithExecutorForTest(t, exec, mb)
+
+	job := &cronpkg.CronJob{
+		ID:      "job_context",
+		Name:    "contexted",
+		Payload: cronpkg.CronPayload{Message: "do work", Deliver: false},
+	}
+
+	_, err := tool.ExecuteJob(context.Background(), job)
+	if err != nil {
+		t.Fatalf("expected success, got error: %v", err)
+	}
+	if !exec.usedSessionAPI {
+		t.Fatalf("expected ProcessSessionMessage to be used")
+	}
+	if exec.gotSessionKey != "conv:feishu:direct:oc_test" {
+		t.Fatalf("expected last active session key, got %q", exec.gotSessionKey)
 	}
 }
 

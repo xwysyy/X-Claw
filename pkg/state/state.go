@@ -21,6 +21,9 @@ type State struct {
 	// LastChatID is the last chat ID used for communication
 	LastChatID string `json:"last_chat_id,omitempty"`
 
+	// LastSessionKey is the last active conversation/session key for external user traffic.
+	LastSessionKey string `json:"last_session_key,omitempty"`
+
 	// Timestamp is the last time this state was updated
 	Timestamp time.Time `json:"timestamp"`
 }
@@ -120,6 +123,28 @@ func (sm *Manager) GetLastChatID() string {
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
 	return sm.state.LastChatID
+}
+
+// SetLastSessionKey atomically updates the last session key and saves the state.
+func (sm *Manager) SetLastSessionKey(sessionKey string) error {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
+	sm.state.LastSessionKey = sessionKey
+	sm.state.Timestamp = time.Now()
+
+	if err := sm.saveAtomic(); err != nil {
+		return fmt.Errorf("failed to save state atomically: %w", err)
+	}
+
+	return nil
+}
+
+// GetLastSessionKey returns the last session key from the state.
+func (sm *Manager) GetLastSessionKey() string {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+	return sm.state.LastSessionKey
 }
 
 // GetTimestamp returns the timestamp of the last state update.

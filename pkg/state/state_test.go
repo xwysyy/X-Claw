@@ -83,6 +83,30 @@ func TestSetLastChatID(t *testing.T) {
 	}
 }
 
+func TestSetLastSessionKey(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "state-test-*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	sm := NewManager(tmpDir)
+
+	err = sm.SetLastSessionKey("conv:feishu:direct:oc_test")
+	if err != nil {
+		t.Fatalf("SetLastSessionKey failed: %v", err)
+	}
+
+	if got := sm.GetLastSessionKey(); got != "conv:feishu:direct:oc_test" {
+		t.Fatalf("Expected session key %q, got %q", "conv:feishu:direct:oc_test", got)
+	}
+
+	sm2 := NewManager(tmpDir)
+	if got := sm2.GetLastSessionKey(); got != "conv:feishu:direct:oc_test" {
+		t.Fatalf("Expected persistent session key %q, got %q", "conv:feishu:direct:oc_test", got)
+	}
+}
+
 func TestAtomicity_NoCorruptionOnInterrupt(t *testing.T) {
 	tmpDir, err := os.MkdirTemp("", "state-test-*")
 	if err != nil {
@@ -180,6 +204,7 @@ func TestNewManager_ExistingState(t *testing.T) {
 	sm1 := NewManager(tmpDir)
 	sm1.SetLastChannel("existing-channel")
 	sm1.SetLastChatID("existing-chat-id")
+	sm1.SetLastSessionKey("conv:test")
 
 	// Create new manager with same workspace
 	sm2 := NewManager(tmpDir)
@@ -191,6 +216,9 @@ func TestNewManager_ExistingState(t *testing.T) {
 
 	if sm2.GetLastChatID() != "existing-chat-id" {
 		t.Errorf("Expected chat ID 'existing-chat-id', got '%s'", sm2.GetLastChatID())
+	}
+	if sm2.GetLastSessionKey() != "conv:test" {
+		t.Errorf("Expected session key 'conv:test', got '%s'", sm2.GetLastSessionKey())
 	}
 }
 

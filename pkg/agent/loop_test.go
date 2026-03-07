@@ -93,6 +93,29 @@ func TestRecordLastChatID(t *testing.T) {
 	}
 }
 
+func TestRecordLastSessionKeyAndLastActiveContext(t *testing.T) {
+	al, cfg, msgBus, provider, cleanup := newTestAgentLoop(t)
+	defer cleanup()
+
+	if err := al.RecordLastChannel("feishu:oc_test"); err != nil {
+		t.Fatalf("RecordLastChannel failed: %v", err)
+	}
+	if err := al.RecordLastSessionKey("conv:feishu:direct:oc_test"); err != nil {
+		t.Fatalf("RecordLastSessionKey failed: %v", err)
+	}
+
+	sessionKey, channel, chatID := al.LastActiveContext()
+	if sessionKey != "conv:feishu:direct:oc_test" || channel != "feishu" || chatID != "oc_test" {
+		t.Fatalf("LastActiveContext = (%q,%q,%q)", sessionKey, channel, chatID)
+	}
+
+	al2 := NewAgentLoop(cfg, msgBus, provider)
+	sessionKey, channel, chatID = al2.LastActiveContext()
+	if sessionKey != "conv:feishu:direct:oc_test" || channel != "feishu" || chatID != "oc_test" {
+		t.Fatalf("persistent LastActiveContext = (%q,%q,%q)", sessionKey, channel, chatID)
+	}
+}
+
 func TestNewAgentLoop_StateInitialized(t *testing.T) {
 	// Create temp workspace
 	tmpDir, err := os.MkdirTemp("", "agent-test-*")

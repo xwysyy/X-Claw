@@ -25,6 +25,17 @@ func (al *AgentLoop) recordLastExternalChannel(opts processOptions) {
 			map[string]any{"error": err.Error()},
 		)
 	}
+	key := utils.CanonicalSessionKey(opts.SessionKey)
+	if key == "" || strings.HasPrefix(key, "cron-") || strings.EqualFold(strings.TrimSpace(opts.SenderID), "cron") {
+		return
+	}
+	if err := al.RecordLastSessionKey(key); err != nil {
+		logger.WarnCF(
+			"agent",
+			"Failed to record last session key",
+			map[string]any{"error": err.Error(), "session_key": key},
+		)
+	}
 }
 
 func newRunTraceForMessages(

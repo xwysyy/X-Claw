@@ -24,6 +24,10 @@ type lastActiveProvider interface {
 	LastActive() (channel string, chatID string)
 }
 
+type lastActiveContextProvider interface {
+	LastActiveContext() (sessionKey string, channel string, chatID string)
+}
+
 type sessionJobExecutor interface {
 	ProcessSessionMessage(ctx context.Context, content, sessionKey, channel, chatID string) (string, error)
 }
@@ -378,23 +382,30 @@ func (t *CronTool) ExecuteJob(ctx context.Context, job *cron.CronJob) (string, e
 	// Get channel/chatID from job payload
 	channel := strings.TrimSpace(job.Payload.Channel)
 	chatID := strings.TrimSpace(job.Payload.To)
+	lastSessionKey := ""
+	lastChannel := ""
+	lastChatID := ""
+
+	if t.executor != nil {
+		if lapCtx, ok := t.executor.(lastActiveContextProvider); ok {
+			lastSessionKey, lastChannel, lastChatID = lapCtx.LastActiveContext()
+		} else if lap, ok := t.executor.(lastActiveProvider); ok {
+			lastChannel, lastChatID = lap.LastActive()
+		}
+		lastSessionKey = strings.TrimSpace(lastSessionKey)
+		lastChannel = strings.TrimSpace(lastChannel)
+		lastChatID = strings.TrimSpace(lastChatID)
+	}
 
 	// Prefer last_active when destination is missing (or internal).
-	if (channel == "" || chatID == "" || constants.IsInternalChannel(channel)) && t.executor != nil {
-		if lap, ok := t.executor.(lastActiveProvider); ok {
-			lastCh, lastID := lap.LastActive()
-			lastCh = strings.TrimSpace(lastCh)
-			lastID = strings.TrimSpace(lastID)
-			if lastCh != "" && lastID != "" && !constants.IsInternalChannel(lastCh) {
-				switch {
-				case channel == "" && chatID == "":
-					channel, chatID = lastCh, lastID
-				case channel != "" && chatID == "" && strings.EqualFold(channel, lastCh):
-					chatID = lastID
-				case channel == "" && chatID != "" && chatID == lastID:
-					channel = lastCh
-				}
-			}
+	if (channel == "" || chatID == "" || constants.IsInternalChannel(channel)) && lastChannel != "" && lastChatID != "" && !constants.IsInternalChannel(lastChannel) {
+		switch {
+		case channel == "" && chatID == "":
+			channel, chatID = lastChannel, lastChatID
+		case channel != "" && chatID == "" && strings.EqualFold(channel, lastChannel):
+			chatID = lastChatID
+		case channel == "" && chatID != "" && chatID == lastChatID:
+			channel = lastChannel
 		}
 	}
 
@@ -458,6 +469,9 @@ func (t *CronTool) ExecuteJob(ctx context.Context, job *cron.CronJob) (string, e
 		return "", fmt.Errorf("cron executor is not configured")
 	}
 	sessionKey := fmt.Sprintf("cron-%s", job.ID)
+	if lastSessionKey != "" && strings.EqualFold(channel, lastChannel) && chatID == lastChatID {
+		sessionKey = lastSessionKey
+	}
 
 	// Call agent with job's message. Prefer a session-preserving API when available
 	// so cron jobs do not pollute or inherit the shared conversation session.
