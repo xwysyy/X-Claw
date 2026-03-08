@@ -186,21 +186,7 @@ func (h *NotifyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *NotifyHandler) authorize(r *http.Request) bool {
-	if strings.TrimSpace(h.apiKey) == "" {
-		return isLoopbackRemote(r.RemoteAddr)
-	}
-
-	if strings.TrimSpace(r.Header.Get("X-API-Key")) == h.apiKey {
-		return true
-	}
-
-	auth := strings.TrimSpace(r.Header.Get("Authorization"))
-	if len(auth) > 7 && strings.EqualFold(auth[:7], "bearer ") {
-		token := strings.TrimSpace(auth[7:])
-		return token != "" && token == h.apiKey
-	}
-
-	return false
+	return authorizeAPIKeyOrLoopback(h.apiKey, r)
 }
 
 type ResumeLastTaskHandlerOptions struct {
@@ -260,25 +246,9 @@ func (h *ResumeLastTaskHandler) ServeHTTP(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	// Reuse same auth policy as /api/notify.
-	if strings.TrimSpace(h.apiKey) == "" {
-		if !isLoopbackRemote(r.RemoteAddr) {
-			writeJSON(w, http.StatusUnauthorized, resumeLastTaskResponse{OK: false, Error: "unauthorized"})
-			return
-		}
-	} else {
-		authorized := strings.TrimSpace(r.Header.Get("X-API-Key")) == h.apiKey
-		if !authorized {
-			auth := strings.TrimSpace(r.Header.Get("Authorization"))
-			if len(auth) > 7 && strings.EqualFold(auth[:7], "bearer ") {
-				token := strings.TrimSpace(auth[7:])
-				authorized = token != "" && token == h.apiKey
-			}
-		}
-		if !authorized {
-			writeJSON(w, http.StatusUnauthorized, resumeLastTaskResponse{OK: false, Error: "unauthorized"})
-			return
-		}
+	if !authorizeAPIKeyOrLoopback(h.apiKey, r) {
+		writeJSON(w, http.StatusUnauthorized, resumeLastTaskResponse{OK: false, Error: "unauthorized"})
+		return
 	}
 
 	var body map[string]any

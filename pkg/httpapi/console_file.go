@@ -8,7 +8,25 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+
+	"github.com/xwysyy/X-Claw/pkg/logger"
 )
+
+var (
+	consoleFileStat  = os.Stat
+	consoleTailLines = tailLines
+)
+
+func logConsoleFileError(op, path string, err error) {
+	if err == nil {
+		return
+	}
+	logger.WarnCF("httpapi", "Console file operation failed", map[string]any{
+		"operation": op,
+		"path":      path,
+		"error":     err.Error(),
+	})
+}
 
 func (h *ConsoleHandler) handleFile(w http.ResponseWriter, r *http.Request) {
 	rel := strings.TrimSpace(r.URL.Query().Get("path"))
@@ -23,13 +41,15 @@ func (h *ConsoleHandler) handleFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	st, err := os.Stat(abs)
+	st, err := consoleFileStat(abs)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			h.writeJSON(w, http.StatusNotFound, map[string]any{"ok": false, "error": "file not found"})
 			return
 		}
-		h.writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+		h.writeConsoleInternalError(w, "failed to access file", "Console file stat failed", map[string]any{
+			"path": relClean,
+		}, err)
 		return
 	}
 	if st.IsDir() {
@@ -69,13 +89,16 @@ func (h *ConsoleHandler) handleTail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	content, truncated, err := tailLines(abs, lines, 1<<20)
+	content, truncated, err := consoleTailLines(abs, lines, 1<<20)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			h.writeJSON(w, http.StatusNotFound, map[string]any{"ok": false, "error": "file not found"})
 			return
 		}
-		h.writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+		h.writeConsoleInternalError(w, "failed to read file", "Console tail read failed", map[string]any{
+			"path":  relClean,
+			"lines": lines,
+		}, err)
 		return
 	}
 

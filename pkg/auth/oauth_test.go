@@ -487,3 +487,116 @@ func TestExchangeCodeForTokens_ReadBodyError(t *testing.T) {
 		t.Fatalf("ExchangeCodeForTokens() error = %q, want contains %q", err.Error(), "read response body")
 	}
 }
+
+func TestExtractAuthorizationCode(t *testing.T) {
+	tests := []struct {
+		name    string
+		input   string
+		want    string
+		wantErr string
+	}{
+		{name: "raw code", input: "auth-code", want: "auth-code"},
+		{name: "callback url", input: "http://localhost:1455/auth/callback?code=auth-code&state=ok", want: "auth-code"},
+		{name: "missing code", input: "http://localhost:1455/auth/callback?state=ok", wantErr: "could not find authorization code in input"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := extractAuthorizationCode(tt.input)
+			if tt.wantErr != "" {
+				if err == nil {
+					t.Fatalf("extractAuthorizationCode() error = nil, want %q", tt.wantErr)
+				}
+				if !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("extractAuthorizationCode() error = %q, want contains %q", err.Error(), tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("extractAuthorizationCode() error = %v", err)
+			}
+			if got != tt.want {
+				t.Fatalf("extractAuthorizationCode() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestResolveOAuthTokenURL(t *testing.T) {
+	cfg := OAuthProviderConfig{Issuer: "https://issuer.example.com"}
+	if got := resolveOAuthTokenURL(cfg); got != "https://issuer.example.com/oauth/token" {
+		t.Fatalf("resolveOAuthTokenURL() = %q, want %q", got, "https://issuer.example.com/oauth/token")
+	}
+
+	cfg.TokenURL = "https://oauth2.googleapis.com/token"
+	if got := resolveOAuthTokenURL(cfg); got != cfg.TokenURL {
+		t.Fatalf("resolveOAuthTokenURL() override = %q, want %q", got, cfg.TokenURL)
+	}
+}
+
+func TestResolveOAuthProvider(t *testing.T) {
+	if got := resolveOAuthProvider(OAuthProviderConfig{}); got != "openai" {
+		t.Fatalf("resolveOAuthProvider() = %q, want %q", got, "openai")
+	}
+
+	cfg := OAuthProviderConfig{TokenURL: "https://oauth2.googleapis.com/token"}
+	if got := resolveOAuthProvider(cfg); got != "google-antigravity" {
+		t.Fatalf("resolveOAuthProvider() google = %q, want %q", got, "google-antigravity")
+	}
+}
+
+func TestNewOAuthCallbackHandler(t *testing.T) {
+	t.Run("state mismatch", func(t *testing.T) {
+		resultCh := make(chan callbackResult, 1)
+		handler := newOAuthCallbackHandler("expected-state", resultCh)
+
+		req := httptest.NewRequest(http.MethodGet, "/auth/callback?state=wrong&code=auth-code", nil)
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+
+		result := <-resultCh
+		if result.err == nil || !strings.Contains(result.err.Error(), "state mismatch") {
+			t.Fatalf("callback result error = %v, want state mismatch", result.err)
+		}
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want %d", rec.Code, http.StatusBadRequest)
+		}
+	})
+
+	t.Run("missing code preserves provider error text", func(t *testing.T) {
+		resultCh := make(chan callbackResult, 1)
+		handler := newOAuthCallbackHandler("expected-state", resultCh)
+
+		req := httptest.NewRequest(http.MethodGet, "/auth/callback?state=expected-state&error=access_denied", nil)
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+
+		result := <-resultCh
+		if result.err == nil || !strings.Contains(result.err.Error(), "no code received: access_denied") {
+			t.Fatalf("callback result error = %v, want no code received: access_denied", result.err)
+		}
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want %d", rec.Code, http.StatusBadRequest)
+		}
+	})
+
+	t.Run("success", func(t *testing.T) {
+		resultCh := make(chan callbackResult, 1)
+		handler := newOAuthCallbackHandler("expected-state", resultCh)
+
+		req := httptest.NewRequest(http.MethodGet, "/auth/callback?state=expected-state&code=auth-code", nil)
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+
+		result := <-resultCh
+		if result.err != nil {
+			t.Fatalf("callback result error = %v", result.err)
+		}
+		if result.code != "auth-code" {
+			t.Fatalf("callback result code = %q, want %q", result.code, "auth-code")
+		}
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+		}
+	})
+}

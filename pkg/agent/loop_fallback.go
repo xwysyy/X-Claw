@@ -30,7 +30,7 @@ func (al *AgentLoop) createProviderForFallbackCandidate(candidate providers.Fall
 		return nil, "", fmt.Errorf("config is nil")
 	}
 
-	if modelCfg := findFallbackModelConfig(cfg, candidate); modelCfg != nil {
+	if modelCfg := providers.FindModelConfigForFallbackCandidate(cfg, candidate); modelCfg != nil {
 		cfgCopy := *modelCfg
 		if cfgCopy.Workspace == "" {
 			cfgCopy.Workspace = cfg.WorkspacePath()
@@ -38,7 +38,7 @@ func (al *AgentLoop) createProviderForFallbackCandidate(candidate providers.Fall
 		return providers.CreateProviderFromConfig(&cfgCopy)
 	}
 
-	modelCfg, err := synthesizeFallbackModelConfig(cfg, candidate)
+	modelCfg, err := providers.SynthesizeFallbackModelConfig(cfg, candidate)
 	if err != nil {
 		return nil, "", err
 	}
@@ -145,52 +145,5 @@ func synthesizeFallbackModelConfig(cfg *config.Config, candidate providers.Fallb
 }
 
 func providerProtocolForFallbackCandidate(provider string) string {
-	switch providers.NormalizeProvider(provider) {
-	case "", "openai":
-		return "openai"
-	case "anthropic":
-		return "anthropic"
-	case "litellm":
-		return "litellm"
-	case "openrouter":
-		return "openrouter"
-	case "groq":
-		return "groq"
-	case "zhipu", "zai":
-		return "zhipu"
-	case "vllm":
-		return "vllm"
-	case "gemini":
-		return "gemini"
-	case "nvidia":
-		return "nvidia"
-	case "ollama":
-		return "ollama"
-	case "moonshot":
-		return "moonshot"
-	case "shengsuanyun":
-		return "shengsuanyun"
-	case "deepseek":
-		return "deepseek"
-	case "cerebras":
-		return "cerebras"
-	case "volcengine":
-		return "volcengine"
-	case "github-copilot", "github_copilot", "copilot":
-		return "github-copilot"
-	case "antigravity":
-		return "antigravity"
-	case "qwen-portal", "qwen":
-		return "qwen"
-	case "mistral":
-		return "mistral"
-	case "avian":
-		return "avian"
-	case "claude-cli", "claudecli":
-		return "claude-cli"
-	case "codex-cli", "codexcli":
-		return "codex-cli"
-	default:
-		return strings.TrimSpace(provider)
-	}
+	return providers.CanonicalProtocol(provider)
 }

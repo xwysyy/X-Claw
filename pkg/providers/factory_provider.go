@@ -7,83 +7,10 @@ package providers
 
 import (
 	"fmt"
-	"net/url"
 	"strings"
 
 	"github.com/xwysyy/X-Claw/pkg/config"
 )
-
-func missingOAuthCredentialError(provider string) error {
-	provider = strings.TrimSpace(provider)
-	return fmt.Errorf(
-		"no credentials for %s. Configure `api_key` in config, or populate the local auth store before using oauth/token auth",
-		provider,
-	)
-}
-
-func expiredOAuthCredentialError(provider string) error {
-	provider = strings.TrimSpace(provider)
-	return fmt.Errorf(
-		"%s credentials expired. Refresh the local auth store credential and retry",
-		provider,
-	)
-}
-
-func resolveHTTPProviderAPIBase(cfg *config.ModelConfig, protocol string) string {
-	if cfg == nil {
-		return getDefaultAPIBase(protocol)
-	}
-	if apiBase := strings.TrimSpace(cfg.APIBase); apiBase != "" {
-		return apiBase
-	}
-	return getDefaultAPIBase(protocol)
-}
-
-func isLocalAPIBase(apiBase string) bool {
-	apiBase = strings.TrimSpace(apiBase)
-	if apiBase == "" {
-		return false
-	}
-	u, err := url.Parse(apiBase)
-	if err != nil {
-		return false
-	}
-	hostname := strings.ToLower(strings.TrimSpace(u.Hostname()))
-	return hostname == "localhost" || hostname == "127.0.0.1" || hostname == "::1"
-}
-
-func httpProviderRequiresAPIKey(protocol, apiBase string) bool {
-	switch protocol {
-	case "litellm", "ollama", "vllm":
-		return !isLocalAPIBase(apiBase)
-	default:
-		return true
-	}
-}
-
-// createClaudeAuthProvider creates a Claude provider using OAuth credentials from auth store.
-func createClaudeAuthProvider() (LLMProvider, error) {
-	cred, err := getCredential("anthropic")
-	if err != nil {
-		return nil, fmt.Errorf("loading auth credentials: %w", err)
-	}
-	if cred == nil {
-		return nil, missingOAuthCredentialError("anthropic")
-	}
-	return NewClaudeProviderWithTokenSource(cred.AccessToken, createClaudeTokenSource()), nil
-}
-
-// createCodexAuthProvider creates a Codex provider using OAuth credentials from auth store.
-func createCodexAuthProvider() (LLMProvider, error) {
-	cred, err := getCredential("openai")
-	if err != nil {
-		return nil, fmt.Errorf("loading auth credentials: %w", err)
-	}
-	if cred == nil {
-		return nil, missingOAuthCredentialError("openai")
-	}
-	return NewCodexProviderWithTokenSource(cred.AccessToken, cred.AccountID, createCodexTokenSource()), nil
-}
 
 // ExtractProtocol extracts the protocol prefix and model identifier from a model string.
 // If no prefix is specified, it defaults to "openai".
@@ -97,7 +24,7 @@ func ExtractProtocol(model string) (protocol, modelID string) {
 	if !found {
 		return "openai", model
 	}
-	return protocol, modelID
+	return CanonicalProtocol(protocol), strings.TrimSpace(modelID)
 }
 
 // CreateProviderFromConfig creates a provider based on the ModelConfig.
@@ -173,10 +100,7 @@ func CreateProviderFromConfig(cfg *config.ModelConfig) (LLMProvider, string, err
 			return provider, modelID, nil
 		}
 		// Use API key with HTTP API
-		apiBase := cfg.APIBase
-		if apiBase == "" {
-			apiBase = "https://api.anthropic.com/v1"
-		}
+		apiBase := resolveHTTPProviderAPIBase(cfg, protocol)
 		if apiKey == "" {
 			return nil, "", fmt.Errorf("api_key is required for anthropic protocol (model: %s)", cfg.Model)
 		}
@@ -222,47 +146,5 @@ func CreateProviderFromConfig(cfg *config.ModelConfig) (LLMProvider, string, err
 
 	default:
 		return nil, "", fmt.Errorf("unknown protocol %q in model %q", protocol, cfg.Model)
-	}
-}
-
-// getDefaultAPIBase returns the default API base URL for a given protocol.
-func getDefaultAPIBase(protocol string) string {
-	switch protocol {
-	case "openai":
-		return "https://api.openai.com/v1"
-	case "openrouter":
-		return "https://openrouter.ai/api/v1"
-	case "litellm":
-		return "http://localhost:4000/v1"
-	case "groq":
-		return "https://api.groq.com/openai/v1"
-	case "zhipu":
-		return "https://open.bigmodel.cn/api/paas/v4"
-	case "gemini":
-		return "https://generativelanguage.googleapis.com/v1beta"
-	case "nvidia":
-		return "https://integrate.api.nvidia.com/v1"
-	case "ollama":
-		return "http://localhost:11434/v1"
-	case "moonshot":
-		return "https://api.moonshot.cn/v1"
-	case "shengsuanyun":
-		return "https://router.shengsuanyun.com/api/v1"
-	case "deepseek":
-		return "https://api.deepseek.com/v1"
-	case "cerebras":
-		return "https://api.cerebras.ai/v1"
-	case "volcengine":
-		return "https://ark.cn-beijing.volces.com/api/v3"
-	case "qwen":
-		return "https://dashscope.aliyuncs.com/compatible-mode/v1"
-	case "vllm":
-		return "http://localhost:8000/v1"
-	case "mistral":
-		return "https://api.mistral.ai/v1"
-	case "avian":
-		return "https://api.avian.io/v1"
-	default:
-		return ""
 	}
 }

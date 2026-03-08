@@ -10,6 +10,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/xwysyy/X-Claw/pkg/logger"
 )
 
 var (
@@ -17,6 +19,7 @@ var (
 	consoleStreamTailLines         = tailLines
 	consoleStreamStatInterval      = 2 * time.Second
 	consoleStreamIdleSleep         = 150 * time.Millisecond
+	consoleStreamOpenFile          = os.Open
 )
 
 func reopenConsoleStreamFile(current *os.File, abs string) (*os.File, *bufio.Reader, os.FileInfo, error) {
@@ -33,6 +36,17 @@ func reopenConsoleStreamFile(current *os.File, abs string) (*os.File, *bufio.Rea
 		return nil, nil, nil, err
 	}
 	return reopened, bufio.NewReader(reopened), info, nil
+}
+
+func writeConsoleStreamError(w http.ResponseWriter, flusher http.Flusher, relClean string, err error) {
+	if err != nil {
+		logger.WarnCF("httpapi", "Console stream failed", map[string]any{
+			"path":  relClean,
+			"error": err.Error(),
+		})
+	}
+	_, _ = io.WriteString(w, fmt.Sprintf("{\"ok\":false,\"error\":%q,\"path\":%q}\n", "stream unavailable", relClean))
+	flusher.Flush()
 }
 
 func (h *ConsoleHandler) handleStream(w http.ResponseWriter, r *http.Request) {
@@ -67,13 +81,14 @@ func (h *ConsoleHandler) handleStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	f, err := os.Open(abs)
+	f, err := consoleStreamOpenFile(abs)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			h.writeJSON(w, http.StatusNotFound, map[string]any{"ok": false, "error": "file not found"})
 			return
 		}
-		h.writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+		logger.WarnCF("httpapi", "Console stream open failed", map[string]any{"path": relClean, "error": err.Error()})
+		h.writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": "stream unavailable"})
 		return
 	}
 	defer f.Close()
@@ -95,16 +110,14 @@ func (h *ConsoleHandler) handleStream(w http.ResponseWriter, r *http.Request) {
 		const maxBytes = int64(1 << 20)
 		lines, _, err := consoleStreamTailLines(abs, tail, maxBytes)
 		if err != nil {
-			_, _ = io.WriteString(w, fmt.Sprintf("{\"ok\":false,\"error\":%q,\"path\":%q}\n", err.Error(), relClean))
-			flusher.Flush()
+			writeConsoleStreamError(w, flusher, relClean, err)
 			return
 		}
 		for _, line := range lines {
 			_, _ = io.WriteString(w, line+"\n")
 		}
 		if _, err := f.Seek(0, io.SeekEnd); err != nil {
-			_, _ = io.WriteString(w, fmt.Sprintf("{\"ok\":false,\"error\":%q,\"path\":%q}\n", err.Error(), relClean))
-			flusher.Flush()
+			writeConsoleStreamError(w, flusher, relClean, err)
 			return
 		}
 		flusher.Flush()
@@ -135,8 +148,7 @@ func (h *ConsoleHandler) handleStream(w http.ResponseWriter, r *http.Request) {
 			}
 
 			if !errors.Is(err, io.EOF) {
-				_, _ = io.WriteString(w, fmt.Sprintf("{\"ok\":false,\"error\":%q,\"path\":%q}\n", err.Error(), relClean))
-				flusher.Flush()
+				writeConsoleStreamError(w, flusher, relClean, err)
 				return
 			}
 
@@ -152,8 +164,7 @@ func (h *ConsoleHandler) handleStream(w http.ResponseWriter, r *http.Request) {
 					if openedInfo != nil && !os.SameFile(openedInfo, st) {
 						reopened, reopenedReader, reopenedInfo, reopenErr := reopenConsoleStreamFile(f, abs)
 						if reopenErr != nil {
-							_, _ = io.WriteString(w, fmt.Sprintf("{\"ok\":false,\"error\":%q,\"path\":%q}\n", reopenErr.Error(), relClean))
-							flusher.Flush()
+							writeConsoleStreamError(w, flusher, relClean, reopenErr)
 							return
 						}
 						f = reopened

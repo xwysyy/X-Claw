@@ -37,7 +37,7 @@ func resolveFallbackCandidates(model string, fallbacks []string, defaultProvider
 			return "", false
 		}
 		if mc, err := cfg.GetModelConfig(raw); err == nil && mc != nil && strings.TrimSpace(mc.Model) != "" {
-			return ensureProtocol(mc.Model), true
+			return providers.EnsureProtocol(mc.Model), true
 		}
 		for i := range cfg.ModelList {
 			fullModel := strings.TrimSpace(cfg.ModelList[i].Model)
@@ -45,24 +45,15 @@ func resolveFallbackCandidates(model string, fallbacks []string, defaultProvider
 				continue
 			}
 			if fullModel == raw {
-				return ensureProtocol(fullModel), true
+				return providers.EnsureProtocol(fullModel), true
 			}
 			if _, modelID := providers.ExtractProtocol(fullModel); modelID == raw {
-				return ensureProtocol(fullModel), true
+				return providers.EnsureProtocol(fullModel), true
 			}
 		}
 		return "", false
 	}
 	return providers.ResolveCandidatesWithLookup(modelCfg, defaultProvider, lookup)
-}
-
-// ensureProtocol adds "openai/" prefix to bare model names.
-func ensureProtocol(model string) string {
-	model = strings.TrimSpace(model)
-	if model == "" || strings.Contains(model, "/") {
-		return model
-	}
-	return "openai/" + model
 }
 
 // resolveAgentWorkspace determines the workspace directory for an agent.

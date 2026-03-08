@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -99,6 +100,33 @@ func TestSave_WithColonInKey(t *testing.T) {
 	}
 	if history[0].Content != "hello" {
 		t.Errorf("expected message content %q, got %q", "hello", history[0].Content)
+	}
+}
+
+func TestNewSessionManager_SkipsCorruptJSONLSession(t *testing.T) {
+	tmpDir := t.TempDir()
+	key := "feishu:oc_test"
+	metaPath := filepath.Join(tmpDir, "feishu_oc_test.meta.json")
+	eventsPath := filepath.Join(tmpDir, "feishu_oc_test.jsonl")
+
+	meta := `{"key":"feishu:oc_test","summary":"hello","created":"2026-03-03T00:00:00Z","updated":"2026-03-03T00:00:01Z","messages_count":1}`
+	if err := os.WriteFile(metaPath, []byte(meta), 0o644); err != nil {
+		t.Fatalf("write meta: %v", err)
+	}
+	events := strings.Join([]string{
+		`{"type":"session.message","id":"e1","ts":"2026-03-03T00:00:00Z","ts_ms":0,"session_key":"feishu:oc_test","message":{"role":"user","content":"hello"}}`,
+		`{"type":"session.message","id":"e2","ts":"2026-03-03T00:00:01Z","ts_ms":1,"session_key":"feishu:oc_test","message":`,
+	}, "\n")
+	if err := os.WriteFile(eventsPath, []byte(events), 0o644); err != nil {
+		t.Fatalf("write events: %v", err)
+	}
+
+	reloaded := NewSessionManager(tmpDir)
+	if snapshot, ok := reloaded.GetSessionSnapshot(key); ok || snapshot != nil {
+		t.Fatalf("expected corrupt jsonl session to be skipped, got ok=%v snapshot=%#v", ok, snapshot)
+	}
+	if history := reloaded.GetHistory(key); len(history) != 0 {
+		t.Fatalf("expected no history for skipped corrupt session, got %d entries", len(history))
 	}
 }
 

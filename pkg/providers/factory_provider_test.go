@@ -62,6 +62,18 @@ func TestExtractProtocol(t *testing.T) {
 			wantProtocol: "nvidia",
 			wantModelID:  "meta/llama-3.1-8b",
 		},
+		{
+			name:         "protocol alias z.ai canonicalizes to zhipu",
+			model:        "z.ai/glm-5",
+			wantProtocol: "zhipu",
+			wantModelID:  "glm-5",
+		},
+		{
+			name:         "protocol alias qwen-portal canonicalizes to qwen",
+			model:        "qwen-portal/qwen-max",
+			wantProtocol: "qwen",
+			wantModelID:  "qwen-max",
+		},
 	}
 
 	for _, tt := range tests {

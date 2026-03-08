@@ -2,7 +2,6 @@ package agent
 
 import (
 	"context"
-	"log"
 	"os"
 	"regexp"
 	"strings"
@@ -85,7 +84,13 @@ func NewAgentInstance(
 	allowReadPaths := compilePatterns(cfg.Tools.AllowReadPaths)
 	allowWritePaths := compilePatterns(cfg.Tools.AllowWritePaths)
 
-	toolsRegistry, _ := buildBaseAgentToolRegistry(workspace, cfg, restrict, readRestrict, allowReadPaths, allowWritePaths)
+	toolsRegistry, _, toolInitErr := buildBaseAgentToolRegistry(workspace, cfg, restrict, readRestrict, allowReadPaths, allowWritePaths)
+	if toolInitErr != nil {
+		logger.WarnCF("agent", "Exec tool initialization failed; exec/process tools disabled", map[string]any{
+			"workspace": workspace,
+			"error":     toolInitErr.Error(),
+		})
+	}
 
 	contextBuilder := NewContextBuilder(workspace)
 
@@ -144,7 +149,7 @@ func buildBaseAgentToolRegistry(
 	readRestrict bool,
 	allowReadPaths []*regexp.Regexp,
 	allowWritePaths []*regexp.Regexp,
-) (*tools.ToolRegistry, *tools.ExecTool) {
+) (*tools.ToolRegistry, *tools.ExecTool, error) {
 	toolsRegistry := tools.NewToolRegistry()
 
 	if cfg.Tools.IsToolEnabled("read_file") {
@@ -171,11 +176,11 @@ func buildBaseAgentToolRegistry(
 	}
 
 	var execTool *tools.ExecTool
+	var execToolErr error
 	if cfg.Tools.IsToolEnabled("exec") {
-		var err error
-		execTool, err = tools.NewExecToolWithConfig(workspace, restrict, cfg)
-		if err != nil {
-			log.Fatalf("Critical error: unable to initialize exec tool: %v", err)
+		execTool, execToolErr = tools.NewExecToolWithConfig(workspace, restrict, cfg)
+		if execToolErr != nil {
+			return toolsRegistry, nil, execToolErr
 		}
 		toolsRegistry.Register(execTool)
 	}
@@ -183,7 +188,7 @@ func buildBaseAgentToolRegistry(
 		toolsRegistry.Register(tools.NewProcessTool(execTool.ProcessManager()))
 	}
 
-	return toolsRegistry, execTool
+	return toolsRegistry, execTool, nil
 }
 
 func resolveAgentThinkingLevel(cfg *config.Config, model string) ThinkingLevel {

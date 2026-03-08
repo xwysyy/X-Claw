@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -73,6 +74,26 @@ func TestMemoryStore_CRUDAndContext(t *testing.T) {
 	}
 	if !strings.Contains(ctxText, "Favorite editor: neovim") || !strings.Contains(ctxText, todayNote) {
 		t.Fatalf("GetMemoryContext() = %q, want both long-term and daily note content", ctxText)
+	}
+}
+
+func TestNewMemoryStoreAt_ReportsInitializationFailureClearly(t *testing.T) {
+	root := t.TempDir()
+	blockedParent := filepath.Join(root, "blocked-parent")
+	if err := os.WriteFile(blockedParent, []byte("not-a-dir"), 0o644); err != nil {
+		t.Fatalf("write blocked parent: %v", err)
+	}
+
+	ms := NewMemoryStoreAt(filepath.Join(blockedParent, "memory"))
+	err := ms.WriteLongTerm("# MEMORY\n")
+	if err == nil {
+		t.Fatal("expected initialization failure to be reported")
+	}
+	if !strings.Contains(err.Error(), "failed to initialize memory directory") {
+		t.Fatalf("expected clear init error, got %q", err)
+	}
+	if !errors.Is(err, os.ErrInvalid) && !strings.Contains(err.Error(), blockedParent) {
+		t.Fatalf("expected error to retain root cause details, got %q", err)
 	}
 }
 

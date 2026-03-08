@@ -1,12 +1,47 @@
 package agent
 
 import (
+	"fmt"
 	"os"
+	"os/exec"
 	"slices"
 	"testing"
 
 	"github.com/xwysyy/X-Claw/pkg/config"
 )
+
+func TestNewAgentInstance_ExecInitFailureDoesNotHardExit(t *testing.T) {
+	if os.Getenv("X_CLAW_EXEC_INIT_HELPER") == "1" {
+		cfg := config.DefaultConfig()
+		cfg.Agents.Defaults.Workspace = os.TempDir()
+		cfg.Agents.Defaults.Model = "test-model"
+		cfg.Tools.Exec.Enabled = true
+		cfg.Tools.Exec.Backend = "invalid_backend"
+
+		agent := NewAgentInstance(nil, &cfg.Agents.Defaults, cfg, &mockProvider{})
+		if agent == nil {
+			fmt.Fprintln(os.Stdout, "nil agent")
+			os.Exit(2)
+		}
+		toolsList := agent.Tools.List()
+		if slices.Contains(toolsList, "exec") || slices.Contains(toolsList, "process") {
+			fmt.Fprintf(os.Stdout, "unexpected exec/process in tools list: %v\n", toolsList)
+			os.Exit(3)
+		}
+		if !slices.Contains(toolsList, "read_file") {
+			fmt.Fprintf(os.Stdout, "expected other tools to remain available: %v\n", toolsList)
+			os.Exit(4)
+		}
+		return
+	}
+
+	cmd := exec.Command(os.Args[0], "-test.run=TestNewAgentInstance_ExecInitFailureDoesNotHardExit")
+	cmd.Env = append(os.Environ(), "X_CLAW_EXEC_INIT_HELPER=1")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("subprocess failed: %v\n%s", err, string(output))
+	}
+}
 
 func TestNewAgentInstance_UsesDefaultsTemperatureAndMaxTokens(t *testing.T) {
 	tmpDir, err := os.MkdirTemp("", "agent-instance-test-*")
@@ -159,6 +194,33 @@ func TestNewAgentInstance_ResolveCandidatesFromModelListAlias(t *testing.T) {
 				t.Fatalf("candidate model = %q, want %q", agent.Candidates[0].Model, tt.wantModel)
 			}
 		})
+	}
+}
+
+func TestNewAgentInstance_DisablesExecAndProcessToolsWhenExecInitFails(t *testing.T) {
+	workspace := t.TempDir()
+	cfg := config.DefaultConfig()
+	cfg.Agents.Defaults.Workspace = workspace
+	cfg.Agents.Defaults.Model = "test-model"
+	cfg.Tools.ReadFile.Enabled = true
+	cfg.Tools.Exec.Enabled = true
+	cfg.Tools.Exec.Backend = "invalid_backend"
+
+	provider := &mockProvider{}
+	agent := NewAgentInstance(nil, &cfg.Agents.Defaults, cfg, provider)
+	if agent == nil {
+		t.Fatal("expected agent instance")
+	}
+
+	toolsList := agent.Tools.List()
+	if !slices.Contains(toolsList, "read_file") {
+		t.Fatalf("expected read_file to remain registered, got=%v", toolsList)
+	}
+	if slices.Contains(toolsList, "exec") {
+		t.Fatalf("expected exec tool to be disabled after init failure, got=%v", toolsList)
+	}
+	if slices.Contains(toolsList, "process") {
+		t.Fatalf("expected process tool to be disabled after exec init failure, got=%v", toolsList)
 	}
 }
 

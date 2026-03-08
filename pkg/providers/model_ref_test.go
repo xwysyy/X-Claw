@@ -104,6 +104,25 @@ func TestModelKey(t *testing.T) {
 	}
 }
 
+func TestCanonicalProtocol(t *testing.T) {
+	tests := []struct {
+		input string
+		want  string
+	}{
+		{"", "openai"},
+		{"z.ai", "zhipu"},
+		{"qwen", "qwen"},
+		{"qwen-portal", "qwen"},
+		{"copilot", "github-copilot"},
+	}
+
+	for _, tt := range tests {
+		if got := CanonicalProtocol(tt.input); got != tt.want {
+			t.Fatalf("CanonicalProtocol(%q) = %q, want %q", tt.input, got, tt.want)
+		}
+	}
+}
+
 func TestParseModelRef_ProviderNormalization(t *testing.T) {
 	ref := ParseModelRef("Z.AI/model-x", "default")
 	if ref == nil {

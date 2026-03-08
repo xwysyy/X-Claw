@@ -1,10 +1,12 @@
 package tools
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -903,6 +905,38 @@ func TestExecuteToolCalls_WritesJSONLToolTraceWhenEnabled(t *testing.T) {
 	}
 	if !hasJSON || !hasMD {
 		t.Fatalf("expected both .json and .md snapshots, got entries: %v", entries)
+	}
+}
+
+func TestToolTraceWriter_LogsSyncFailures(t *testing.T) {
+	workspace := t.TempDir()
+	writer := newToolTraceWriter(ToolCallExecutionOptions{
+		Workspace:  workspace,
+		SessionKey: "sess-sync",
+		Trace: ToolTraceOptions{
+			Enabled: true,
+		},
+	}, "test")
+	if writer == nil {
+		t.Fatal("expected trace writer")
+	}
+
+	originalSync := toolTraceSyncFile
+	toolTraceSyncFile = func(_ syncFile) error { return errors.New("simulated sync failure") }
+	defer func() { toolTraceSyncFile = originalSync }()
+
+	var buf bytes.Buffer
+	originalOutput := log.Writer()
+	log.SetOutput(&buf)
+	defer log.SetOutput(originalOutput)
+
+	writer.appendEvent(toolTraceEvent{Type: "tool.start", Tool: "ok", ToolCallID: "tc-sync"})
+
+	if !strings.Contains(buf.String(), "failed to sync events file") {
+		t.Fatalf("expected sync failure to be logged, got %q", buf.String())
+	}
+	if !strings.Contains(buf.String(), "simulated sync failure") {
+		t.Fatalf("expected root cause to be logged, got %q", buf.String())
 	}
 }
 

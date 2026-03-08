@@ -82,14 +82,16 @@ func readJSONLEvents(path string) ([]SessionEvent, error) {
 	buf := make([]byte, 0, 64<<10)
 	scanner.Buffer(buf, 32<<20)
 
+	lineNo := 0
 	for scanner.Scan() {
+		lineNo++
 		line := strings.TrimSpace(scanner.Text())
 		if line == "" {
 			continue
 		}
 		var ev SessionEvent
 		if err := json.Unmarshal([]byte(line), &ev); err != nil {
-			continue
+			return events, fmt.Errorf("invalid jsonl event at line %d: %w", lineNo, err)
 		}
 		events = append(events, ev)
 	}

@@ -63,6 +63,14 @@ type toolTraceWriter struct {
 	mu sync.Mutex
 }
 
+type syncFile interface {
+	Sync() error
+}
+
+var toolTraceSyncFile = func(f syncFile) error {
+	return f.Sync()
+}
+
 type toolTraceEvent struct {
 	Type events.Type `json:"type"`
 
@@ -361,7 +369,12 @@ func (w *toolTraceWriter) appendEvent(event toolTraceEvent) {
 		})
 		return
 	}
-	_ = f.Sync()
+	if err := toolTraceSyncFile(f); err != nil {
+		logger.WarnCF(w.scope, "Tool trace: failed to sync events file", map[string]any{
+			"path": w.eventsPath,
+			"err":  err.Error(),
+		})
+	}
 }
 
 func (w *toolTraceWriter) writeSnapshot(

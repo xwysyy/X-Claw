@@ -13,23 +13,85 @@ import (
 	"strings"
 	"time"
 
+	"github.com/xwysyy/X-Claw/pkg/logger"
 	"github.com/xwysyy/X-Claw/pkg/utils"
 )
 
+func consoleSessionEventsHealthy(path string) bool {
+	f, err := os.Open(path)
+	if err != nil {
+		logger.WarnCF("httpapi", "Skipping console session with unreadable events file", map[string]any{
+			"path":  path,
+			"error": err.Error(),
+		})
+		return false
+	}
+	defer f.Close()
+
+	scanner := bufio.NewScanner(f)
+	buf := make([]byte, 0, 64<<10)
+	scanner.Buffer(buf, 32<<20)
+
+	lineNo := 0
+	for scanner.Scan() {
+		lineNo++
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+		var raw json.RawMessage
+		if err := json.Unmarshal([]byte(line), &raw); err != nil {
+			logger.WarnCF("httpapi", "Skipping console session with corrupt events file", map[string]any{
+				"path":  path,
+				"line":  lineNo,
+				"error": err.Error(),
+			})
+			return false
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		logger.WarnCF("httpapi", "Skipping console session due to events scan failure", map[string]any{
+			"path":  path,
+			"error": err.Error(),
+		})
+		return false
+	}
+	return true
+}
+
 func (h *ConsoleHandler) handleSessions(w http.ResponseWriter, _ *http.Request) {
-	sessionsDir := filepath.Join(h.workspace, "sessions")
+	items, err := listConsoleSessions(h.workspace)
+	if err != nil {
+		h.writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	h.writeJSON(w, http.StatusOK, map[string]any{"ok": true, "items": items})
+}
+
+func listConsoleSessions(workspace string) ([]sessionListItem, error) {
+	sessionsDir := filepath.Join(workspace, "sessions")
 	entries, err := os.ReadDir(sessionsDir)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			h.writeJSON(w, http.StatusOK, map[string]any{"ok": true, "items": []sessionListItem{}})
-			return
+			return []sessionListItem{}, nil
 		}
-		h.writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
-		return
+		return nil, err
 	}
 
 	items := make([]sessionListItem, 0, len(entries))
 	seenBase := make(map[string]struct{}, len(entries))
+	items = appendConsoleMetaSessionItems(items, seenBase, entries, sessionsDir)
+	items = appendConsoleLegacySessionItems(items, seenBase, entries, sessionsDir)
+	sort.Slice(items, func(i, j int) bool {
+		if items[i].Updated == items[j].Updated {
+			return items[i].Key < items[j].Key
+		}
+		return items[i].Updated > items[j].Updated
+	})
+	return items, nil
+}
+
+func appendConsoleMetaSessionItems(items []sessionListItem, seenBase map[string]struct{}, entries []os.DirEntry, sessionsDir string) []sessionListItem {
 	for _, ent := range entries {
 		if ent.IsDir() {
 			continue
@@ -42,44 +104,54 @@ func (h *ConsoleHandler) handleSessions(w http.ResponseWriter, _ *http.Request) 
 		if !strings.HasSuffix(lower, ".meta.json") {
 			continue
 		}
-
-		path := filepath.Join(sessionsDir, name)
-		data, err := os.ReadFile(path)
-		if err != nil {
+		item, base, ok := loadConsoleMetaSessionItem(filepath.Join(sessionsDir, name), name, sessionsDir)
+		if !ok {
 			continue
 		}
-
-		var meta struct {
-			Key     string    `json:"key"`
-			Summary string    `json:"summary,omitempty"`
-			Created time.Time `json:"created"`
-			Updated time.Time `json:"updated"`
-		}
-		if json.Unmarshal(data, &meta) != nil {
-			continue
-		}
-
-		base := strings.TrimSuffix(name, name[len(name)-len(".meta.json"):])
 		if base != "" {
 			seenBase[base] = struct{}{}
 		}
-
-		item := sessionListItem{
-			Key:     strings.TrimSpace(meta.Key),
-			Summary: strings.TrimSpace(meta.Summary),
-			Created: meta.Created.UTC().Format(time.RFC3339Nano),
-			Updated: meta.Updated.UTC().Format(time.RFC3339Nano),
-			File:    filepath.ToSlash(filepath.Join("sessions", name)),
-		}
-		if base != "" {
-			eventsName := base + ".jsonl"
-			if _, err := os.Stat(filepath.Join(sessionsDir, eventsName)); err == nil {
-				item.EventsFile = filepath.ToSlash(filepath.Join("sessions", eventsName))
-			}
-		}
 		items = append(items, item)
 	}
+	return items
+}
 
+func loadConsoleMetaSessionItem(path, name, sessionsDir string) (sessionListItem, string, bool) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return sessionListItem{}, "", false
+	}
+	var meta struct {
+		Key     string    `json:"key"`
+		Summary string    `json:"summary,omitempty"`
+		Created time.Time `json:"created"`
+		Updated time.Time `json:"updated"`
+	}
+	if json.Unmarshal(data, &meta) != nil {
+		return sessionListItem{}, "", false
+	}
+	base := strings.TrimSuffix(name, name[len(name)-len(".meta.json"):])
+	item := sessionListItem{
+		Key:     strings.TrimSpace(meta.Key),
+		Summary: strings.TrimSpace(meta.Summary),
+		Created: meta.Created.UTC().Format(time.RFC3339Nano),
+		Updated: meta.Updated.UTC().Format(time.RFC3339Nano),
+		File:    filepath.ToSlash(filepath.Join("sessions", name)),
+	}
+	if base != "" {
+		eventsName := base + ".jsonl"
+		eventsPath := filepath.Join(sessionsDir, eventsName)
+		if _, err := os.Stat(eventsPath); err == nil {
+			if !consoleSessionEventsHealthy(eventsPath) {
+				return sessionListItem{}, base, false
+			}
+			item.EventsFile = filepath.ToSlash(filepath.Join("sessions", eventsName))
+		}
+	}
+	return item, base, true
+}
+
+func appendConsoleLegacySessionItems(items []sessionListItem, seenBase map[string]struct{}, entries []os.DirEntry, sessionsDir string) []sessionListItem {
 	for _, ent := range entries {
 		if ent.IsDir() {
 			continue
@@ -96,44 +168,44 @@ func (h *ConsoleHandler) handleSessions(w http.ResponseWriter, _ *http.Request) 
 		if _, ok := seenBase[base]; ok {
 			continue
 		}
-
-		path := filepath.Join(sessionsDir, name)
-		data, err := os.ReadFile(path)
-		if err != nil {
+		item, ok := loadConsoleLegacySessionItem(filepath.Join(sessionsDir, name), name, base, sessionsDir)
+		if !ok {
 			continue
-		}
-
-		var legacy struct {
-			Key     string    `json:"key"`
-			Summary string    `json:"summary,omitempty"`
-			Created time.Time `json:"created"`
-			Updated time.Time `json:"updated"`
-		}
-		if json.Unmarshal(data, &legacy) != nil {
-			continue
-		}
-
-		item := sessionListItem{
-			Key:     strings.TrimSpace(legacy.Key),
-			Summary: strings.TrimSpace(legacy.Summary),
-			Created: legacy.Created.UTC().Format(time.RFC3339Nano),
-			Updated: legacy.Updated.UTC().Format(time.RFC3339Nano),
-			File:    filepath.ToSlash(filepath.Join("sessions", name)),
-		}
-		if _, err := os.Stat(filepath.Join(sessionsDir, base+".jsonl")); err == nil {
-			item.EventsFile = filepath.ToSlash(filepath.Join("sessions", base+".jsonl"))
 		}
 		items = append(items, item)
 	}
+	return items
+}
 
-	sort.Slice(items, func(i, j int) bool {
-		if items[i].Updated == items[j].Updated {
-			return items[i].Key < items[j].Key
+func loadConsoleLegacySessionItem(path, name, base, sessionsDir string) (sessionListItem, bool) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return sessionListItem{}, false
+	}
+	var legacy struct {
+		Key     string    `json:"key"`
+		Summary string    `json:"summary,omitempty"`
+		Created time.Time `json:"created"`
+		Updated time.Time `json:"updated"`
+	}
+	if json.Unmarshal(data, &legacy) != nil {
+		return sessionListItem{}, false
+	}
+	item := sessionListItem{
+		Key:     strings.TrimSpace(legacy.Key),
+		Summary: strings.TrimSpace(legacy.Summary),
+		Created: legacy.Created.UTC().Format(time.RFC3339Nano),
+		Updated: legacy.Updated.UTC().Format(time.RFC3339Nano),
+		File:    filepath.ToSlash(filepath.Join("sessions", name)),
+	}
+	eventsPath := filepath.Join(sessionsDir, base+".jsonl")
+	if _, err := os.Stat(eventsPath); err == nil {
+		if !consoleSessionEventsHealthy(eventsPath) {
+			return sessionListItem{}, false
 		}
-		return items[i].Updated > items[j].Updated
-	})
-
-	h.writeJSON(w, http.StatusOK, map[string]any{"ok": true, "items": items})
+		item.EventsFile = filepath.ToSlash(filepath.Join("sessions", base+".jsonl"))
+	}
+	return item, true
 }
 
 type traceListOptions struct {

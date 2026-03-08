@@ -246,6 +246,48 @@ func TestConsoleHandler_SessionsList(t *testing.T) {
 	}
 }
 
+func TestConsoleHandler_SessionsListSkipsCorruptJSONL(t *testing.T) {
+	ws := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(ws, "sessions"), 0o755); err != nil {
+		t.Fatalf("mkdir sessions: %v", err)
+	}
+	meta := `{"key":"feishu:oc_test","summary":"hello","created":"2026-03-03T00:00:00Z","updated":"2026-03-03T00:00:01Z","messages_count":1}`
+	if err := os.WriteFile(filepath.Join(ws, "sessions", "feishu_oc_test.meta.json"), []byte(meta), 0o644); err != nil {
+		t.Fatalf("write session meta: %v", err)
+	}
+	broken := strings.Join([]string{
+		`{"type":"session.message","id":"e1","ts":"2026-03-03T00:00:00Z","ts_ms":0,"session_key":"feishu:oc_test"}`,
+		`{"type":"session.message","id":"e2","ts":"2026-03-03T00:00:01Z","ts_ms":1,"session_key":"feishu:oc_test"`,
+	}, "\n")
+	if err := os.WriteFile(filepath.Join(ws, "sessions", "feishu_oc_test.jsonl"), []byte(broken), 0o644); err != nil {
+		t.Fatalf("write broken session events: %v", err)
+	}
+
+	h := NewConsoleHandler(ConsoleHandlerOptions{Workspace: ws})
+	req := httptest.NewRequest(http.MethodGet, "http://example.com/api/console/sessions", nil)
+	req.RemoteAddr = "127.0.0.1:1234"
+	rr := httptest.NewRecorder()
+
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rr.Code)
+	}
+
+	var payload struct {
+		OK    bool              `json:"ok"`
+		Items []sessionListItem `json:"items"`
+	}
+	if err := json.NewDecoder(rr.Body).Decode(&payload); err != nil {
+		t.Fatalf("decode json: %v", err)
+	}
+	if !payload.OK {
+		t.Fatalf("expected ok=true")
+	}
+	if len(payload.Items) != 0 {
+		t.Fatalf("expected corrupt session to be skipped, got %d items", len(payload.Items))
+	}
+}
+
 func TestConsoleHandler_Tail(t *testing.T) {
 	ws := t.TempDir()
 	traceDir := filepath.Join(ws, ".x-claw", "audit", "runs", "feishu_oc_test")
@@ -279,6 +321,102 @@ func TestConsoleHandler_Tail(t *testing.T) {
 	}
 	if len(payload.Lines) != 1 || strings.TrimSpace(payload.Lines[0]) != "{\"n\":2}" {
 		t.Fatalf("unexpected tail lines: %#v", payload.Lines)
+	}
+}
+
+func TestConsoleHandler_FileDownloadDoesNotExposeInternalErrors(t *testing.T) {
+	oldStat := consoleFileStat
+	consoleFileStat = func(string) (os.FileInfo, error) {
+		return nil, errors.New("simulated stat failure")
+	}
+	t.Cleanup(func() {
+		consoleFileStat = oldStat
+	})
+
+	ws := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(ws, "cron"), 0o755); err != nil {
+		t.Fatalf("mkdir cron: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(ws, "cron", "jobs.json"), []byte(`{"version":1}`), 0o644); err != nil {
+		t.Fatalf("write jobs.json: %v", err)
+	}
+
+	h := NewConsoleHandler(ConsoleHandlerOptions{Workspace: ws})
+	req := httptest.NewRequest(http.MethodGet, "http://example.com/api/console/file?path=cron/jobs.json", nil)
+	req.RemoteAddr = "127.0.0.1:1234"
+	rr := httptest.NewRecorder()
+
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500, got %d", rr.Code)
+	}
+	if strings.Contains(rr.Body.String(), "simulated stat failure") {
+		t.Fatalf("expected stable error surface, got %q", rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), "failed to access file") {
+		t.Fatalf("expected generic file error, got %q", rr.Body.String())
+	}
+}
+
+func TestConsoleHandler_TailDoesNotExposeInternalErrors(t *testing.T) {
+	oldTailLines := consoleTailLines
+	consoleTailLines = func(string, int, int64) ([]string, bool, error) {
+		return nil, false, errors.New("simulated tail failure")
+	}
+	t.Cleanup(func() {
+		consoleTailLines = oldTailLines
+	})
+
+	ws := t.TempDir()
+	traceDir := filepath.Join(ws, ".x-claw", "audit", "runs", "feishu_oc_test")
+	if err := os.MkdirAll(traceDir, 0o755); err != nil {
+		t.Fatalf("mkdir trace: %v", err)
+	}
+	eventsPath := filepath.Join(traceDir, "events.jsonl")
+	if err := os.WriteFile(eventsPath, []byte("line-one\n"), 0o644); err != nil {
+		t.Fatalf("write events: %v", err)
+	}
+
+	h := NewConsoleHandler(ConsoleHandlerOptions{Workspace: ws})
+	req := httptest.NewRequest(http.MethodGet, "http://example.com/api/console/tail?path=.x-claw/audit/runs/feishu_oc_test/events.jsonl&lines=1", nil)
+	req.RemoteAddr = "127.0.0.1:1234"
+	rr := httptest.NewRecorder()
+
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500, got %d", rr.Code)
+	}
+	if strings.Contains(rr.Body.String(), "simulated tail failure") {
+		t.Fatalf("expected stable error surface, got %q", rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), "failed to read file") {
+		t.Fatalf("expected generic tail error, got %q", rr.Body.String())
+	}
+}
+
+func TestConsoleHandler_TailInternalErrorUsesStableMessage(t *testing.T) {
+	ws := t.TempDir()
+	traceDir := filepath.Join(ws, ".x-claw", "audit", "runs", "feishu_oc_test")
+	eventsDir := filepath.Join(traceDir, "events.jsonl")
+	if err := os.MkdirAll(eventsDir, 0o755); err != nil {
+		t.Fatalf("mkdir trace: %v", err)
+	}
+
+	h := NewConsoleHandler(ConsoleHandlerOptions{Workspace: ws})
+	req := httptest.NewRequest(http.MethodGet, "http://example.com/api/console/tail?path=.x-claw/audit/runs/feishu_oc_test/events.jsonl&lines=1", nil)
+	req.RemoteAddr = "127.0.0.1:1234"
+	rr := httptest.NewRecorder()
+
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500, got %d", rr.Code)
+	}
+	body := rr.Body.String()
+	if strings.Contains(strings.ToLower(body), "directory") {
+		t.Fatalf("expected stable error surface, got %q", body)
+	}
+	if !strings.Contains(body, "failed to read file") {
+		t.Fatalf("expected stable error message, got %q", body)
 	}
 }
 
@@ -451,8 +589,11 @@ func TestConsoleHandler_StreamInitialTailReadFailureIsObservable(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)
 	}
-	if !strings.Contains(string(body), "simulated tail failure") {
-		t.Fatalf("expected observable tail failure, got %q", string(body))
+	if strings.Contains(string(body), "simulated tail failure") {
+		t.Fatalf("expected stable error surface, got %q", string(body))
+	}
+	if !strings.Contains(string(body), "stream unavailable") {
+		t.Fatalf("expected generic stream error, got %q", string(body))
 	}
 	if !strings.Contains(string(body), `"ok":false`) {
 		t.Fatalf("expected error payload, got %q", string(body))
@@ -683,6 +824,41 @@ func TestResumeLastTaskHandler_Timeout(t *testing.T) {
 	}
 	if resp.Error != "resume timeout" {
 		t.Fatalf("expected error=%q, got %q", "resume timeout", resp.Error)
+	}
+}
+
+func TestResumeLastTaskHandler_LoopbackOnlyWhenNoAPIKey(t *testing.T) {
+	h := NewResumeLastTaskHandler(ResumeLastTaskHandlerOptions{
+		Resume: func(_ctx context.Context) (any, string, error) {
+			return map[string]any{"id": "r1"}, "ok", nil
+		},
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "http://example.com/api/resume_last_task", strings.NewReader(`{}`))
+	req.RemoteAddr = "203.0.113.10:1234"
+	rr := httptest.NewRecorder()
+
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", rr.Code)
+	}
+}
+
+func TestResumeLastTaskHandler_APIKeyRequiredWhenConfigured(t *testing.T) {
+	h := NewResumeLastTaskHandler(ResumeLastTaskHandlerOptions{
+		APIKey: "secret",
+		Resume: func(_ctx context.Context) (any, string, error) {
+			return map[string]any{"id": "r1"}, "ok", nil
+		},
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "http://example.com/api/resume_last_task", strings.NewReader(`{}`))
+	req.RemoteAddr = "127.0.0.1:1234"
+	rr := httptest.NewRecorder()
+
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", rr.Code)
 	}
 }
 
