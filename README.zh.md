@@ -1,10 +1,20 @@
-# X-Claw
+<p align="right">
+  <a href="README.md">English</a>
+</p>
 
 <p align="center">
   <img src="assets/logo.svg" alt="X-Claw logo" width="120" />
 </p>
 
-[English](README.md)
+<h1 align="center">X-Claw</h1>
+
+<p align="center">
+  <a href="https://pkg.go.dev/github.com/xwysyy/X-Claw"><img src="https://pkg.go.dev/badge/github.com/xwysyy/X-Claw.svg" alt="Go Reference"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/xwysyy/X-Claw" alt="License"></a>
+  <img src="https://img.shields.io/badge/Go-1.25+-00ADD8?logo=go&logoColor=white" alt="Go 1.25+">
+  <img src="https://img.shields.io/badge/platform-linux-brightgreen?logo=linux&logoColor=white" alt="Platform">
+  <a href="https://github.com/xwysyy/X-Claw/commits/main"><img src="https://img.shields.io/github/last-commit/xwysyy/X-Claw" alt="Last Commit"></a>
+</p>
 
 X-Claw 是一个使用 Go 编写的轻量级个人 AI 助手 Gateway 服务，支持多渠道接入、工具调用、语义记忆和定时任务。
 
